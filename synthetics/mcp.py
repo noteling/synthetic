@@ -11,6 +11,7 @@ import os
 import re
 import sys
 
+from . import sharedstatus
 from .store import Store
 
 
@@ -192,6 +193,10 @@ def validate_value(name, field, value):
             validate_value("%s.%s" % (name, key), properties[key], item)
 
 
+# VIS C1: tools whose success rewrites <home>/shared/status.json.
+STATUS_TOOLS = frozenset({"work_put", "question_ask", "question_close", "question_resolve", "question_relays"})
+
+
 class Server:
     def __init__(self, store, run_id=None):
         self.store = store
@@ -218,6 +223,8 @@ class Server:
             self.receipt(name, arguments, success=False, error=str(exc))
             raise
         self.receipt(name, arguments, success=True)
+        if name in STATUS_TOOLS:
+            sharedstatus.write(self.store)  # VIS C1: Lookout sees in-session work/question changes; never fails the call
         if self.store.resolved and isinstance(value, dict):
             # Backlog 24 (K6): show the full IDs short prefixes were expanded to.
             value = dict(value, resolved=dict(self.store.resolved))

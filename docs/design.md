@@ -128,6 +128,10 @@ fairness guarantee yet.
   lessons by status, history, open Board backlog), rewritten after each write; a failed rewrite never fails the
   write. `synthetics project view P [--as-of N] [--out F | --write]` renders it; a session needs read access.
   Corrections go through the log, never into the view.
+- Lookout (VIS P1, `docs/lookout.md`): `synthetics web` serves a read-only page on 127.0.0.1 from shared records
+  only: project and company `log.jsonl`, launchd, `runtime.state.json`, the pid in `worker.lock`, and one engine-written
+  export per home, `<home>/shared/status.json` (session state, work titles and waiting_for, Docket, run id/status/cost;
+  never descriptions, notes, memories, views, summaries or bodies). It never opens a SQLite database.
 - Completion evidence refs are an own-home ID, an absolute file path, `receipt:` or
   `https://`. As a last fallback, a ref with none of those prefixes that names an existing
   file relative to the home's workspace (never the process cwd; `../` and symlinks resolved

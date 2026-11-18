@@ -1,0 +1,83 @@
+# Lookout: the human visibility page (VIS P1)
+
+Lookout is a local, read-only web page. It shows a human what the team is doing without
+Telegram and without access to any employee's private store.
+
+```sh
+python3 -m synthetics --home HOME web [--root ROOT] [--port 8765]
+```
+
+`ROOT` is the directory that holds the employee homes, `projects/` and `company/` (default: the
+directory holding `--home`). The server binds to `127.0.0.1` only; any other `--bind` is
+refused. It answers GET and HEAD only; other methods get 405. Every page is rendered from the
+records on each request, nothing is cached or written, and every value is HTML-escaped. The
+pages need no JavaScript, and a Content-Security-Policy forbids scripts.
+
+## Pages
+
+| Path | Shows |
+|---|---|
+| `/` | Team: one block per employee home with the three liveness states, work (title, status, priority, waiting_for, published), waiting-on-David asks (Docket), open questions (first line), last 5 sessions (id, status, times, cost, failed tool count). Then other people from the company log, then loaded adapters. |
+| `/p/<project>/threads` | Captured conversations, newest first. |
+| `/p/<project>/thread/<key>` | One conversation, both directions in time order, with sender, recipient, time, auth, channel and which home captured it. |
+| `/p/<project>/board` | Board backlog (with blocked_by) and posts. |
+| `/p/<project>/memory` | The M21 project memory view (projectview.render). |
+
+A project with no `log.jsonl` (for example an empty `noteling` store) renders as empty.
+
+## Boundary
+
+Lookout reads only these files. It never opens a SQLite database.
+
+| Shown | Read from | Never shown (why) |
+|---|---|---|
+| Message text, sender, recipient, time, auth, direction | `projects/<p>/log.jsonl` sources (bytes of redacted sources are dropped) | Events and outbox rows in home databases: private; only tagged or bound captures are shared |
+| Intents, lessons, history, provenance flags | `projects/<p>/log.jsonl` via projectview.render | — |
+| Board backlog and posts | `projects/<p>/log.jsonl` (`backlog`, `post`) | — |
+| Profiles, roles, aliases | `company/log.jsonl` (company fold) | Private views and self notes (`<home>/roster/`) |
+| Work title, status, priority, waiting_for, wake_at, waiting question IDs | `<home>/shared/status.json` | Work description and note |
+| Docket asks (first line, ages, ack, hop, blocked works) | `<home>/shared/status.json` | The rest of the question body |
+| Session id, status, times, cost, event count, failed tool count | `<home>/shared/status.json` | Run summary, error text, transcripts (`<home>/runs/`) |
+| Liveness | `launchctl list`, `<home>/runtime.state.json`, `<home>/worker.lock` (its pid text; no lock is taken), `<home>/shared/status.json` | — |
+
+Lookout never reads a home's `state.sqlite3`, `roster/`, `runs/`, `workspace/`, `humans.json` or
+`runtime.json`. Memories, views, self notes and run summaries are never shown.
+
+## The one file added under a home
+
+`<home>/shared/status.json` is the only file VIS adds under an employee home. The engine writes it
+from the home's own database (`synthetics/sharedstatus.py`), replacing it atomically with mode 0600:
+
+- when the worker starts (after recovering interrupted runs);
+- when a session starts, and when it finishes or fails;
+- when admission pauses (daily limit, recent failures) or the pause ends;
+- after a session's successful `work_put`, `question_ask`, `question_close`, `question_resolve` or
+  `question_relays` (the MCP server writes it; it keeps the pause the engine last wrote).
+
+A failed write never fails the operation that triggered it; the next trigger rewrites the file.
+Its fields (v1; fields are added, never renamed): `v, employee, name, role, written_at, pid,
+session {state, run, started_at, paused}, works[], docket, docket_error, questions_open[], runs[]
+(newest 10), outbox_stuck {count, older_than_48h}`.
+
+## Liveness: three states
+
+1. **Service.** Loaded or not loaded in launchd (by the label in `runtime.state.json`), its launchd
+   pid, and the pid in `worker.lock` with whether that process is alive. A disagreement is shown as
+   a mismatch.
+2. **Session.** `running` when status.json says running and the worker is alive; `suspect` when it
+   has been running longer than the effective timeout plus 5 minutes; `stale (worker not running)`
+   when the worker is gone or status.json was written before the worker started; otherwise `idle`
+   or `paused`. A stale file is never shown as running.
+3. **Waiting on.** Each waiting work's waiting_for, wake_at and open question IDs, plus any pause.
+
+Adapters (`com.synthetics.adapter.*`, Fieldpost, Fieldstone, Telegram) show the service state only.
+
+## Threads
+
+Messages are deduplicated by message id (a message is often captured by one side only, sometimes
+by both). Sender and recipient addresses are resolved to company person IDs (`codex-manager` →
+Codex's ID). A conversation is the source's `thread` when it has one. Otherwise it is the
+unordered sender/recipient pair plus the set of `work-id`/`for-work` headers, so both directions
+of an exchange about the same pair of works join one conversation. Otherwise it is the pair alone.
+Outgoing captures carry no recipient; when the recipient's inbound copy was captured too, its
+headers fill it in, otherwise the recipient shows as `?`.

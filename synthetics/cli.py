@@ -497,6 +497,10 @@ def parser():
     sub.add_parser("status", help="current work, pending questions, and platform limitations")
     sub.add_parser("stop", help="stop the active local worker without discarding work")
     sub.add_parser("outbox", help="read outgoing messages and questions (local delivery)")
+    web_parser = sub.add_parser("web", help="Lookout: read-only team page on 127.0.0.1 from shared records (docs/lookout.md)")
+    web_parser.add_argument("--root", help="homes root (default: the directory holding --home)")
+    web_parser.add_argument("--port", type=int, default=8765)
+    web_parser.add_argument("--bind", default="127.0.0.1", help="only 127.0.0.1 is accepted")
     docket_parser = sub.add_parser("docket", help="read-only: this home's open questions to a person, oldest first")
     docket_parser.add_argument("--person", help="person ID, name or alias (default: humans.json default_human)")
     docket_parser.add_argument("--format", choices=["text", "json"], default="text")
@@ -805,6 +809,19 @@ def main(argv=None):
             return 0
         if args.command == "status":
             output(status(home))
+            return 0
+        if args.command == "web":
+            from . import lookout
+            root = Path(args.root).expanduser().resolve() if args.root else home.parent
+            if args.bind != lookout.BIND:
+                raise ValueError("Lookout binds to 127.0.0.1 only.")
+            def ready(server):
+                print(json.dumps({"lookout": "http://%s:%d/" % server.server_address[:2], "root": str(root)}),
+                      file=sys.stderr, flush=True)
+            try:
+                lookout.serve(root, port=args.port, ready=ready)
+            except KeyboardInterrupt:
+                pass
             return 0
         if args.command == "channel" and args.channel_command == "provision":
             _refuse_in_session("channel provision")

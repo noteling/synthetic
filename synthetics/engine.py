@@ -10,6 +10,7 @@ from pathlib import Path
 
 from . import board
 from . import capture
+from . import sharedstatus
 from .store import Store, WorkerHeld
 
 
@@ -160,6 +161,7 @@ class Engine:
         if pause != self._last_pause:
             self._last_pause = pause
             self.on_update(dict(pause, type="paused"))
+            sharedstatus.write(store, paused=pause)  # VIS C1: Lookout shows the pause
         if not self.limit_notify:
             return
         if pause["reason"] == "daily_limit":
@@ -214,6 +216,8 @@ class Engine:
                 return None  # M28 D10c: a delegated worker op holds the idle boundary
             pause = self.pause_state(store)
             if pause is None:
+                if self._last_pause is not None:
+                    sharedstatus.write(store, paused=None)  # VIS: the pause ended
                 self._last_pause = None
                 try:
                     run = store.run_begin()
@@ -238,6 +242,7 @@ class Engine:
         try:
             with Store(self.home) as store:
                 context = store.context(run_id=run["id"])
+                sharedstatus.write(store, paused=self._last_pause)  # VIS: session running
             # Inputs that arrive after this snapshot belong to the next session.
             events = run["events"]
             context["events"] = events
@@ -248,6 +253,7 @@ class Engine:
             result = self.brain.run(context)
             with Store(self.home) as store:
                 finished = store.run_finish(run["id"], result.summary, cost=result.cost)
+                sharedstatus.write(store, paused=self._last_pause)  # VIS: session ended, idle
                 try:
                     board.advance(store, run["id"], finished=True)
                 except Exception:  # noqa: BLE001 - cursor stays; entries show again next time
@@ -261,6 +267,7 @@ class Engine:
             # Tool effects may already exist. Failed input is retained for reconciliation.
             with Store(self.home) as store:
                 store.run_fail(run["id"], str(error) or type(error).__name__, cost=getattr(error, "cost", None))
+                sharedstatus.write(store, paused=self._last_pause)  # VIS: session ended (failed), idle
                 try:
                     board.advance(store, run["id"], finished=False)
                 except Exception:  # noqa: BLE001
@@ -316,6 +323,7 @@ class Engine:
                     retry_seconds = state["effective"]["retry"]
                     self.on_update(dict(type="runtime", **{k: state[k] for k in (
                         "pid", "label", "argv", "effective", "source", "sha", "request_id", "problems", "probation")}))
+                sharedstatus.write(store, paused=None)  # VIS C1: written at worker start (after recovery)
             self.on_update({"type": "listening", "home": str(self.home), "recovered": recovered})
             failures = 0
             while not stop.is_set():
