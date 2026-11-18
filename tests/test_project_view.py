@@ -99,6 +99,36 @@ class ProjectViewTest(unittest.TestCase):
                 self.assertIn(flag, line, line)
         self.assertNotIn("observed-only", text.split("## Lessons", 1)[1])
 
+    def test_refinement_and_context_shown_under_claims_and_open_points_to_it(self):
+        # Proposal: "refines pm-x#c1: c1 stays current and the view shows the refinement under it". A stale `open`
+        # note must point at the later record instead of reading as still undecided (M21 phase 3 demo finding).
+        s1 = self.add([src("David: create the repo")])["ids"][0]
+        old = intent([s1], [("c1", "create repo"), ("c2", "push code")], "repo")
+        old["body"]["open"] = "licence undecided"
+        r1 = self.add([old])["ids"][0]
+        s2 = self.add([src("David: Yes, do that")])["ids"][0]
+        ctx = src("secretary: recommend public, Apache-2.0")
+        ctx["body"]["origin"]["role"] = "secretary"
+        s3 = self.add([ctx])["ids"][0]
+        new = intent([s2], [("c1", "public under Apache-2.0")], "public")
+        new["body"]["scope_note"] = "David said only yes; meaning from the secretary's recommendation"
+        r2 = self.add([new])["ids"][0]
+        self.add([{"kind": "relate", "body": {"rel": "refines", "from": f"{r2}#c1", "target": f"{r1}#c1"}},
+                  {"kind": "relate", "body": {"rel": "context", "from": f"{r2}#c1", "target": s3}}])
+        lines = self.read_view().splitlines()
+        i = next(n for n, l in enumerate(lines) if l.startswith("- c1: create repo"))
+        self.assertTrue(lines[i + 1].startswith(f"  - refined by {r2}#c1: public under Apache-2.0"), lines[i + 1])
+        self.assertIn(f"later records on these claims: {r2}", next(l for l in lines if l.startswith("- open:")))
+        j = next(n for n, l in enumerate(lines) if l.startswith("- c1: public under Apache-2.0"))
+        self.assertEqual(lines[j + 1], f"  - refines: {r1}#c1")
+        self.assertTrue(lines[j + 2].startswith(f"  - context: {s3} (source seq "), lines[j + 2])
+        self.assertTrue(lines[j + 2].endswith(", secretary)"))
+        self.assertIn("- scope: David said only yes; meaning from the secretary's recommendation", lines)
+        self.assertNotIn("c1: create repo", self.read_view().split("## History", 1)[1])  # refines keeps it current
+        retract = [e for e in self.store.entries() if e["kind"] == "relate" and e["body"]["rel"] == "refines"][0]
+        self.add([{"kind": "retract", "body": {"target": retract["id"], "reason": "test"}}])
+        self.assertNotIn("refined by", self.read_view())
+
     def test_lessons_grouped_by_status(self):
         s1, _ = self.seed()
         a = self.add([lesson("keep sums", "freeze by sums", s1)])["ids"][0]

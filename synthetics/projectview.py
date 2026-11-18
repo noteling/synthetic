@@ -26,6 +26,28 @@ def _md(text: str) -> str:
     return text.replace("|", "\\|")
 
 
+_INCOMING = {"refines": "refined by", "carries": "carried by", "context": "context for", "disputes": "disputed by"}
+
+
+def _links(ref: str, claims: dict, records: dict, *, sources: dict, outgoing: dict) -> list[str]:
+    """Lines shown under a claim: later records that refine/carry/dispute it, and what it cites as context
+    (proposal: "the view shows the refinement under it")."""
+    out = []
+    for link in claims[ref]["links"]:
+        if link["rel"] == "revises":
+            continue  # shown as "now reads" / History
+        other = claims.get(link["from"])
+        rec = records.get(link["from"].split("#")[0])
+        flags = f" [{', '.join(rec['flags'])}]" if rec and rec["flags"] else ""
+        text = f": {_md(_cut(other['text'], TEXT))}" if other else ""
+        out.append(f"  - {_INCOMING.get(link['rel'], link['rel'])} {link['from']}{text}{flags}")
+    for rel, target in outgoing.get(ref, ()):
+        src = sources.get(target)
+        what = f" (source seq {src['seq']}, {src['role']})" if src else ""
+        out.append(f"  - {rel}: {target}{what}")
+    return out
+
+
 def render(entries: list[dict], project: str, source_bytes: Callable[[str], bytes | None] | None = None) -> str:
     """Render the view of ``entries`` (a log prefix). ``source_bytes(id)`` supplies quote excerpts; it returns None
     for a source redacted since (an as-of view must not show bytes that are gone now)."""
@@ -36,6 +58,11 @@ def render(entries: list[dict], project: str, source_bytes: Callable[[str], byte
     intents = sorted((r for r in records.values() if r["kind"] == "intent"), key=lambda r: r["seq"])
     lessons = sorted((r for r in records.values() if r["kind"] == "lesson"), key=lambda r: r["seq"])
     current = [r for r in intents if r["status"] == "current"]
+    # Relations leaving a claim (e.g. `context` to a source); incoming ones are in claims[ref]["links"].
+    outgoing: dict[str, list[tuple[str, str]]] = {}
+    for e in projectlog.active_entries(entries):
+        if e["kind"] == "relate" and e["body"].get("rel") != "revises":
+            outgoing.setdefault(e["body"].get("from", ""), []).append((e["body"]["rel"], e["body"].get("target", "")))
     counts = {s: sum(1 for r in lessons if r["status"] == s) for s in ("accepted", "proposed", "disputed")}
     out: list[str] = []
     w = out.append
@@ -70,8 +97,17 @@ def render(entries: list[dict], project: str, source_bytes: Callable[[str], byte
                 head = claims.get(claim["head"])
                 text = _md(_cut(head["text"], TEXT)) if head else "(revising claim not in log)"
                 w(f"- {cid} now reads ({claim['head']}): {text}{flags}")
+            for line in _links(ref, claims, records, sources=state["sources"], outgoing=outgoing):
+                w(line)
         if rec.get("open"):
-            w(f"- open: {_md(_cut(rec['open'], 300))}")
+            later = sorted({link["from"].split("#")[0] for cid in rec["claims"]
+                            for link in claims[f"{rec['id']}#{cid}"]["links"]
+                            if link["rel"] in ("refines", "revises", "carries")} - {rec["id"]})
+            note = f" (written at seq {rec['seq']}; later records on these claims: {', '.join(later)})" if later else ""
+            w(f"- open: {_md(_cut(rec['open'], 300))}{note}")
+        scope = bodies.get(rec["id"], {}).get("scope_note")
+        if scope:
+            w(f"- scope: {_md(_cut(scope, 300))}")
         for sid in rec["sources"]:
             src = state["sources"].get(sid)
             if src is None:
