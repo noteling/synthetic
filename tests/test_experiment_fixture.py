@@ -31,7 +31,7 @@ class FixtureTests(unittest.TestCase):
                      "sqlro.py"):
             (self.source / "synthetics" / name).write_text((ROOT / "synthetics" / name).read_text())
         (self.source / "synthetics" / "prompts" / "employee.md").write_text(
-            "Persistent employee.\n- Original directory /Users/david/projects/synthetics is special.\n")
+            "Persistent employee.\n- Original directory /Users/someone/projects/synthetics is special.\n")
         (self.source / "tests" / "test_example.py").write_text("# neutral source test\n")
         (self.source / "pyproject.toml").write_text('[project]\nname = "fixture"\n')
         # These must never be copied, even when present alongside the source.
@@ -61,7 +61,7 @@ class FixtureTests(unittest.TestCase):
         for path in Path(fixture["workspace"]).rglob("*"):
             if path.is_file():
                 text = path.read_text()
-                self.assertNotIn("/Users/david/", text)
+                self.assertNotIn("/Users/someone/", text)
                 self.assertNotIn("secret incident narrative", text)
                 self.assertNotIn("private history", text)
                 self.assertNotIn("private incident notes", text)

@@ -11,11 +11,13 @@ later. Noteling and Stand have been studied as reference projects and remain unt
 ## Start an employee
 
 Requires macOS or Linux, Python 3.9+, and a logged-in Claude CLI. There are no Python
-runtime dependencies. Run from this repository, or install with `pip install -e .`.
+runtime dependencies. Run from this repository, or install with `pip install .`
+(`pip install -e .` needs pip 21.3 or newer; the stock macOS Command Line Tools pip is older).
 
 Choose an employee home. Every command below uses the same directory. `--home` comes
-before the subcommand. Without it, the default is `~/.synthetics/rowan`; setting
-`SYNTHETICS_HOME` is another way to choose the employee.
+before the subcommand. Without it, the default is `~/.synthetics/default`; setting
+`SYNTHETICS_HOME` is another way to choose the employee. The examples below use a
+home for an example employee called Rowan.
 
 ```sh
 python3 -m synthetics --home .synthetics/rowan init \
@@ -89,9 +91,11 @@ This is the integration boundary for chat, email, repository, and meeting adapte
 The CLI itself is a trusted local input interface: a supplied sender label is not
 authentication. External delivery requires a separately configured adapter.
 
-## Talk through Telegram
+## Optional: talk through Telegram
 
-A dedicated bot can deliver private messages to an existing employee inbox and send
+Telegram is one optional adapter, not a requirement. Any channel can reach an
+employee through the transport-neutral [channel contract](docs/channel-contract.md)
+(`feed`/`ingest` in, outbox and delivery acknowledgements out). A dedicated bot can deliver private messages to an existing employee inbox and send
 the employee's addressed messages and questions back to its paired human. The
 employee worker must also run to read input and act. Idle transport polling does
 not call a model. Identity, memory and both sides of the conversation remain in
@@ -177,7 +181,8 @@ copy before actual maintenance. See [platform assumptions](docs/platform-assumpt
 Inputs received during reasoning are retained for the next session. This increment
 does not interrupt a model turn to deliver them immediately. Questions and answers
 are therefore asynchronous. The service must be running for timers to execute; due
-timers are reconciled on restart. It is not installed as an OS background service.
+timers are reconciled on restart. On macOS, `worker install` can run it as a launchd
+agent (see the [channel contract](docs/channel-contract.md)).
 
 The runtime records durable state changes, MCP call receipts, and model summaries.
 Built-in shell/file tool outcomes are not independently journaled. Model judgment,
@@ -204,11 +209,21 @@ of the automated test suite. The report describes exactly what was exercised.
 [OpenClaw comparison and open gaps](docs/openclaw-gap-review.md) records existing
 overlap, unresolved product capabilities, and the source-discovery gap to investigate.
 
+## Not yet included
+
+This repository holds the core engine, CLI, MCP server, docs and tests. Not yet
+included: the internal tools that relay messages between employees (Fieldpost) and
+the operator console (Fieldstone), a team installer / `team init`, and support for
+employees on different computers working as one team.
+
 ## The employee maintaining this project
+
+The paragraph below describes the example host this project is developed on.
 
 A second employee, Vesper, maintains Synthetics itself and actively investigates
 missing capabilities. It has its own memory, source working copy, and permission
-to create internal projects beneath `/Users/david/projects/synthetics-internal`.
+to create internal projects beneath a separate internal-tools directory
+(`~/projects/synthetics-internal` on the example host).
 It chooses the names of those tools. See [its remit and operation](docs/maintainer.md).
 
 Operator-provisioned access is durable and visible to the employee:
@@ -227,7 +242,7 @@ The code is licensed under the [Apache License 2.0](LICENSE) (© 2026 Yang Lu; s
 databases and channel keys — are private operational data and are never part of
 this repository.
 
-Some instructions, defaults and docs still name this development host's paths
-(for example `/Users/david/projects/...` in `synthetics/prompts/employee.md` and
-`AGENTS.md`). They are host assumptions that keep existing protected-path rules
-in force, not credentials; making them portable is tracked as follow-up work.
+Host-specific protected paths are not in the shipped prompt. They come from host
+rules: the company policy `host.rules` and an optional untracked
+`<home>/prompt.local.md` (see docs/authority.md). `synthetics --home H system-prompt`
+shows the prompt a home's next session will get.

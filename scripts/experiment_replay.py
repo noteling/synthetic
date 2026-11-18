@@ -12,6 +12,7 @@ import hashlib
 import json
 from pathlib import Path
 import random
+import re
 import shutil
 import sys
 import uuid
@@ -71,22 +72,35 @@ def _manifest(root):
             for path in sorted(root.rglob("*")) if path.is_file()}
 
 
-def _sanitize(text):
-    replacements = {
-        "/Users/david/projects/synthetics-internal/fieldstone": "${FIXTURE_WORKSPACE}/fieldstone",
-        "/Users/david/projects/synthetics/.synthetics/rowan": "${FIXTURE_EMPLOYEE_HOME}",
-        "/Users/david/projects/synthetics/.synthetics/internal-maintainer": "${FIXTURE_EMPLOYEE_HOME}",
-        "/Users/david/projects/synthetics": "${FIXTURE_WORKSPACE}/project",
+HOME_PATH = re.compile(r"/(?:Users|home)/[^/\s]+/")
+
+
+def default_rewrites(root=ROOT):
+    """Original host paths -> fixture placeholders, derived from this checkout's location.
+
+    The checkout's sibling ``synthetics-internal`` holds the internal tools. Pass
+    explicit ``--rewrite ORIGINAL=PLACEHOLDER`` pairs when the originals live elsewhere.
+    """
+    root = Path(root)
+    return {
+        str(root.parent / "synthetics-internal" / "fieldstone"): "${FIXTURE_WORKSPACE}/fieldstone",
+        str(root / ".synthetics" / "rowan"): "${FIXTURE_EMPLOYEE_HOME}",
+        str(root / ".synthetics" / "internal-maintainer"): "${FIXTURE_EMPLOYEE_HOME}",
+        str(root): "${FIXTURE_WORKSPACE}/project",
         "~/.synthetics/rowan": "${FIXTURE_EMPLOYEE_HOME}",
     }
-    for original, assigned in replacements.items():
-        text = text.replace(original, assigned)
-    if "/Users/david/" in text:
+
+
+def _sanitize(text, rewrites=None):
+    rewrites = default_rewrites() if rewrites is None else rewrites
+    for original in sorted(rewrites, key=len, reverse=True):
+        text = text.replace(original, rewrites[original])
+    if HOME_PATH.search(text):
         raise ValueError("Unmapped original path in replay source")
     return text
 
 
-def freeze_fieldstone(source, destination):
+def freeze_fieldstone(source, destination, rewrites=None):
     """Copy only first-increment source/docs, excluding later review metadata."""
     source, destination = Path(source).resolve(), Path(destination).resolve()
     if destination.exists():
@@ -102,7 +116,7 @@ def freeze_fieldstone(source, destination):
         text = path.read_text(encoding="utf-8")
         if "sourcefeed" in text.lower() or "watchfeed" in text.lower():
             raise ValueError("Fieldstone source contains a later remedy")
-        material[relative] = _sanitize(text)
+        material[relative] = _sanitize(text, rewrites)
     destination.mkdir(parents=True)
     for relative, text in material.items():
         path = destination / relative
@@ -111,10 +125,10 @@ def freeze_fieldstone(source, destination):
     return _manifest(destination)
 
 
-def pristine_review(path):
+def pristine_review(path, rewrites=None):
     """Keep the originally published review; remove all observation/follow-up text."""
     text = Path(path).read_text(encoding="utf-8")
-    return _sanitize(text.split("\n## Discovery observation:", 1)[0].rstrip() + "\n")
+    return _sanitize(text.split("\n## Discovery observation:", 1)[0].rstrip() + "\n", rewrites)
 
 
 def _observation():
@@ -203,7 +217,7 @@ def manager_case(home, artifact, worker_result, context, source_prompt):
     return task
 
 
-def initialize(output, source=None, fieldstone_source=None, review_path=None):
+def initialize(output, source=None, fieldstone_source=None, review_path=None, rewrites=None):
     """Freeze inputs and prepare one matched pair; perform no employee execution."""
     output = Path(output).resolve()
     source = Path(source or ROOT / ".synthetics/internal-maintainer/workspace/synthetics").resolve()
@@ -214,8 +228,8 @@ def initialize(output, source=None, fieldstone_source=None, review_path=None):
     output.mkdir(parents=True)
     engine = create_fixture(output / "frozen" / "engine-fixture", source)
     frozen_fieldstone = output / "frozen" / "fieldstone"
-    fieldstone_manifest = freeze_fieldstone(fieldstone_source, frozen_fieldstone)
-    review_text = pristine_review(review_path)
+    fieldstone_manifest = freeze_fieldstone(fieldstone_source, frozen_fieldstone, rewrites)
+    review_text = pristine_review(review_path, rewrites)
     (output / "frozen/gap-review.md").write_text(review_text, encoding="utf-8")
     conditions = ["baseline", "context"]
     random.Random(20261115).shuffle(conditions)
@@ -268,8 +282,19 @@ def main(argv=None):
     parser.add_argument("--source", type=Path)
     parser.add_argument("--fieldstone-source", type=Path)
     parser.add_argument("--review", type=Path)
+    parser.add_argument("--rewrite", action="append", metavar="ORIGINAL=PLACEHOLDER",
+                        help="replace an original host path in frozen text (repeatable; "
+                             "default: paths derived from this checkout)")
     args = parser.parse_args(argv)
-    protocol = initialize(args.output, args.source, args.fieldstone_source, args.review)
+    rewrites = None
+    if args.rewrite:
+        rewrites = {}
+        for pair in args.rewrite:
+            original, sep, placeholder = pair.partition("=")
+            if not sep or not original:
+                parser.error("--rewrite needs ORIGINAL=PLACEHOLDER")
+            rewrites[original] = placeholder
+    protocol = initialize(args.output, args.source, args.fieldstone_source, args.review, rewrites)
     print(json.dumps({"prepared_only": True, "cases": protocol["cases"], "output": str(args.output.resolve())}))
 
 

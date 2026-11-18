@@ -1055,7 +1055,7 @@ class WarrantTest(unittest.TestCase):
                   "limit.raise": {"homes": ["employees"], "max_usd_per_day": 150,
                                   "durations": ["today", "persistent"]},
                   "adapter.manage": {"labels": ["com.synthetics.*"]},
-                  "kit.run": {"kits": ["/Users/david/projects/synthetics/.synthetics/management"]}}
+                  "kit.run": {"kits": ["/srv/example-team/.synthetics/management"]}}
     BOOT_EXCERPT = ('the manager already has my authorization for this internal work, so it should handle it '
                     'directly instead of asking for a separate approval')
 
@@ -1069,13 +1069,13 @@ class WarrantTest(unittest.TestCase):
         with Store(home) as s:
             s.channel_register("codex-desktop", Store.credential_hash(desk), ["codex-desktop"], "test",
                                routes=["david"])
-            like_a114 = s.feed("david", body, source="codex-desktop", external_id="a114", credential=desk)["id"]
-            like_6751 = s.feed("david", body, source="telegram", external_id="6751")["id"]  # auth null
-            self.assertIsNone(s.event_get(like_6751)["auth"])
+            like_authed = s.feed("david", body, source="codex-desktop", external_id="authed-1", credential=desk)["id"]
+            like_unauthed = s.feed("david", body, source="telegram", external_id="unauthed-1")["id"]  # auth null
+            self.assertIsNone(s.event_get(like_unauthed)["auth"])
         argv = ["codex", "authority", "delegate", "--grantee", self.ids["codex"],
                 *sum((["--action", a] for a in self.BOOT_ACTIONS), []), "--scope", json.dumps(self.BOOT_SCOPE),
                 "--excerpt", self.BOOT_EXCERPT, "--by", "operator", "--key", "m28-bootstrap-root"]
-        self.refused("not_human_source", *argv, "--source", like_6751, "--context-ref", like_a114)
+        self.refused("not_human_source", *argv, "--source", like_unauthed, "--context-ref", like_authed)
 
         def fingerprint():
             import hashlib
@@ -1085,16 +1085,16 @@ class WarrantTest(unittest.TestCase):
             return [(p.name, hashlib.sha256(p.read_bytes()).hexdigest()) for p in files], audit_n
 
         before = fingerprint()
-        code, out, err = self.cli(*argv, "--source", like_a114, "--context-ref", like_6751, "--dry-run")
+        code, out, err = self.cli(*argv, "--source", like_authed, "--context-ref", like_unauthed, "--dry-run")
         self.assertEqual(code, 0, err)
         self.assertTrue(out["dry_run"])
         self.assertEqual(fingerprint(), before)  # --dry-run writes nothing (company log or home audit)
         self.assertEqual(self.company()["delegations"], {})
-        rid = self.ok(*argv, "--source", like_a114, "--context-ref", like_6751)["ids"][0]
+        rid = self.ok(*argv, "--source", like_authed, "--context-ref", like_unauthed)["ids"][0]
         d = self.company()["delegations"][rid]
-        self.assertEqual([x["event"] for x in d["sources"]], [like_a114])
+        self.assertEqual([x["event"] for x in d["sources"]], [like_authed])
         self.assertEqual(d["sources"][0]["auth"]["channel"], "codex-desktop")
-        self.assertEqual(d["context_refs"], [like_6751])
+        self.assertEqual(d["context_refs"], [like_unauthed])
 
 
     # ---- M28 P1b: limit.raise / limit.resume (D7) ----

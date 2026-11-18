@@ -9,6 +9,7 @@ paid model. It deliberately does not supply a source collector.
 import hashlib
 import json
 from pathlib import Path
+import re
 import shutil
 
 
@@ -236,7 +237,7 @@ def _source_files(source_root):
 def _clean_prompt(text):
     lines = []
     for line in text.splitlines():
-        if "/Users/david/" in line:
+        if re.search(r"/(?:Users|home)/[^/\s]+/", line):
             lines.append(EMPLOYEE_SCOPE)
         else:
             lines.append(line)

@@ -25,7 +25,7 @@ and the hashes of the files supplied. Employee state, credentials, generated fil
 and the original repository's Git metadata are excluded.
 
 David authorized creating and maintaining internal projects beneath
-`/Users/david/projects/synthetics-internal`. This is recorded as an operator-provisioned
+`~/projects/synthetics-internal` (example host). This is recorded as an operator-provisioned
 write grant. Changes to the Synthetics engine are developed in the employee's own
 working copy and remain reviewable before integration into the running engine.
 Noteling and Stand's original working trees remain outside its write assignment.

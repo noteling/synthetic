@@ -27,9 +27,10 @@ the employee's lifetime. Read README.md and docs/design.md before changing behav
 Python 3.9+ and its standard library. Run `python3 -m unittest discover -v`.
 Use temporary employee homes for tests. Never run tests against someone's live memory.
 Claude CLI is an execution adapter, not the durable store. See `python3 -m synthetics --help`.
-On this host, worker jobs use `/Users/david/.local/bin/claude` (verified native
-2.1.326). The Homebrew 2.1.311 executable was blocked before startup on November
-17; preserve the explicit native executable and PATH in future deployments.
+Example host configuration (the development Mac, not a requirement): worker jobs use
+the native `~/.local/bin/claude` (verified 2.1.326). There the Homebrew 2.1.311
+executable was blocked before startup on November 17; preserve an explicit native
+executable and PATH in deployments.
 
 ## Management loop
 

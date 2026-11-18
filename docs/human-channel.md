@@ -25,7 +25,7 @@ handoffs happen during active desktop turns; an automatic background desktop
 bridge is not installed. Imported past discussion is reference history rather
 than a new instruction or proof of a delivered message.
 
-Worker launch agents on this host explicitly use `/Users/david/.local/bin/claude`.
+Worker launch agents on the example host explicitly use `~/.local/bin/claude`.
 The native 2.1.326 installation passed signature, official checksum, and startup
 checks when the Homebrew 2.1.311 executable was blocked before application startup
 on November 17. Preserve that executable choice when replacing worker settings.

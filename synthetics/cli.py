@@ -418,8 +418,8 @@ def _delegated_project_grant(store, args):
 def parser():
     p = argparse.ArgumentParser(description="A continuing digital employee: identity, memory, and work.")
     p.add_argument("--version", action="version", version=__version__)
-    p.add_argument("--home", default=os.environ.get("SYNTHETICS_HOME", str(Path.home() / ".synthetics" / "rowan")),
-                   help="employee home (default: SYNTHETICS_HOME or ~/.synthetics/rowan)")
+    p.add_argument("--home", default=os.environ.get("SYNTHETICS_HOME", str(Path.home() / ".synthetics" / "default")),
+                   help="employee home (default: SYNTHETICS_HOME or ~/.synthetics/default)")
     sub = p.add_subparsers(dest="command", required=True)
     from .telegram_cli import add_commands
     from .install import add_commands as add_install_commands

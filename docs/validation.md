@@ -94,7 +94,7 @@ its source copy excludes employee state, generated files, credentials, and origi
 Git metadata, with supplied file hashes recorded in SOURCE.json.
 
 It was given the standing role of maintaining Synthetics and actively finding real
-missing capabilities, a write grant for `/Users/david/projects/synthetics-internal`,
+missing capabilities, a write grant for `~/projects/synthetics-internal`,
 initial investigation/implementation assignments, and a scheduled next-day review.
 It independently identified interface/conversation/overview/resource gaps and selected
 Fieldstone as the name for its first internal tool. Its implementation work is recorded

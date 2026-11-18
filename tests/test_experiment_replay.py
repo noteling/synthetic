@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from scripts.experiment_replay import TASK, initialize, manager_case
+from scripts.experiment_replay import TASK, _sanitize, default_rewrites, initialize, manager_case
 from synthetics.store import Store
 
 
@@ -31,7 +31,7 @@ class ReplayPreparationTests(unittest.TestCase):
             path = self.fieldstone / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("# first increment\n")
-        (self.fieldstone / "README.md").write_text("Run /Users/david/projects/synthetics-internal/fieldstone with /Users/david/projects/synthetics.\n")
+        (self.fieldstone / "README.md").write_text("Run /Users/someone/projects/synthetics-internal/fieldstone with /Users/someone/projects/synthetics.\n")
         (self.fieldstone / "review-source.json").write_text("SECRET_METADATA")
         (self.fieldstone / "later-feedback.md").write_text("SECRET_FEEDBACK")
         self.review = self.base / "review.md"
@@ -39,7 +39,8 @@ class ReplayPreparationTests(unittest.TestCase):
         self.output = self.base / "replay"
 
     def prepare(self):
-        return initialize(self.output, self.source, self.fieldstone, self.review)
+        return initialize(self.output, self.source, self.fieldstone, self.review,
+                          default_rewrites("/Users/someone/projects/synthetics"))
 
     def test_pair_has_identical_common_material_and_no_later_feedback(self):
         protocol = self.prepare()
@@ -56,7 +57,7 @@ class ReplayPreparationTests(unittest.TestCase):
                 if path.is_file():
                     text = path.read_text()
                     self.assertNotIn("SECRET_", text)
-                    self.assertNotIn("/Users/david/", text)
+                    self.assertNotIn("/Users/someone/", text)
         self.assertEqual(protocol["worker_turns"], 2)
 
     def test_diagnostic_assignment_and_waiting_commitment_are_preserved(self):
@@ -104,6 +105,11 @@ class ReplayPreparationTests(unittest.TestCase):
         (self.fieldstone / "fieldstone/backend.py").write_text("def sourcefeed(): pass\n")
         with self.assertRaisesRegex(ValueError, "later remedy"):
             self.prepare()
+
+    def test_unmapped_home_path_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "Unmapped original path"):
+            _sanitize("see /Users/other/projects/x\n", {})
+        self.assertEqual(_sanitize("in /srv/a/b\n", {"/srv/a": "${X}"}), "in ${X}/b\n")
 
 
 if __name__ == "__main__":

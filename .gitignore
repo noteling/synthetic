@@ -8,8 +8,7 @@ dist/
 .env
 .DS_Store
 .pytest_cache/
-
-# Private or host-local material kept out of version control (PUB-1)
-experiments/
-docs/proposals/project-memory.md
 prompt.local.md
+# PUB-1 G1: private originals kept in the canonical checkout, never published
+/experiments/
+/docs/proposals/project-memory.md
