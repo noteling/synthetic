@@ -1,0 +1,233 @@
+# Synthetics
+
+A digital employee with its own identity, memory, working relationships, communication,
+and continuing work. The employee exists across projects and model sessions.
+
+The first increment is a local work engine and CLI. Claude Code supplies reasoning
+and local execution; Synthetics owns durable identity, memory, inbox/outbox,
+assignments, questions, follow-ups, and recovery. Voice and desktop interaction come
+later. Noteling and Stand have been studied as reference projects and remain untouched.
+
+## Start an employee
+
+Requires macOS or Linux, Python 3.9+, and a logged-in Claude CLI. There are no Python
+runtime dependencies. Run from this repository, or install with `pip install -e .`.
+
+Choose an employee home. Every command below uses the same directory. `--home` comes
+before the subcommand. Without it, the default is `~/.synthetics/rowan`; setting
+`SYNTHETICS_HOME` is another way to choose the employee.
+
+```sh
+python3 -m synthetics --home .synthetics/rowan init \
+  --name Rowan --role "Noteling maintainer" \
+  --purpose "Learn the product, maintain it thoughtfully, investigate independently, and collaborate with David."
+
+python3 -m synthetics --home .synthetics/rowan run
+python3 -m synthetics --home .synthetics/rowan outbox
+```
+
+Initialization creates a permanent employee ID, a self entity, an initial colleague
+(`david`), a workspace, and an onboarding message. The first reasoning session can
+introduce the employee and ask what it needs. Initial project ignorance is expected.
+No Noteling checkout or company accounts are assigned automatically.
+
+The output includes queued messages and questions. Reply to a question using its
+`question_id` from the outbox (or its `id` from status.questions):
+
+```sh
+python3 -m synthetics --home .synthetics/rowan feed \
+  "Let us start with the release process. I decide when a prepared release is published." \
+  --from david --reply-to question-REPLACE_WITH_ID
+
+python3 -m synthetics --home .synthetics/rowan run --turns 3
+```
+
+The sender must match the question's recipient. Answers are recorded as source events
+and wake the linked work. A new conversation that is not answering a question can
+simply omit `--reply-to`.
+
+## Stay available and feed in signals
+
+```sh
+python3 -m synthetics --home .synthetics/rowan serve
+```
+
+Leave this process running and communicate from another terminal. It calls the model
+when events, ready work, or due follow-ups need attention. Idle polling does not call
+the model. Ready work continues without another prompt. Waiting work resumes on a
+correlated answer or a scheduled wake-up. Ctrl-C and SIGTERM stop the worker and its
+model process; restarting keeps the employee's state.
+
+`status` reports whether a worker is running. From another terminal,
+`python3 -m synthetics --home .synthetics/rowan stop` requests a graceful stop.
+
+```sh
+python3 -m synthetics --home .synthetics/rowan feed \
+  "A colleague reported that a hint moved after a page reload. Investigate once a working copy is assigned." \
+  --from david --thread hint-reload --external-id example-message-1
+
+python3 -m synthetics --home .synthetics/rowan work add \
+  "Learn Noteling's architecture" --description "Read the assigned sources and ask about undocumented decisions."
+
+python3 -m synthetics --home .synthetics/rowan status
+python3 -m synthetics --home .synthetics/rowan outbox
+```
+
+For another program, `ingest` reads one event object per line and returns one result
+per line. For example:
+
+```json
+{"sender":"david","body":"Here is the answer to your question.","source":"manual","external_id":"kt-2","thread":"onboarding","reply_to":"question-...","occurred_at":"2026-11-15T15:00:00-05:00"}
+```
+
+Required fields are `sender` and `body`. Other fields are optional. The original event
+time, receipt time, sender, thread, source, and reply correlation remain available.
+Repeated `source` + `external_id` deliveries return the same event; conflicting reuse
+is rejected. Feed this JSON through stdin to `python3 -m synthetics --home ... ingest`.
+
+This is the integration boundary for chat, email, repository, and meeting adapters.
+The CLI itself is a trusted local input interface: a supplied sender label is not
+authentication. External delivery requires a separately configured adapter.
+
+## Talk through Telegram
+
+A dedicated bot can deliver private messages to an existing employee inbox and send
+the employee's addressed messages and questions back to its paired human. The
+employee worker must also run to read input and act. Idle transport polling does
+not call a model. Identity, memory and both sides of the conversation remain in
+Synthetics across restarts.
+
+Create a bot through Telegram's `@BotFather`, save its token in a local file with
+permissions `600`, then configure an existing employee:
+
+```sh
+python3 -m synthetics --home EMPLOYEE_HOME telegram init \
+  --token-file /absolute/private/token-file --thread david-conversation
+python3 -m synthetics --home EMPLOYEE_HOME telegram serve
+```
+
+Open the one-time pairing link printed by the adapter. A display name or an arbitrary
+first message cannot claim the human identity. Keep the worker running with `serve`
+in another terminal. On macOS, stop the foreground adapter before installing it:
+
+```sh
+python3 -m synthetics --home EMPLOYEE_HOME telegram install --with-worker
+python3 -m synthetics --home EMPLOYEE_HOME telegram status
+python3 -m synthetics --home EMPLOYEE_HOME thread david-conversation
+```
+
+The launch agents continue after the desktop UI closes, in the logged-in macOS user
+session. A sleeping/offline Mac remains unavailable. The worker retains its bounded
+failure stop; it does not endlessly restart failed model calls. `telegram stop
+--with-worker` stops these services for the current login session.
+
+To continue a saved Codex conversation, use `handoff-codex` before pairing and bind
+Telegram to the returned local thread ID. This is a sourced handoff into the same
+durable employee identity, using a new headless work session. It does not attach
+to the running desktop model. See [human conversations](docs/human-channel.md) for
+history, delivery, hosting and provider limits.
+
+## Inspect memory and work
+
+```sh
+python3 -m synthetics --home .synthetics/rowan entities
+python3 -m synthetics --home .synthetics/rowan recall "release"
+python3 -m synthetics --home .synthetics/rowan history "release"
+python3 -m synthetics --home .synthetics/rowan work list
+python3 -m synthetics --home .synthetics/rowan runs
+python3 -m synthetics --home .synthetics/rowan audit
+```
+
+Memory records connect a subject entity to a named relationship or property, a value,
+kind, and source. Kinds distinguish facts, beliefs, preferences, and procedures.
+Corrections supersede older records without losing their history. The employee can
+look up processed source events long after the originating work session ended.
+The first implementation uses explicit records and text search; it has no embeddings
+or graph database. The snapshot pins self memories and makes truncation visible.
+
+Work can be `ready`, `waiting`, `done`, or `cancelled`. A note carries progress,
+evidence, uncertainty, and what comes next. Questions and messages use stable operation
+keys to reconcile retries. A final model response alone does not finish an assignment
+or save what the employee learned: its durable tools do that.
+
+## Execution and limits
+
+`run` executes at most one model session unless `--turns N` is supplied. `serve`
+continues until stopped. Each model session defaults to Claude Opus 5.5
+(`claude-opus-5-5`), a five-minute timeout, and a $100 API-equivalent usage cap.
+Opus 5.5 requires Claude Code 2.1.280 or newer. Override with `--model`,
+`--timeout`, and `--budget`. The dollar cap uses Claude CLI's token-cost estimate;
+it is not a subscription charge or a change to the account's billing settings.
+These limits are per session, not a total daemon budget. Failed sessions
+retain inputs, back off for 60 seconds, and stop the worker after three consecutive
+failures. Model usage may consume the host's subscription or API allocation.
+
+The model receives the employee context and an MCP server with memory, work,
+communication, and reminder operations. It also has Claude's Read, Write, Edit,
+Grep, Glob, and Bash tools for local work. User/project Claude settings, skills,
+browser integration, and unrelated MCP servers are excluded. Authentication still
+uses the host's Claude installation.
+
+**This is trusted local execution under the host account. The workspace is not an OS
+sandbox.** The employee is instructed to keep artifacts in its workspace and to leave
+the original Noteling and Stand checkouts unchanged. No separate OS, repository,
+email, or directory-service account is provisioned yet. Assign a separate working
+copy before actual maintenance. See [platform assumptions](docs/platform-assumptions.md).
+
+Inputs received during reasoning are retained for the next session. This increment
+does not interrupt a model turn to deliver them immediately. Questions and answers
+are therefore asynchronous. The service must be running for timers to execute; due
+timers are reconciled on restart. It is not installed as an OS background service.
+
+The runtime records durable state changes, MCP call receipts, and model summaries.
+Built-in shell/file tool outcomes are not independently journaled. Model judgment,
+truthful reporting, and useful prioritization are capabilities to evaluate through actual work. Database
+recovery cannot prove that an arbitrary Bash or external effect happened exactly once.
+
+## Development
+
+```sh
+python3 -m unittest discover -v
+```
+
+The automated suite uses temporary employee homes, fake model processes, and a real
+MCP subprocess. It covers restart/continuation, cross-project memory, questions and
+answers, historical evidence, duplicate events, interrupted sessions, stale process
+fencing, timers, idle behavior, process cleanup, and CLI communication.
+
+An optional real-model exercise is `python3 scripts/live_acceptance.py --home PATH`.
+It creates a separate test employee and consumes Claude usage. It never runs as part
+of the automated test suite. The report describes exactly what was exercised.
+
+[Design](docs/design.md) · [Platform assumptions](docs/platform-assumptions.md) · [Validation](docs/validation.md)
+
+[OpenClaw comparison and open gaps](docs/openclaw-gap-review.md) records existing
+overlap, unresolved product capabilities, and the source-discovery gap to investigate.
+
+## The employee maintaining this project
+
+A second employee, Vesper, maintains Synthetics itself and actively investigates
+missing capabilities. It has its own memory, source working copy, and permission
+to create internal projects beneath `/Users/david/projects/synthetics-internal`.
+It chooses the names of those tools. See [its remit and operation](docs/maintainer.md).
+
+Operator-provisioned access is durable and visible to the employee:
+
+```sh
+python3 -m synthetics --home .synthetics/internal-maintainer access list
+```
+
+`access grant` and `access revoke` manage intended scope. These declarations guide
+the employee and Claude's directory setup; they do not implement an OS sandbox.
+
+## License
+
+The code is licensed under the [Apache License 2.0](LICENSE) (© 2026 Yang Lu; see
+[NOTICE](NOTICE)). Employee homes under `.synthetics/` — memories, transcripts,
+databases and channel keys — are private operational data and are never part of
+this repository.
+
+Some instructions, defaults and docs still name this development host's paths
+(for example `/Users/david/projects/...` in `synthetics/prompts/employee.md` and
+`AGENTS.md`). They are host assumptions that keep existing protected-path rules
+in force, not credentials; making them portable is tracked as follow-up work.

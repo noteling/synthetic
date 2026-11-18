@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.synthetics/
+build/
+dist/
+.env
+.DS_Store
+.pytest_cache/
+
+# Private or host-local material kept out of version control (PUB-1)
+experiments/
+docs/proposals/project-memory.md
+prompt.local.md

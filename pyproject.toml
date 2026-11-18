@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "synthetics"
+version = "0.1.0"
+description = "Identity, memory, communication, and continuing work for digital employees"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+dependencies = []
+
+[project.scripts]
+synthetics = "synthetics.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["synthetics*"]
+
+[tool.setuptools.package-data]
+synthetics = ["prompts/*.md"]
