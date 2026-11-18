@@ -126,10 +126,15 @@ def build(store, person=None, now=None):
             age_minutes=delivered_age if acked else asked_age, ack=ack, routes=routes,
             stuck=message.get("id") in stuck, origin_work_id=question.get("work_id"),
             works=[dict(id=wid, title=works[wid].get("title", ""), status=works[wid]["status"],
-                        published=works[wid].get("publish") or None) for wid in sorted(linked)]))
+                        published=works[wid].get("publish") or None) for wid in sorted(linked)],
+            # P1b (additive fields): what this question carries onward, and its hop as last reported to me.
+            carries=[dict(question_id=link["question_id"], asker=link["asker"],
+                          link_auth=(link.get("link_auth") or {}).get("channel")) for link in question.get("relays") or []],
+            hop=store.hop_label(question), hop_since=question.get("hop_since")))
     items.sort(key=lambda item: (item["asked_at"] or "", item["question_id"]))
     return dict(v=VERSION, person=pid, addresses=names, home=store.identity()["id"],
-                generated_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"), count=len(items), items=items)
+                generated_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"), count=len(items), items=items,
+                relay_owed=store.relay_owed(now))
 
 
 def render(view):
@@ -145,10 +150,22 @@ def render(view):
         if item["stuck"]:
             when += "  [outbox stuck: %s]" % item["delivery"]
         lines.append(when)
+        if item["hop"]:
+            lines.append("   now: %s since %s" % (item["hop"], _short(item["hop_since"])))
         if item["works"]:
             lines.append("   blocks: " + "; ".join("%s %s" % (w["id"], w["title"]) for w in item["works"]))
         else:
             lines.append("   blocks: no waiting work (origin %s)" % (item["origin_work_id"] or "none"))
+        for link in item["carries"]:
+            lines.append("   carries: %s from %s%s" % (link["question_id"], link["asker"],
+                                                      "" if link["link_auth"] else " (link auth null)"))
     if not view["items"]:
         lines.append("(nothing open)")
+    owed = view.get("relay_owed") or []
+    if owed:
+        lines.append("Relay owed (answered, not yet passed on):")
+        for item in owed:
+            lines.append("- %s to %s, answered %s (%s) via %s" % (
+                item["question_id"], item["asker"], _short(item["answered_at"]), _age(item["age_minutes"]),
+                item["via"]))
     return "\n".join(lines)

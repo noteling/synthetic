@@ -47,6 +47,9 @@ class PrivacyTest(unittest.TestCase):
         self.assertIn("Public title", reader)
         self.assertIn("Public title", read)
         for blob in (dump, reader, read):
+            # Docket P1b (Codex Q2): the question ID may leave only as a blocked_by "<ID> <hop>" line.
+            self.assertNotIn("SECRET-QUESTION-BODY", blob)
+            blob = blob.replace("%s queued" % q["id"], "")
             for secret in ("SECRET-DESC", "SECRET-NOTE", "SECRET-QUESTION-BODY", q["id"],
                            "waiting_question_ids", "waiting_question_id", '"note"', '"description"'):
                 self.assertNotIn(secret, blob)

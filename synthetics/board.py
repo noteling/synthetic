@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 from . import capture
@@ -34,7 +35,32 @@ def _cut(text: str, limit: int) -> str:
     return data[:utf8_cut(data, limit)].decode("utf-8")
 
 
-def projection(work: dict) -> dict:
+BLOCKED_BY = re.compile(r"question-[0-9a-f]{32} [a-z0-9@._:-]{1,80}")
+
+
+def blocked_by(store, work: dict) -> list:
+    """Docket P1b (Q2): "<question ID> <hop>" for each open question a waiting work links, never its body.
+
+    hop = the recipient's last reported hop (with-david, answered-pending-relay, with-manager) when one has
+    arrived, else with-<address> once delivered, else queued."""
+    if store is None or work.get("status") != "waiting":
+        return []
+    out = []
+    for qid in store._linked_ids(work):
+        question = store._find("questions", qid)
+        if not question or question.get("status") != "open":
+            continue
+        hop = store.hop_label(question)
+        if not hop:
+            message = store._find("messages", question.get("message_id") or "") or {}
+            hop = "with-%s" % question["to"] if store.delivery_summary(message) == "delivered" else "queued"
+        line = "%s %s" % (qid, re.sub(r"[^a-z0-9@._:-]", "-", hop.lower())[:80])
+        if BLOCKED_BY.fullmatch(line):
+            out.append(line)
+    return out[:POST_LIST_MAX]
+
+
+def projection(work: dict, store=None) -> dict:
     """The only fields of a work that ever leave the owner's home."""
     refs = [item.get("ref") for item in (work.get("evidence") or [])
             if isinstance(item, dict) and isinstance(item.get("ref"), str) and item.get("ref")]
@@ -42,6 +68,9 @@ def projection(work: dict) -> dict:
             "origin": work.get("origin"), "status": work["status"],
             "waiting_for": _cut(work.get("waiting_for") or "", BACKLOG_WAITING_MAX),
             "evidence": [_cut(r, 200) for r in refs[-POST_LIST_MAX:]], "priority": int(work.get("priority") or 0)}
+    blockers = blocked_by(store, work)
+    if blockers:  # absent when empty, so rows of works without linked questions keep their hash
+        body["blocked_by"] = blockers
     return body
 
 
@@ -107,7 +136,7 @@ def publish_drain(store, opener=None, backoff: float = 0.0) -> dict:
             body = dict(projection(work), status="unpublished", waiting_for="", evidence=[])
             steps.append((pub["project"], body, "unpublished", None))
         if target:
-            body = projection(work)
+            body = projection(work, store)
             h = projection_hash(body)
             if pub.get("project") != target or pub.get("hash") != h:
                 steps.append((target, body, h, target))

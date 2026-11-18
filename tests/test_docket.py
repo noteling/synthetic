@@ -184,10 +184,12 @@ class DocketViewTests(_Base):
     def test_stable_fields_and_no_foreign_or_view_data(self):
         self.store.question_ask("david", "Q?", key="q")
         view = self.store.docket()
-        self.assertEqual(set(view), {"v", "person", "addresses", "home", "generated_at", "count", "items", "text"})
+        self.assertEqual(set(view), {"v", "person", "addresses", "home", "generated_at", "count", "items", "text",
+                                     "relay_owed"})  # P1b: additive
         self.assertEqual(set(view["items"][0]), {
             "question_id", "summary", "to", "to_id", "asked_at", "asked_age_minutes", "delivery", "delivered_at",
-            "delivered_age_minutes", "age_from", "age_minutes", "ack", "routes", "stuck", "origin_work_id", "works"})
+            "delivered_age_minutes", "age_from", "age_minutes", "ack", "routes", "stuck", "origin_work_id", "works",
+            "carries", "hop", "hop_since"})  # P1b: additive, v1 fields unchanged
         self.assertEqual(view["home"], self.store.identity()["id"])
         # C5: a sibling home's questions and this home's private views never appear.
         other = Store(self.root / "rowan")

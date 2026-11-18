@@ -231,6 +231,20 @@ failed (retryable) → pending after 60 s, attempt + 1
 - When should you ack `uncertain`? When the provider call timed out or its
   answer was lost: you do not know whether the human received it.
 
+### 4.1 Hop notices (`kind: "hop"`, Docket P1b)
+
+A store queues `kind: "hop"` rows by itself (never a session) when a question it
+was asked is carried onward: the recipient asked someone else with `relays`,
+that onward question was answered, or it was withdrawn. The row adds a
+structured `"hop": {"question_id": <asker's question>, "hop":
+"with-person|answered-pending-relay|with-manager", "person", "since", "via":
+<the onward question>}`; `body` is only a fixed rendering of those fields.
+Deliver it only into the asker's store with `Store.question_hop` after checking
+that the asker asked `question_id` of this sender (Fieldpost: its correlation
+table). It is never an inbox event, never wakes work and never answers. An
+adapter that does not support hops acks `failed` (non-retryable); it must not
+deliver one as a message.
+
 Receipts are free text supplied by the adapter (e.g. `telegram:chat:ids`,
 `file:<sha256>`). A receipt reference cited as work evidence counts at most as
 *attempted* unless it is corroborated (M22).

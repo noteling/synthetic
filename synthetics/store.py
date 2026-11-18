@@ -282,7 +282,20 @@ class Store:
         self.db.execute("INSERT INTO %s(id,data) VALUES (?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data" % table,
                         (record["id"], data))
         self._audit(action, record["id"], record)
+        if self._touches_board(table, record, action):
+            # Docket P1b: blocked_by follows question hops and delivery, and asking/answering changes a work's
+            # status without work_put; board.publish_drain reconciles on the engine's next step.
+            self.db.execute("INSERT INTO capture_meta(k,v) VALUES ('publish_dirty','1') "
+                            "ON CONFLICT(k) DO UPDATE SET v='1'")
         return record
+
+    @staticmethod
+    def _touches_board(table, record, action):
+        if table == "works":
+            return action != "work.published" and bool(record.get("publish") or record.get("published"))
+        if table == "questions":
+            return True
+        return table == "messages" and bool(record.get("question_id"))
 
     def _audit(self, action, record_id, data):
         self.db.execute("INSERT INTO audit(at,action,record_id,data) VALUES (?,?,?,?)",
@@ -1005,7 +1018,7 @@ class Store:
         return self.work_list("ready")
 
     def _send(self, to, body, work_id, key, question, thread=None, in_reply_to=None, recipient_work_id=None,
-              project=None, work_ids=None):
+              project=None, work_ids=None, relays=None):
         to, body, key = _text(to, "to"), _text(body, "body"), _text(key, "key")
         work_id = self._resolve(work_id, "works")
         in_reply_to = self._resolve(in_reply_to)  # own message/question/event; recipient_work_id never (K5)
@@ -1024,6 +1037,13 @@ class Store:
             payload["work_ids"] = resolved
             if work_id is None:
                 work_id = payload["work_id"] = resolved[0]
+        if relays is not None:
+            # Docket P1b (§1a): asker-side IDs of received questions this question carries onward.
+            if not question:
+                raise ValueError("relays applies to questions only.")
+            if not isinstance(relays, list) or not relays:
+                raise ValueError("relays must be a non-empty list of question IDs from received messages.")
+            payload["relays"] = list(dict.fromkeys(_text(item, "relays item") for item in relays))
         if project is not None:
             # M21 phase 2 (D3.1 item 2): one project tag, carried to the recipient as structured data. The sender
             # must hold a write grant on it; its own body is captured into P as direction "out".
@@ -1063,6 +1083,7 @@ class Store:
             work = works[0] if works else None
             if question and any(item["status"] in ("done", "cancelled") for item in works):
                 raise ValueError("Cannot block finished work with a question.")
+            links = [self._relay_source(item) for item in payload.get("relays") or []]
             now = timestamp()
             question_id = "question-" + uuid.uuid4().hex if question else None
             message = dict(payload, id="message-" + uuid.uuid4().hex, sender=self.identity()["id"],
@@ -1071,7 +1092,10 @@ class Store:
             if question:
                 result = dict(payload, id=question_id, message_id=message["id"], created_at=now,
                               status="open", answer_event_id=None)
+                if links:
+                    result["relays"] = links
                 self._save("questions", result, "question.asked")
+                self._queue_hops(result, "with-person", now)
                 for work in works:
                     # M27 (iii): re-asking the same canonical recipient supersedes that link; questions to other
                     # recipients stay linked, so any of their answers wakes the work. Superseded questions stay open.
@@ -1099,9 +1123,9 @@ class Store:
         return result
 
     def question_ask(self, to, body, work_id=None, key=None, thread=None, in_reply_to=None, recipient_work_id=None,
-                     project=None, work_ids=None):
+                     project=None, work_ids=None, relays=None):
         return self._with_route(self._send(to, body, work_id, key, True, thread, in_reply_to, recipient_work_id,
-                                           project, work_ids))
+                                           project, work_ids, relays))
 
     def message_send(self, to, body, work_id=None, key=None, thread=None, in_reply_to=None, recipient_work_id=None,
                      project=None):
@@ -1194,6 +1218,165 @@ class Store:
                                  % (question_id, current, to_id))
             question.update(to_id=to_id, routed_by=routed_by, routed_at=timestamp())
             return self._save("questions", question, "question.routed")
+
+    # -- Docket P1b: relay links and hop notices (design §1, Codex rulings Q1/Q2, C2/C4) --
+
+    HOPS = ("with-manager", "with-person", "answered-pending-relay")
+    RELAY_SOURCES = ("fieldpost",)  # C2: Fieldpost-sourced events may carry auth null (pre-M22 backfill)
+
+    @staticmethod
+    def _headers(body):
+        """The provenance header block of a relayed event body ("key: value" lines before the first ---)."""
+        headers = {}
+        for line in (body or "").splitlines():
+            if line.strip() == "---":
+                break
+            key, sep, value = line.partition(":")
+            if sep:
+                headers.setdefault(key.strip(), value.strip())
+        return headers
+
+    def _relay_source(self, question_id):
+        """The received event that carried `question_id` (the asker's ID) into this home, as a relay link.
+
+        It must be a message whose header names that question and comes from an authenticated channel, or from
+        Fieldpost with auth null (C2: link_auth null, shown that way). Anything else is unknown_relay."""
+        question_id = _text(question_id, "relays item")
+        if not re.fullmatch(r"question-[0-9a-f]{32}", question_id):
+            raise ValueError("unknown_relay: %s is not a full question ID (question-<32 hex>) from a received "
+                             "message's question-id: header." % question_id)
+        me = self.identity()["id"]
+        found = None
+        for row in self.db.execute("SELECT data FROM events ORDER BY seq"):
+            event = json.loads(row["data"])
+            if event.get("kind") != "message" or event.get("sender") in (None, me):
+                continue
+            if self._headers(event.get("body")).get("question-id") != question_id:
+                continue
+            if event.get("auth") is None and event.get("source") not in self.RELAY_SOURCES:
+                continue
+            found = event
+        if found is None:
+            raise ValueError("unknown_relay: no received message in this home carries question %s from an "
+                             "authenticated channel (or Fieldpost)." % question_id)
+        return dict(question_id=question_id, asker=found["sender"], event_id=found["id"],
+                    link_auth=found.get("auth"))
+
+    def _queue_hop(self, question, link, hop, now):
+        """Q1: the store queues one structured hop notice to the original asker, in the caller's transaction.
+        No free text: the body is a fixed rendering of the fields, and Fieldpost delivers only `hop`."""
+        person = self._recipient(question) if hop == "with-person" else None
+        notice = dict(question_id=link["question_id"], hop=hop, person=person, since=now, via=question["id"])
+        body = "hop: %s %s%s since %s via %s" % (link["question_id"], hop, " " + person if person else "", now,
+                                                 question["id"])
+        message = dict(id="message-" + uuid.uuid4().hex, to=link["asker"], body=body, work_id=None,
+                       sender=self.identity()["id"], kind="hop", question_id=None, hop=notice, created_at=now)
+        self._save("messages", message, "outbox.queued")
+        return message
+
+    def _queue_hops(self, question, hop, now, links=None):
+        for link in links if links is not None else question.get("relays") or []:
+            self._queue_hop(question, link, hop, now)
+
+    def question_relays(self, question_id, add):
+        """Link already-received questions (asker-side IDs) to my own question, which then carries them onward.
+
+        The question must be mine and open or answered (an answered one owes the relay: answered-pending-relay).
+        Each new link queues one hop notice to its asker. Audited as question.relays."""
+        question_id = self._resolve(_text(question_id, "question_id"), "questions")
+        if not isinstance(add, list) or not add:
+            raise ValueError("add must be a non-empty list of question IDs from received messages.")
+        with self._tx():
+            question = self._get("questions", question_id)
+            asked = self._find("messages", question.get("message_id") or "")
+            if asked is not None and asked.get("sender") not in (None, self.identity()["id"]):
+                raise ValueError("Only the asker can add relay links to a question.")
+            if question["status"] == "withdrawn":
+                raise ValueError("Question %s is withdrawn; it carries nothing onward." % question_id)
+            links = list(question.get("relays") or [])
+            have = {link["question_id"] for link in links}
+            new = []
+            for item in add:
+                link = self._relay_source(item)
+                if link["question_id"] not in have:
+                    have.add(link["question_id"])
+                    new.append(link)
+            if not new:
+                return question
+            question["relays"] = links + new
+            self._save("questions", question, "question.relays")
+            hop = "with-person" if question["status"] == "open" else "answered-pending-relay"
+            self._queue_hops(question, hop, timestamp(), new)
+            return question
+
+    def question_hop(self, question_id, hop, since, via, sender, person=None):
+        """Adapter/CLI only (like question_routed): record where my open question now is, as reported by its
+        recipient. Never wakes work, never answers, never changes status (C4). Idempotent on (via, hop); a
+        notice older than the current hop is ignored. A notice from anyone but the recipient, or for a question
+        that is not open, is hop_rejected and changes nothing (C2). Audited as question.hop."""
+        if self.run_id is not None:
+            raise ValueError("Hop notices are adapter operations, not model tools.")
+        question_id, sender = _text(question_id, "question_id"), _text(sender, "sender")
+        via, since = _text(via, "via"), timestamp(_text(since, "since"))
+        if hop not in self.HOPS:
+            raise ValueError("hop_rejected: hop must be one of %s." % (self.HOPS,))
+        if (hop == "with-person") != bool(person):
+            raise ValueError("hop_rejected: person is required for with-person and only for it.")
+        with self._tx():
+            question = self._find("questions", question_id)
+            if question is None:
+                raise ValueError("hop_rejected: no question %s in this home." % question_id)
+            if sender not in (question["to"], question.get("to_id")):
+                raise ValueError("hop_rejected: %s is not the recipient of %s." % (sender, question_id))
+            if question["status"] != "open":
+                raise ValueError("hop_rejected: question %s is %s." % (question_id, question["status"]))
+            history = list(question.get("hop_history") or [])
+            if any(h.get("via") == via and h.get("hop") == hop for h in history):
+                return dict(question, already=True)
+            if question.get("hop_since") and since < question["hop_since"]:
+                return dict(question, stale=True)
+            history.append(dict(hop=hop, person=person, since=since, via=via, at=timestamp()))
+            question.update(hop=hop, hop_person=person, hop_since=since, hop_via=via, hop_history=history)
+            return self._save("questions", question, "question.hop")
+
+    @staticmethod
+    def hop_label(question):
+        """with-david / with-manager / answered-pending-relay, or None when no notice has arrived."""
+        hop = question.get("hop")
+        if hop == "with-person":
+            return "with-%s" % question.get("hop_person")
+        return hop
+
+    RELAY_OWED_WARN_MINUTES = 240  # Q4: doctor warns when an answered relay has waited 4 h
+
+    def relay_owed(self, now=None):
+        """Relays I still owe: my answered relay questions whose carried questions I have not replied to since."""
+        return self.relay_owed_from(self._all("messages"), self._all("questions"), now)
+
+    @staticmethod
+    def relay_owed_from(messages, questions, now=None):
+        """relay_owed over plain rows (doctor reads them read-only)."""
+        now = now or datetime.now(timezone.utc)
+        replies = {}
+        for message in messages:
+            if message.get("kind") == "message" and message.get("in_reply_to"):
+                replies.setdefault(message["in_reply_to"], []).append(message["created_at"])
+        items = []
+        for question in questions:
+            if question["status"] not in ("answered", "answered_by_proxy") or not question.get("relays"):
+                continue
+            answered = question.get("answered_at") or ""
+            for link in question["relays"]:
+                if any(at >= answered for at in replies.get(link["question_id"], [])):
+                    continue
+                try:
+                    age = int((now - datetime.fromisoformat(answered.replace("Z", "+00:00"))).total_seconds() // 60)
+                except ValueError:
+                    age = None
+                items.append(dict(question_id=link["question_id"], asker=link["asker"], via=question["id"],
+                                  answered_at=answered, age_minutes=age, link_auth=link.get("link_auth")))
+        items.sort(key=lambda item: item["answered_at"])
+        return items
 
     def question_list(self, status=None):
         return [q for q in self._all("questions") if status is None or q["status"] == status]
@@ -1560,6 +1743,8 @@ class Store:
                     thread=message.get("thread"), in_reply_to=message.get("in_reply_to"),
                     recipient_work_id=message.get("recipient_work_id"), project=message.get("project"),
                     sender=message["sender"], created_at=message["created_at"], attempt=entry.get("attempt", 0))
+        if message.get("kind") == "hop":
+            view["hop"] = message.get("hop")  # Docket P1b: structured; an adapter that doesn't know it acks failed
         if state is not None:
             view["state"] = state
         return view
@@ -1734,6 +1919,7 @@ class Store:
     def _answer(self, question, event, waiting, action, answered_at, status="answered", **extra):
         question.update(status=status, answer_event_id=event["id"], answered_at=answered_at, **extra)
         self._save("questions", question, action)
+        self._queue_hops(question, "answered-pending-relay", answered_at)  # Docket P1b: tell each original asker
         for work, linked in waiting:
             if question["id"] in linked:
                 # P2: any linked answer wakes the work; the rest stay open and visible for a cheap re-wait.
@@ -1823,6 +2009,7 @@ class Store:
                 return dict(question, work_unlinked=[], unlinked_from=[])
             question.update(status="withdrawn", withdrawn_at=now, close_reason=reason, closed_by_run=self.run_id)
             self._save("questions", question, "question.withdrawn")
+            self._queue_hops(question, "with-manager", now)  # Docket P1b: back with me, never "answered"
             unlinked, unlinked_from = [], []
             for work, linked in self._waiting_links():
                 if question_id not in linked:
@@ -2338,7 +2525,7 @@ class Store:
                     memory_index=memory_index, memory_index_truncated=index_truncated,
                     work=work, events=events, threads=threads, questions=questions,
                     recent_runs=[self._failed_tools(r) for r in self.run_list(5)], usage=self.usage(days=3),
-                    runtime=self.runtime_view(), outbox_stuck=self.outbox_stuck(),
+                    runtime=self.runtime_view(), outbox_stuck=self.outbox_stuck(), relay_owed=self.relay_owed(),
                     project_bindings=capture.binding_lines(self), project_capture=capture.capture_status(self), publish_failing=board.publish_failing(self),
                     project_uncovered=capture.uncovered_counts(self, capture.home_id(self)),
                     **self._board_section(run_id))

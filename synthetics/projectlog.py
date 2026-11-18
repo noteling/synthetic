@@ -138,6 +138,8 @@ def fold(entries: list[dict]) -> dict:
         elif kind == "backlog":
             row = {k: copy.deepcopy(body.get(k)) for k in (
                 "work_id", "title", "origin", "status", "waiting_for", "evidence", "priority")}
+            if body.get("blocked_by"):
+                row["blocked_by"] = copy.deepcopy(body["blocked_by"])
             row.update({"owner": e["author"], "entry": e["id"], "seq": e["seq"], "at": e["at"]})
             k = f"{e['author']}|{body.get('work_id')}"
             if body.get("status") == "unpublished":

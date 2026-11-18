@@ -157,7 +157,8 @@ def _board_read(ps, thread=None, since=None):
     result = {"project": ps.project, "posts": out, "more": more, "as_of_seq": ps.head_seq()}
     if thread is None and since is None:
         result["backlog"] = sorted(
-            ({k: r.get(k) for k in ("owner", "work_id", "title", "origin", "status", "waiting_for", "priority")}
+            ({k: r.get(k) for k in ("owner", "work_id", "title", "origin", "status", "waiting_for", "priority",
+                                    "blocked_by") if k != "blocked_by" or r.get("blocked_by")}
              for r in (st.get("backlog") or {}).values()),
             key=lambda r: (r.get("priority") is None, r.get("priority") or 0, r["owner"], r["work_id"]))
     return result

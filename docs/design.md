@@ -108,6 +108,20 @@ fairness guarantee yet.
   `ack: "not acked (route ...)"` with the age taken from the ask (never dropped), outbox
   `stuck`, and the waiting works it blocks; `text` is a paste-ready block. Home-local: it
   never reads another home or private views. JSON fields (v1) are stable: add, never rename.
+- Docket P1b (relays and hops): `question_ask(relays=[...])` and `question_relays(question_id, add)` link
+  questions this home received (the `question-id:` header of an authenticated message, or of a Fieldpost
+  event with auth null, stored as `link_auth` null) to the question that carries them onward. In the same
+  transaction the store queues one structured `kind: hop` outbox row per carried question to its asker:
+  `with-person` on ask/link, `answered-pending-relay` when the onward question is answered (or answered by
+  proxy), `with-manager` when withdrawn. Fieldpost delivers a hop only for a question it correlated from
+  that asker to this sender, into the adapter-only `Store.question_hop` (sender must be the question's
+  recipient and the question open, else `hop_rejected` and no change; idempotent per via+hop; older
+  notices ignored). A hop never wakes, answers or changes status. The asker's questions show `hop`,
+  `hop_person`, `hop_since`, `hop_via`, `hop_history`; the docket shows `now: with-david since …`, what each
+  question `carries`, and `relay_owed` (answered onward questions whose carried questions have had no reply
+  from me since), which is also in the snapshot; doctor warns `relay_owed` after 4 h. Published works add
+  `blocked_by` lines `"<question ID> <hop>"` to their backlog row (ID and hop only; queued / with-<to> when
+  no notice has arrived); the project log refuses any other shape.
 - Completion evidence refs are an own-home ID, an absolute file path, `receipt:` or
   `https://`. As a last fallback, a ref with none of those prefixes that names an existing
   file relative to the home's workspace (never the process cwd; `../` and symlinks resolved

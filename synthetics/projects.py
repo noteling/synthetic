@@ -483,6 +483,14 @@ class ProjectStore:
                     raise ProjectError("bad_backlog", f"{where}: evidence is a list of ≤{POST_LIST_MAX} refs")
                 if not isinstance(body.get("priority", 0), int):
                     raise ProjectError("bad_backlog", f"{where}: priority must be an integer")
+                bb = body.get("blocked_by")
+                if bb is not None:
+                    # Docket P1b: question ID + hop only, never question text.
+                    from .board import BLOCKED_BY
+                    if (not isinstance(bb, list) or len(bb) > POST_LIST_MAX
+                            or not all(isinstance(v, str) and BLOCKED_BY.fullmatch(v) for v in bb)):
+                        raise ProjectError("bad_backlog", f"{where}: blocked_by is a list of "
+                                                          f"\"<question ID> <hop>\" lines")
             elif kind == "considered":
                 if body.get("source") not in state["sources"]:
                     raise ProjectError("unknown_source", f"{where}: {body.get('source')}")

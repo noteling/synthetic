@@ -95,7 +95,12 @@ TOOLS = [
         "in_reply_to": text_property("Message/event being replied to; separate from the question ID used to correlate its eventual answer."),
         "project": text_property("Optional: one project this message is for, when you hold a write grant on it. The recipient captures it into that project only if the channel is unbound; your own body is captured too. Leave it out for messages about several projects."),
         "work_ids": {"type": "array", "items": {"type": "string"}, "description": "Optional: several of your own works this one question blocks (a shared blocker). Each waits on it and any answer wakes all of them; work_id defaults to the first."},
+        "relays": {"type": "array", "items": {"type": "string"}, "description": "Optional: when this question carries others onward (you ask David what a colleague asked you), the colleague's question IDs from the question-id: header of their received messages. Each asker then sees where their question is (with-<recipient>, answered-pending-relay); you still answer them yourself."},
     }, ["to", "body", "key"]),
+    tool("question_relays", "Link received questions (their question-id: header IDs) to one of your own open or answered questions that carries them onward. Each asker is told the hop automatically; an answered question means you owe them the relay (relay_owed).", {
+        "question_id": text_property("Your question that carries them."),
+        "add": {"type": "array", "items": {"type": "string"}, "description": "Question IDs from received messages' question-id: headers."},
+    }, ["question_id", "add"]),
     tool("message_send", "Queue a message from your own identity in the outbox for a configured delivery adapter. Queuing is not proof of delivery. Check earlier messages before repeating one.", {
         "to": text_property(), "body": text_property(), "work_id": text_property(), "key": KEY,
         "recipient_work_id": text_property("Optional: the recipient's own work ID this concerns, if they gave you one. work_id is always your own work; recipient_work_id is theirs and only a hint to them unless the delivery is authenticated."),
@@ -137,7 +142,7 @@ from . import rostertools  # noqa: E402  (M26 roster tools)
 
 TOOLS.extend(rostertools.TOOLS)
 METHODS = {entry["name"]: entry for entry in TOOLS}
-MUTATIONS = {"entity_put", "memory_put", "work_put", "question_ask", "question_resolve", "question_close", "message_send", "reminder_set",
+MUTATIONS = {"entity_put", "memory_put", "work_put", "question_ask", "question_resolve", "question_close", "question_relays", "message_send", "reminder_set",
              "runtime_restart"} | projecttools.MUTATIONS | rostertools.MUTATIONS
 
 

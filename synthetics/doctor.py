@@ -296,6 +296,14 @@ def diagnose(home, label=None, compare=None, key_files=(), launchd=_launchd_pid,
             add("warning", "outbox_unroutable", "%d stuck messages go to addresses no channel routes: %s"
                 % (len(unroutable), ", ".join(sorted({i["to"] for i in unroutable}))))
 
+        # Docket P1b (Q4): answered relay questions whose carried questions still await my reply
+        owed = Store.relay_owed_from(_all(db, "messages"), _all(db, "questions"), now)
+        report["outbox"]["relay_owed"] = len(owed)
+        late = [o for o in owed if (o["age_minutes"] or 0) >= Store.RELAY_OWED_WARN_MINUTES]
+        if late:
+            add("warning", "relay_owed", "%d relayed questions answered over 4 h ago and not yet passed on: %s"
+                % (len(late), ", ".join("%s to %s" % (o["question_id"], o["asker"]) for o in late)))
+
         # capture (M21)
         try:
             rows = db.execute("SELECT event_id,error FROM capture_outbox WHERE status='pending'").fetchall()
