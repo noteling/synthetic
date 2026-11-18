@@ -83,6 +83,22 @@ class ProjectViewTest(unittest.TestCase):
         self.assertIn(f"claim {r1}#c2 superseded by {r2}#c1: use the native memory", history)
         self.assertEqual(self.store.view(as_of=before_seq), before)
 
+    def test_provenance_flags_on_every_claim_line(self):
+        # Codex Q1 ruling: observed-only / secondhand / open sit next to the claim text, not in a footer.
+        relayed = src("secretary: David says go public")
+        relayed["body"]["origin"]["auth"] = None
+        relayed["body"]["quote_source"] = "secondhand"
+        s1 = self.add([relayed])["ids"][0]
+        body = intent([s1], [("c1", "publish the repo"), ("c2", "keep history")], "publish")
+        body["body"]["open"] = "licence undecided"
+        r1 = self.add([body])["ids"][0]
+        text = self.read_view()
+        for cid, claim in (("c1", "publish the repo"), ("c2", "keep history")):
+            line = next(l for l in text.splitlines() if l.startswith(f"- {cid}: {claim}"))
+            for flag in ("observed-only", "secondhand", "open"):
+                self.assertIn(flag, line, line)
+        self.assertNotIn("observed-only", text.split("## Lessons", 1)[1])
+
     def test_lessons_grouped_by_status(self):
         s1, _ = self.seed()
         a = self.add([lesson("keep sums", "freeze by sums", s1)])["ids"][0]

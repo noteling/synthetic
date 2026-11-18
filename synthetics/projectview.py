@@ -58,16 +58,18 @@ def render(entries: list[dict], project: str, source_bytes: Callable[[str], byte
         flags = f" [{', '.join(rec['flags'])}]" if rec["flags"] else ""
         w(f"### {_md(_cut(rec['title'], 200))} ({rec['id']}){flags}")
         w("")
+        # Provenance flags (observed-only, secondhand, open, ...) sit on every claim line, next to the text a
+        # reader would act on, not only in the heading (Codex Q1 ruling, M21 phase 3).
         for cid in rec["claims"]:
             ref = f"{rec['id']}#{cid}"
             claim = claims[ref]
             if claim["status"] == "current":
                 conf = " (confirmed)" if claim["confirmed"] else ""
-                w(f"- {cid}: {_md(_cut(claim['text'], TEXT))}{conf}")
+                w(f"- {cid}: {_md(_cut(claim['text'], TEXT))}{conf}{flags}")
             else:
                 head = claims.get(claim["head"])
                 text = _md(_cut(head["text"], TEXT)) if head else "(revising claim not in log)"
-                w(f"- {cid} now reads ({claim['head']}): {text}")
+                w(f"- {cid} now reads ({claim['head']}): {text}{flags}")
         if rec.get("open"):
             w(f"- open: {_md(_cut(rec['open'], 300))}")
         for sid in rec["sources"]:
