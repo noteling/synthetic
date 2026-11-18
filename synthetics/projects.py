@@ -101,6 +101,7 @@ class ProjectStore:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.executescript(SCHEMA)
         self.export_path = self.path.parent / "log.jsonl"
+        self.view_path = self.path.parent / "view.md"
 
     def close(self) -> None:
         self.db.close()
@@ -559,10 +560,46 @@ class ProjectStore:
                         line["bytes"] = self.source_bytes(e["id"]).decode("utf-8")
                     fh.write(_canon(line) + "\n")
         except OSError:
+            self.write_view()
             return through
         last = new[-1]["seq"] if new else through
         self.db.execute("INSERT OR REPLACE INTO meta(k,v) VALUES ('export_through',?)", (str(last),))
+        self.write_view()
         return last
+
+    # ---- generated read-only view (M21 phase 3) ---------------------------------------------
+    def view(self, as_of: int | None = None) -> str:
+        """Markdown view of the log as of ``as_of`` (default head); a pure function of the log."""
+        from .projectview import render
+        if as_of is not None and as_of < 0:
+            raise ProjectError("bad_as_of", "as_of must be >= 0")
+        gone = {t for (t,) in self.db.execute(
+            "SELECT json_extract(body,'$.target') FROM entries WHERE kind='redact'").fetchall()}
+
+        def excerpt(entry_id: str):
+            if entry_id in gone:
+                return None
+            row = self.db.execute("SELECT bytes FROM source_bytes WHERE id=?", (entry_id,)).fetchone()
+            return None if row is None else bytes(row[0])
+        return render(self.entries(as_of), self.project, excerpt)
+
+    def write_view(self) -> bool:
+        """Rewrite view.md (0600, temp file + rename) outside any write transaction. A failure never fails the
+        append that triggered it; the next write or `project view --write` regenerates it. Returns success."""
+        tmp = self.view_path.with_name(".view.md.%d.tmp" % os.getpid())
+        try:
+            text = self.view()
+            fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(text)
+            os.replace(str(tmp), str(self.view_path))
+            return True
+        except (OSError, sqlite3.Error, ProjectError):
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            return False
 
     @classmethod
     def import_jsonl(cls, jsonl: str | os.PathLike, path: str | os.PathLike, project: str) -> "ProjectStore":

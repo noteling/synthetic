@@ -393,6 +393,21 @@ def project_command(store, args):
                                                                warrant=warrant))
         if cmd == "export":
             return dict(project=args.project, export_through=ps.export(rebuild=args.rebuild))
+        if cmd == "view":
+            a = authority.actor()
+            if not a["owner"] and not ps.may_read(a["id"]):
+                raise ValueError("No read grant on project %s." % args.project)
+            if args.write:
+                if args.as_of is not None or args.out:
+                    raise ValueError("--write regenerates view.md at head; it takes no --as-of or --out.")
+                return dict(project=args.project, view=str(ps.view_path), written=ps.write_view(),
+                            head_seq=ps.head_seq())
+            text = ps.view(args.as_of)
+            if args.out:
+                Path(args.out).expanduser().write_text(text, encoding="utf-8")
+                return dict(project=args.project, out=str(Path(args.out).expanduser()), bytes=len(text.encode()))
+            sys.stdout.write(text)
+            return None
     raise ValueError("unknown project command %s" % cmd)
 
 
@@ -654,6 +669,12 @@ def parser():
     pexport = ps.add_parser("export", help="bring log.jsonl up to date (--rebuild rewrites it)")
     pexport.add_argument("project")
     pexport.add_argument("--rebuild", action="store_true")
+    pview = ps.add_parser("view", help="print the generated read-only Markdown view (needs read access in a "
+                                       "session); --write regenerates <project dir>/view.md")
+    pview.add_argument("project")
+    pview.add_argument("--as-of", dest="as_of", type=int, help="render the log as of seq N")
+    pview.add_argument("--out", help="write the view to this file instead of stdout")
+    pview.add_argument("--write", action="store_true", help="regenerate view.md at head")
     pimport = ps.add_parser("import", help="operator only: load a log.jsonl into an empty project store")
     pimport.add_argument("project")
     pimport.add_argument("jsonl")
@@ -948,7 +969,9 @@ def main(argv=None):
                     from . import authority
                     output(authority.command(store, args))
                 elif args.command == "project":
-                    output(project_command(store, args))
+                    result = project_command(store, args)
+                    if result is not None:  # `project view` prints Markdown itself
+                        output(result)
                 elif args.command == "roster":
                     from . import rostercli
                     output(rostercli.command(store, args))
