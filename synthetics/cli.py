@@ -485,6 +485,8 @@ def parser():
     docket_parser = sub.add_parser("docket", help="read-only: this home's open questions to a person, oldest first")
     docket_parser.add_argument("--person", help="person ID, name or alias (default: humans.json default_human)")
     docket_parser.add_argument("--format", choices=["text", "json"], default="text")
+    sub.add_parser("system-prompt", help="read-only: print the system prompt a new session of this home gets "
+                   "(shipped prompt + host rules)")
     sub.add_parser("inbox", help="read events awaiting attention")
     send = sub.add_parser("send", help="queue an outgoing message for a configured delivery adapter")
     send.add_argument("to")
@@ -703,6 +705,11 @@ def main(argv=None):
             _refuse_in_session("postern run")
             from . import postern
             return postern.run(args.config, once=args.once, interval=args.interval)
+        if args.command == "system-prompt":
+            # Read-only, never opens a Store: reads only the company log and the home's prompt.local.md.
+            from .brain import system_prompt
+            print(system_prompt(Path(home).expanduser().resolve()), end="")
+            return 0
         if args.command == "doctor":
             # Read-only: never opens a Store (which would create or migrate state).
             from . import doctor

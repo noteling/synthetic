@@ -54,7 +54,9 @@ CATALOGUE = {
 GRANT = "delegation.grant"
 
 # P1c: company-log ``policy`` names -> the action a session writer must hold (under an active root).
-POLICIES = {"limit.ceiling": "limit.raise", "worker.defaults": "worker.manage", "adapter.reviews": "adapter.install"}
+POLICIES = {"limit.ceiling": "limit.raise", "worker.defaults": "worker.manage", "adapter.reviews": "adapter.install",
+            "host.rules": "runtime.request"}  # PUB-1 G3: host rules shown to every home's sessions
+HOST_RULES_MAX = 8192
 # P1c-b: policies where every active entry counts (a list of accepted items), not only the newest.
 LIST_POLICIES = ("adapter.reviews",)
 NOT_YET = "not yet implemented under delegation"
@@ -241,7 +243,8 @@ def parse_policy(body: dict) -> dict:
         raise AuthorityError("bad_policy", "a policy entry needs a reason")
     fields = {"limit.ceiling": {"max_usd_per_day", "allow_disable"},
               "worker.defaults": {"allowed_models", "allowed_claude"},
-              "adapter.reviews": {"sums_path", "sums_sha256", "review_ref"}}.get(name)
+              "adapter.reviews": {"sums_path", "sums_sha256", "review_ref"},
+              "host.rules": {"text"}}.get(name)
     if fields is None:
         raise AuthorityError("bad_policy", "unknown policy %r (known: %s)" % (name, ", ".join(sorted(POLICIES))))
     extra = set(body) - fields - {"name", "reason", "context_ref"}
@@ -253,6 +256,12 @@ def parse_policy(body: dict) -> dict:
             raise AuthorityError("bad_policy", "limit.ceiling max_usd_per_day must be a finite number > 0 or \"none\"")
         if not isinstance(body["allow_disable"], bool):
             raise AuthorityError("bad_policy", "limit.ceiling allow_disable must be true or false")
+    elif name == "host.rules":
+        t = body["text"]
+        if not isinstance(t, str) or not t.strip():
+            raise AuthorityError("bad_policy", "host.rules text must be non-empty")
+        if len(t.encode("utf-8")) > HOST_RULES_MAX:
+            raise AuthorityError("bad_policy", "host.rules text is limited to %d bytes" % HOST_RULES_MAX)
     elif name == "adapter.reviews":
         sp, sha, ref = body["sums_path"], body["sums_sha256"], body["review_ref"]
         if not isinstance(sp, str) or not os.path.isabs(sp):
@@ -930,7 +939,11 @@ def command(store, args):
                 body["context_ref"] = args.context_ref
             parse_policy(body)
             if not a["owner"]:  # P1c: audited use of the action that owns this policy (fence: cs.append below)
-                require(POLICIES[args.name], home=store.home, what="policy %s" % args.name)
+                # PUB-1 G3: host rules reach every home's sessions, so the writer's runtime.request must cover all
+                # member homes ("employees" or "*"), not only named ones.
+                every = (lambda sc: bool({"employees", "*"} & set(sc.get("homes") or []))) \
+                    if args.name == "host.rules" else (lambda sc: True)
+                require(POLICIES[args.name], home=store.home, what="policy %s" % args.name, check=every)
             batch = [{"kind": "policy", "body": body}]
         elif cmd == "retract":
             batch = [{"kind": "retract", "body": {"target": args.id, "reason": args.reason}}]

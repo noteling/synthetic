@@ -1985,5 +1985,80 @@ class WarrantTest(unittest.TestCase):
             self.refused("exceeds_parent", *base, "--scope", sc(labels), session="codex")
         self.refused("bad_scope", *base, "--scope", sc(["com.synthetics.adapter*"]), session="codex")
 
+    # ---- PUB-1 G3: company host rules reach every member home's system prompt ----
+    HOST_RULE = "- Do not modify /srv/example-team/protected-checkout."
+
+    def test_g3_host_rules_policy_reaches_member_homes(self):
+        from synthetics import brain
+        shipped = (Path(brain.__file__).parent / "prompts" / "employee.md").read_text()
+        for name in self.homes:
+            self.assertEqual(brain.system_prompt(self.homes[name]), shipped)
+        code, out, err = self.policy("host.rules", {"text": self.HOST_RULE}, actor="codex")
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("not_delegated", err)
+        self.root_delegation()  # runtime.request over "employees"
+        code, out, err = self.policy("host.rules", {"text": self.HOST_RULE}, actor="codex")
+        self.assertEqual(code, 0, err)
+        entry = out["ids"][0]
+        self.assertTrue(self.audit("codex", "authority.policy"))
+        for name in self.homes:
+            prompt = brain.system_prompt(self.homes[name])
+            self.assertTrue(prompt.startswith(shipped))
+            self.assertIn("Host rules (host-assigned; company policy host.rules %s):\n%s" % (entry, self.HOST_RULE),
+                          prompt)
+            self.assertNotIn("operator", prompt[len(shipped):])
+        command = brain.ClaudeBrain(self.homes["vesper"]).command()
+        self.assertEqual(command[command.index("--system-prompt") + 1], brain.system_prompt(self.homes["vesper"]))
+        # A home's own prompt.local.md adds to the company rules; it never replaces them.
+        (self.homes["rowan"] / brain.HOST_RULES).write_text("- Also keep out of /srv/example-team/stand.\n")
+        prompt = brain.system_prompt(self.homes["rowan"])
+        self.assertLess(prompt.index(self.HOST_RULE), prompt.index("- Also keep out of /srv/example-team/stand."))
+        self.assertIn("Host rules (host-assigned; prompt.local.md in your home):", prompt)
+        self.assertNotIn("/srv/example-team/stand", brain.system_prompt(self.homes["vesper"]))
+        # Newest active entry wins; retracting it restores the previous one.
+        code, out, err = self.policy("host.rules", {"text": "- Newer rule."}, actor="codex", key="second")
+        self.assertEqual(code, 0, err)
+        second = out["ids"][0]
+        self.assertIn("- Newer rule.", brain.system_prompt(self.homes["vesper"]))
+        self.assertNotIn(self.HOST_RULE, brain.system_prompt(self.homes["vesper"]))
+        self.ok("codex", "authority", "retract", second, "--reason", "undo", "--by", "david-desktop")
+        self.assertIn(self.HOST_RULE, brain.system_prompt(self.homes["vesper"]))
+
+    def test_g3_system_prompt_cli_is_read_only(self):
+        from synthetics import brain
+        self.assertEqual(self.policy("host.rules", {"text": self.HOST_RULE})[0], 0)  # owner write
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(main(["--home", str(self.homes["rowan"]), "system-prompt"]), 0)
+        self.assertEqual(out.getvalue(), brain.system_prompt(self.homes["rowan"]))
+        fresh = self.root / "not-a-home-yet"
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(main(["--home", str(fresh), "system-prompt"]), 0)
+        self.assertIn(self.HOST_RULE, out.getvalue())
+        self.assertFalse(fresh.exists())  # never opened a Store
+
+    def test_g3_host_rules_writer_scope_and_bad_policy(self):
+        self.root_delegation(scope=dict(SCOPE_ALL, **{"runtime.request": {"homes": [self.ids["rowan"]]}}))
+        code, out, err = self.policy("host.rules", {"text": self.HOST_RULE}, actor="codex")
+        self.assertNotEqual(code, 0, out)
+        self.assertIn("not_delegated", err)  # rules reach every home: a named-homes runtime.request is not enough
+        for body in ({"text": "  "}, {"text": "x" * 8193}, {"text": "ok", "homes": ["rowan"]}, {}):
+            code, out, err = self.policy("host.rules", body)
+            self.assertNotEqual(code, 0, (body, out))
+            self.assertIn("bad_policy", err)
+
+    def test_g3_unreadable_company_log_fails_closed(self):
+        from synthetics import brain, roster
+        path = roster.company_path(self.root)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        for suffix in ("-wal", "-shm"):
+            Path(str(path) + suffix).unlink(missing_ok=True)
+        path.write_bytes(b"not a sqlite database" * 100)
+        with self.assertRaises(brain.BrainError) as caught:
+            brain.system_prompt(self.homes["vesper"])
+        self.assertIn("host rules unreadable", str(caught.exception))
+
+
 if __name__ == "__main__":
     unittest.main()

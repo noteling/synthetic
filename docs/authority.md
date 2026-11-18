@@ -145,6 +145,15 @@ policies.
   active entry counts** (a list of accepted reviews, `authority.adapter_reviews`): a newer entry does not
   displace an older one, and retracting an entry removes only that review. See Adapters.
 
+- `host.rules` `{text}` (PUB-1 G3): the host rules every session in a home under this company root sees, appended
+  to the shipped prompt as "Host rules (host-assigned; company policy host.rules <entry>)" (protected checkouts,
+  host paths: whatever must not ship in `synthetics/prompts/employee.md`). Newest active entry wins; retracting it
+  restores the previous one. A session writer needs `runtime.request` whose `homes` are `employees` or `*` (the
+  rules reach every home; named homes are `not_delegated`). `text` is non-empty, at most 8192 bytes. A home's own
+  untracked `prompt.local.md` is appended after it; it adds rules, never replaces the company's. **Fail closed:**
+  when the company log exists but cannot be read, `brain.system_prompt` raises and no session starts.
+  `synthetics --home H system-prompt` prints what a new session of H gets (read-only; opens no Store).
+
 ## Spend limits (P1b, D7; P1c ceiling)
 
 - `limit raise USD [--persistent]` from a session needs `limit.raise`: `0 < USD <= max_usd_per_day` and the
@@ -334,6 +343,7 @@ synthetics --home H authority delegate --parent ROOT --grantee G --action A --sc
 synthetics --home H authority retract ID --reason R
 synthetics --home H authority show [--grantee G]
 synthetics --home H authority policy NAME --body JSON --reason R [--context-ref EVENT] [--by LABEL] [--key K]
+synthetics --home H system-prompt                          # read-only: shipped prompt + host rules for H
 synthetics --home H authority check ACTION [--project P] [--mode M] [--target-home T] [--item X]
 synthetics --home H authority ops [--all]                  # D14 ledger (default: pending ops)
 synthetics --home H authority settle OP                    # D14 reconcile from evidence; executes nothing

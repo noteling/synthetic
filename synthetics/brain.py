@@ -10,6 +10,44 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+HOST_RULES = "prompt.local.md"   # optional per-home host rules (untracked), appended after the company's
+HOST_RULES_POLICY = "host.rules"  # company-log policy: host rules for every home under the company root
+
+
+def host_rules(home):
+    """[(label, text)] host rules in force for ``home``: the newest active company ``policy host.rules``,
+    then the home's own ``prompt.local.md``. Both are additive; neither can remove the other.
+
+    Fail closed: a company log that exists but cannot be read raises BrainError, so no session starts
+    without the protection rules it may carry (PUB-1 G3).
+    """
+    from . import roster
+    rules = []
+    try:
+        state = roster.company_state_for_home(home)
+    except Exception as exc:  # unreadable company log: refuse rather than drop the rules
+        raise BrainError("host rules unreadable (company log for %s): %s" % (home, exc))
+    pol = state.get("policies", {}).get(HOST_RULES_POLICY)
+    if pol and str(pol.get("text", "")).strip():
+        rules.append(("host-assigned; company policy %s %s" % (HOST_RULES_POLICY, pol["id"]), pol["text"].strip()))
+    local = Path(home) / HOST_RULES
+    if local.is_file():
+        try:
+            text = local.read_text().strip()
+        except OSError as exc:
+            raise BrainError("host rules unreadable (%s): %s" % (local, exc))
+        if text:
+            rules.append(("host-assigned; %s in your home" % HOST_RULES, text))
+    return rules
+
+
+def system_prompt(home):
+    """The shipped employee prompt plus the host rules in force for this home (``host_rules``)."""
+    system = (Path(__file__).parent / "prompts" / "employee.md").read_text()
+    for label, text in host_rules(home):
+        system += "\n\nHost rules (" + label + "):\n" + text + "\n"
+    return system
+
 
 class BrainError(RuntimeError):
     """A reasoning session did not produce a successful result.
@@ -75,7 +113,7 @@ class ClaudeBrain:
         }
         if run_id:
             server["mcpServers"]["synthetics"]["args"].extend(["--run-id", str(run_id)])
-        system = (Path(__file__).parent / "prompts" / "employee.md").read_text()
+        system = system_prompt(self.home)
         command = [
             self.executable, "--print", "--output-format", "json",
             "--system-prompt", system,
