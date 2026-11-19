@@ -43,7 +43,7 @@ TOOLS = [
     tool("event_get", "Read the original source event by ID, including messages already processed in earlier sessions. Use this to verify the evidence behind a memory. A unique ID prefix of 8+ hex characters is accepted. Without body_offset/body_chars the whole event is returned; when its body_len is over ~30 000, read it in chunks instead: body_offset=0 with body_chars, then body_offset=body_next until body_next is null.", {
         "id": text_property(),
         "body_offset": {"type": "integer", "minimum": 0, "description": "Character offset into the original body; the result has that slice plus body_len, body_offset and body_next (null at the end)."},
-        "body_chars": {"type": "integer", "minimum": 0, "description": "Characters of the body to return from body_offset (default %d when only body_offset is given)." % EVENT_CHUNK_CHARS},
+        "body_chars": {"type": "integer", "minimum": 1, "description": "Characters of the body to return from body_offset (default %d when only body_offset is given)." % EVENT_CHUNK_CHARS},
     }, ["id"]),
     tool("event_search", "Search original source events across sessions, including processed events. Filter by thread when tracing an ongoing conversation. With since, read in time order with a capped flag (the dream's retrieval). The result is {events, capped, truncated_from, ...}; every event has body_len and body_truncated. A body_truncated event is a preview, not a read: fetch it with event_get. Without since, bodies are cut to body_chars (default %d). Every result stops before max_bytes (default %d): capped=true then means more items exist." % (SEARCH_BODY_CHARS, SEARCH_MAX_BYTES), {
         "query": text_property(), "thread": text_property(),

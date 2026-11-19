@@ -250,9 +250,11 @@ The `## dream` section of `synthetics/prompts/routines.md` is the guidance; the 
   as many complete records as fit, and only a first item too large alone is cut to fit. Without since,
   event bodies are cut to `body_chars` (default 500): search finds events, `event_get` reads them. Every
   event carries `body_len` and `body_truncated`, and `truncated_from` is the `created_at` of the first cut
-  item (null if none). A cut item still counts as returned, so `next_cursor` moves past it. Memories are
+  item (null if none). A cut item keeps the longest body prefix that fits, measured in serialized bytes. It
+  still counts as returned, so `next_cursor` moves past it. Memories are
   never cut. `event_get(id, body_offset=, body_chars=)` returns a slice of the original body with
-  `body_len`, `body_offset` and `body_next` (null at the end; MCP default chunk 30 000 characters); a plain
+  `body_len`, `body_offset` and `body_next` (null at the end; MCP default chunk 30 000 characters;
+  `body_chars` is at least 1, so a chunk loop always advances); a plain
   `event_get(id)` is unchanged. **Reading rule:** a `body_truncated` item is unread until `event_get` has
   covered its body from 0 to `body_len`; until then `truncated_from` bounds `covered_through` and is the
   omission's `from`. The store's own defaults are unchanged (no `body_chars`, no `max_bytes`), so the CLI

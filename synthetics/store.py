@@ -752,17 +752,33 @@ class Store:
 
     @staticmethod
     def _cut_to_fit(event, max_bytes):
-        """F2: shorten one event's body until the event fits max_bytes (body_len keeps the original length)."""
+        """F2: the event with the longest body prefix that fits max_bytes (body_len keeps the original length).
+
+        Sizes are serialized UTF-8 bytes, which a character count doesn't track (an accented letter is 2 bytes, a
+        newline is escaped to 2), so the prefix length is found by bisection, not by subtracting bytes from
+        characters. Size grows with the prefix, so the largest fitting prefix is exact; an event that doesn't fit
+        even with an empty body comes back with an empty body."""
         body = event.get("body")
         if not isinstance(body, str):
             return event
-        n = len(body)
-        while True:
-            trial = dict(event, body=body[:n], body_truncated=event.get("body_truncated") or n < len(body))
-            over = Store._json_size(trial) + 2 - max_bytes
-            if over <= 0 or n == 0:
-                return trial
-            n = max(0, n - over)
+        truncated = event.get("body_truncated")
+
+        def trial(n):
+            return dict(event, body=body[:n], body_truncated=truncated or n < len(body))
+
+        def fits(n):
+            return Store._json_size(trial(n)) + 2 <= max_bytes
+
+        if fits(len(body)):
+            return trial(len(body))
+        low, high = 0, len(body)  # fits(low) or low == 0; not fits(high)
+        while high - low > 1:
+            mid = (low + high) // 2
+            if fits(mid):
+                low = mid
+            else:
+                high = mid
+        return trial(low)
 
     @staticmethod
     def _fit(items, max_bytes, size, cut):
@@ -2329,9 +2345,9 @@ class Store:
         event = self._with_auth(self._get("events", self._resolve(_text(id, "id"), "events")))
         if body_offset is None and body_chars is None:
             return event
-        for name, value in (("body_offset", body_offset), ("body_chars", body_chars)):
-            if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
-                raise ValueError("%s must be a non-negative integer." % name)
+        for name, value, low in (("body_offset", body_offset, 0), ("body_chars", body_chars, 1)):
+            if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < low):
+                raise ValueError("%s must be an integer of at least %d." % (name, low))
         body = event.get("body") if isinstance(event.get("body"), str) else ""
         start = min(body_offset or 0, len(body))
         end = len(body) if body_chars is None else min(len(body), start + body_chars)
