@@ -1030,7 +1030,9 @@ class Store:
             supplied["publish"] = publish
         if origin is not UNSET:
             if origin not in (None, "self", "assigned"):
-                raise ValueError("origin must be self or assigned.")
+                # MTG F3: origin "meeting" is set only by floor_accept (the gate), never through work_put.
+                raise ValueError("origin must be self or assigned%s." % (
+                    " (origin meeting is set only by floor_accept)" if origin == "meeting" else ""))
             supplied["origin"] = origin
         if "wake_at" in supplied and supplied["wake_at"] is not None:
             supplied["wake_at"] = timestamp(supplied["wake_at"])
@@ -3237,6 +3239,90 @@ class Store:
             raise ValueError("floor.yield is audited by the worker, not by a session tool.")
         with self._tx():
             self._audit("floor.yield", run_id, dict(run=run_id, meeting=meeting, grace_seconds=grace, outcome=outcome))
+
+    def floor_accept(self, meeting, cid, title, priority=0):
+        """MTG F3 (P0 §3, Codex K1/K2): turn one issued meeting promise into work. The one path to origin "meeting".
+
+        Refused (audited floor.refused {code, meeting, cid}; never text) unless the cid is a `commit` line in the
+        meeting's journal, the meeting has ended (an `end` line, no pending row, no floor hold for it), the wrap event
+        exists and the journal chain verifies against its head, and the panel did not decline it (latest confirm
+        yes:false). The check, the work write and the audit row are one BEGIN IMMEDIATE transaction; the idempotency
+        row (namespace floor_accept, key meeting:cid) makes (meeting, cid) unique, so a repeat returns the same work.
+        A commit naming work_id adds evidence to that work (unknown_work / work_closed when it isn't an open work of
+        this home; never reopened)."""
+        from . import flooraccept as fa
+        try:
+            return self._floor_accept(fa, meeting, cid, title, priority)
+        except fa.AcceptRefused as exc:
+            with self._tx():
+                self._audit("floor.refused", str(meeting)[:64] if isinstance(meeting, str) else "-",
+                            dict(command="floor_accept", code=exc.code, cid=str(cid)[:64], run=self.run_id))
+            raise
+
+    def _floor_accept(self, fa, meeting, cid, title, priority):
+        if not isinstance(meeting, str) or not self.MEETING_ID.fullmatch(meeting):
+            raise fa.AcceptRefused("bad_meeting", "meeting must be a meeting ID from a wrap event.")
+        if self.run_id is not None and (self._find("runs", self.run_id) or {}).get("kind") == "meeting":
+            raise ValueError("floor_accept is for the wrap session, not the meeting session.")
+        title = _text(title, "title")
+        if not isinstance(priority, int) or isinstance(priority, bool):
+            raise ValueError("Priority must be an integer.")
+        with self._tx():
+            key = "%s:%s" % (meeting, cid)
+            previous = self.db.execute("SELECT record_id FROM idempotency WHERE namespace='floor_accept' AND key=?",
+                                       (key,)).fetchone()
+            if previous:
+                return dict(self._get("works", previous["record_id"]), accepted=dict(meeting=meeting, cid=cid,
+                                                                                     repeated=True))
+            lines = fa.numbered(self.home, meeting)
+            number, commit = fa.commit_line(lines, cid)
+            if commit is None:
+                raise fa.AcceptRefused("unknown_cid", "%s is not a promise issued in meeting %s." % (cid, meeting))
+            hold, pending = self._hold_row(), self._meeting_row()
+            if (not any(l.get("op") == "end" for _, l in lines)
+                    or (hold and hold.get("kind") == "floor" and hold.get("meeting") == meeting)
+                    or (pending and pending.get("meeting") == meeting)):
+                raise fa.AcceptRefused("meeting_running", "meeting %s has not ended." % meeting)
+            found = fa.wrap_event(fa.wrap_rows(self.db, meeting), meeting)
+            if found is None:
+                raise fa.AcceptRefused("no_wrap", "no wrap event for meeting %s in this home." % meeting)
+            wrap, body = found
+            from . import floorjournal
+            chain = floorjournal.verify(self.home, meeting, anchor=body["head"]).get("chain")
+            if chain != "chain_ok":
+                raise fa.AcceptRefused("chain_broken", "meeting %s journal: %s." % (meeting, chain))
+            confirm = fa.latest_confirm(lines, cid)
+            if confirm and confirm[1] is False:
+                raise fa.AcceptRefused("declined", "the human declined %s on the panel (journal line %d)."
+                                       % (cid, confirm[0]))
+            confirmed_by = "human-panel line %d" % confirm[0] if confirm else "issued"
+            now = timestamp()
+            item = self._evidence_item(dict(level="observed", ref=wrap["id"],
+                                            note="meeting %s journal line %d, %s (%s)" % (meeting, number, cid,
+                                                                                         confirmed_by)), None)
+            target = commit.get("work_id")
+            if target:
+                old = self._find("works", target) if isinstance(target, str) else None
+                if old is None:
+                    raise fa.AcceptRefused("unknown_work", "the promise names %s, which is not a work in this home."
+                                           % target)
+                if old.get("status") in ("done", "cancelled"):
+                    raise fa.AcceptRefused("work_closed", "the promise names %s, which is %s; it is never reopened."
+                                           % (target, old["status"]))
+                record = dict(old, evidence=list(old.get("evidence") or []) + [item], updated_at=now)
+            else:
+                record = dict(id="work-" + uuid.uuid4().hex, title=title, description=fa.description(commit),
+                              status="ready", waiting_for="", waiting_question_id=None, waiting_question_ids=[],
+                              wake_at=None, priority=priority, note="", created_at=now, updated_at=now,
+                              origin=fa.ORIGIN, evidence=[item],
+                              meeting=dict(id=meeting, cid=cid, line=number, wrap_event=wrap["id"]))
+            self._save("works", record, "work.put")
+            self.db.execute("INSERT INTO idempotency(namespace,key,payload,record_id) VALUES ('floor_accept',?,?,?)",
+                            (key, _json(dict(meeting=meeting, cid=cid)), record["id"]))
+            self._audit("floor.accepted", meeting, dict(meeting=meeting, cid=cid, line=number, work=record["id"],
+                                                         confirmed_by=confirmed_by, existing=bool(target),
+                                                         run=self.run_id))
+            return dict(record, accepted=dict(meeting=meeting, cid=cid, line=number, confirmed_by=confirmed_by))
 
     def run_begin(self, event_ids=None):
         """Start a run. event_ids, when given, restricts the captured inputs to those pending events."""

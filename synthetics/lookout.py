@@ -1045,7 +1045,9 @@ def board_page(root, project, now=None):
         for r in backlog:
             out.append("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
                        "<td><code>%s</code></td></tr>" % (
-                           _who(people, r.get("owner")), _v(r.get("status")), _v(r.get("priority")), _v(r.get("title")),
+                           _who(people, r.get("owner")), _v(r.get("status")), _v(r.get("priority")),
+                           _v(r.get("title")) + (" <span class='muted'>(from a meeting)</span>"
+                                                 if r.get("origin") == "meeting" else ""),
                            _v(r.get("waiting_for")), E("; ".join(r.get("blocked_by") or [])), _rel(r.get("at"), now),
                            _v(r.get("work_id"))))
         out.append("</table>")

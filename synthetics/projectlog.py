@@ -39,7 +39,7 @@ ENTRY_KINDS = (
 # M27 (iv) Board: discussion posts and the projected backlog (owner work records, never edited here).
 BOARD_KINDS = ("post", "backlog")
 BACKLOG_STATUSES = ("ready", "waiting", "done", "cancelled", "unpublished")
-BACKLOG_ORIGINS = ("self", "assigned")
+BACKLOG_ORIGINS = ("self", "assigned", "meeting")   # MTG F3: "meeting" only via floor_accept
 POST_GIST = 160
 CLAIM_RELS = ("revises", "refines", "carries", "context", "disputes")
 LESSON_STATUSES = ("proposed", "accepted", "disputed", "superseded", "retired")

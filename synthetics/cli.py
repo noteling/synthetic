@@ -1044,6 +1044,12 @@ def main(argv=None):
         if args.command == "status":
             output(status(home))
             return 0
+        if args.command == "floor" and args.floor_command == "verify":
+            # MTG F3: read-only (sqlro, never a Store), fenced exactly like doctor and `routine verify`.
+            _doctor_gate(args, home, what="floor verify")
+            from . import flooraccept
+            output(flooraccept.verify(home, args.run))
+            return 0
         if args.command == "floor":
             from . import floor as floor_cli
             return floor_cli.attach(home, args.key_file)

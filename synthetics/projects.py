@@ -522,7 +522,7 @@ class ProjectStore:
                 if body.get("status") not in BACKLOG_STATUSES:
                     raise ProjectError("bad_backlog", f"{where}: status must be one of {BACKLOG_STATUSES}")
                 if body.get("origin") not in (None,) + BACKLOG_ORIGINS:
-                    raise ProjectError("bad_backlog", f"{where}: origin must be self or assigned")
+                    raise ProjectError("bad_backlog", f"{where}: origin must be one of {BACKLOG_ORIGINS}")
                 _check_text(body.get("title") or "", BACKLOG_TITLE_MAX, where, "title")
                 _check_text(body.get("waiting_for") or "", BACKLOG_WAITING_MAX, where, "waiting_for")
                 ev = body.setdefault("evidence", [])
