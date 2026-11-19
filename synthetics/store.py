@@ -1807,9 +1807,14 @@ class Store:
             message = self._routed_message(channel, message_id)
             state = self._chan_state(message, channel["id"])
             deliveries = message.setdefault("deliveries", [])
-            for item in deliveries:
-                if (item.get("channel"), item.get("status"), item.get("receipt")) == (channel["id"], outcome, receipt):
-                    return "duplicate", state["state"]
+            # Issue #1: a repeat counts as duplicate only while no new claim is open. An ack always closes its
+            # claim, so while the message is claimed every earlier delivery belongs to an older attempt, and the
+            # same outcome+receipt (e.g. failed, retryable, receipt null) is this attempt's own outcome.
+            if state["state"] != "claimed":
+                for item in deliveries:
+                    if (item.get("channel"), item.get("status"), item.get("receipt")) == (
+                            channel["id"], outcome, receipt):
+                        return "duplicate", state["state"]
             if state["state"] in FINAL_STATES:
                 raise ChannelError("conflict", "Message %s already has final outcome %s on channel %s."
                                    % (message["id"], state["state"], channel["id"]))

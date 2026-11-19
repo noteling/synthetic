@@ -218,8 +218,11 @@ failed (retryable) → pending after 60 s, attempt + 1
 - `channel ack` reads outcome lines from stdin:
   `{"v":1,"message_id":…,"outcome":"delivered|failed|uncertain","receipt":"…","retryable":false,"detail":{}}`
   and answers `{"v":1,"message_id":…,"result":"recorded|duplicate|rejected","state":…,"error":…}`.
-  Ack only a claimed message. Repeating the same outcome and receipt is
-  `duplicate`; a different outcome after a final one is `conflict`.
+  Ack only a claimed message. Repeating the same outcome and receipt before
+  the message is claimed again is `duplicate`; the same outcome on a later
+  claim (a second retryable failure with no receipt, say) is that attempt's
+  own outcome and is `recorded`. A different outcome after a final one is
+  `conflict`.
 - **No blind resend.** An expired lease, or a claim left by a replaced
   instance, becomes `uncertain`, never `pending`. `channel uncertain` lists
   them; `channel reconcile --message ID --outcome delivered|failed [--receipt R]
