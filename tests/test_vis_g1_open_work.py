@@ -54,8 +54,10 @@ class OpenWorkPageTests(unittest.TestCase):
     def test_open_work_page_lists_only_ready_and_waiting(self):
         code, body = self.get("/p/synthetics/work")
         self.assertEqual(code, 200)
-        for text in ("Open slice &lt;b&gt;one&lt;/b&gt;", "Waiting slice", "Rowan glance", "Codex review", BLOCKER):
+        for text in ("Open slice &lt;b&gt;one&lt;/b&gt;", "Waiting slice", "Rowan glance", "Codex review"):
             self.assertIn(text, body)
+        qid, rest = BLOCKER.split(" ", 1)  # VIS-O: the blocker's question ID moves into the tooltip
+        self.assertIn("<span title='%s'>an answer to a question</span> %s" % (qid, rest), body)
         for text in ("FINISHED-TITLE", "CANCELLED-TITLE", "UNPUBLISHED-TITLE", "<b>one</b>"):
             self.assertNotIn(text, body)
         self.assertIn("2 closed", body)  # done + cancelled are counted and left to the board page
@@ -78,8 +80,9 @@ class OpenWorkPageTests(unittest.TestCase):
         code, body = self.get("/p/noteling/work")
         self.assertEqual(code, 200)
         self.assertIn("No open published work", body)
-        _, team = self.get("/")
-        self.assertIn('href="/p/synthetics/work"', team)
+        _, listing = self.get("/projects")  # VIS-O: nav is Overview · Projects · Diagnostics
+        self.assertIn("href='/p/synthetics'", listing)
+        self.assertIn('href="/projects"', self.get("/")[1])
 
 
 if __name__ == "__main__":
