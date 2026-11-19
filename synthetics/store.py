@@ -1219,15 +1219,19 @@ class Store:
         question_id, to_id = _text(question_id, "question_id"), _text(to_id, "to_id")
         routed_by = _text(routed_by, "routed_by")
         with self._tx():
-            question = self._get("questions", question_id)
-            current = question.get("to_id")
-            if current == to_id:
-                return question
-            if current:
-                raise ValueError("Question %s is already routed to %s; refusing to re-stamp it as %s."
-                                 % (question_id, current, to_id))
-            question.update(to_id=to_id, routed_by=routed_by, routed_at=timestamp())
-            return self._save("questions", question, "question.routed")
+            return self._question_routed(question_id, to_id, routed_by)
+
+    def _question_routed(self, question_id, to_id, routed_by):
+        # Inside the caller's transaction (question_routed, or feed(route=...) for issue #9).
+        question = self._get("questions", question_id)
+        current = question.get("to_id")
+        if current == to_id:
+            return question
+        if current:
+            raise ValueError("Question %s is already routed to %s; refusing to re-stamp it as %s."
+                             % (question_id, current, to_id))
+        question.update(to_id=to_id, routed_by=routed_by, routed_at=timestamp())
+        return self._save("questions", question, "question.routed")
 
     # -- Docket P1b: relay links and hop notices (design §1, Codex rulings Q1/Q2, C2/C4) --
 
@@ -1464,8 +1468,15 @@ class Store:
         return event
 
     def feed(self, sender, body, kind="message", thread=None, reply_to=None, source="manual", external_id=None, occurred_at=None,
-             in_reply_to=None, credential=None, recipient_work_id=None, project=None, project_by="feeder"):
+             in_reply_to=None, credential=None, recipient_work_id=None, project=None, project_by="feeder",
+             route=None):
+        """route: the routed_by label of a relayed answer (channel C1). The question_routed stamp is then
+        made inside this feed's transaction, so a rejected feed leaves no stamp (issue #9)."""
         sender, body, source = _text(sender, "sender"), _text(body, "body"), _text(source, "source")
+        if route is not None:
+            route = _text(route, "route")
+            if not reply_to:
+                raise ValueError("route needs reply_to (the question being answered).")
         payload = dict(sender=sender, body=body, kind=_text(kind, "kind"), thread=thread, reply_to=reply_to,
                        source=source, external_id=external_id,
                        occurred_at=timestamp(occurred_at) if occurred_at is not None else None)
@@ -1491,6 +1502,8 @@ class Store:
             previous = self._once("feed:" + source, external_id, payload)
             if previous:
                 return self._get("events", previous)
+            if route is not None:
+                self._question_routed(reply_to, sender, route)
             question = self._get("questions", reply_to) if reply_to else None
             if question and not self._may_answer(question, sender):
                 raise ValueError("Reply must come from the question's recipient and answer an open question.")

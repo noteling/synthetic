@@ -190,7 +190,9 @@ operator or secretary relays a human's answer (the human addressed by the
 question did not type it into this channel), the line must say so:
 `"question_id": "question-…", "routed": true`. Synthetics then records
 `routed_by = channel:<id>` and `to_id = sender` on the question (audited
-`question.routed`) before accepting the answer. Without `routed: true` such a
+`question.routed`) in the same transaction that accepts the answer, so a line
+rejected for any reason (for example a reused `external_id` with a different
+body) leaves the question unstamped. Without `routed: true` such a
 line is rejected with `invalid_state`. `routed: true` is honoured only when
 `sender` is listed in the home's `humans.json` `operators.senders`; from any
 other sender (or with no humans.json) the line is rejected with

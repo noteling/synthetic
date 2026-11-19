@@ -90,6 +90,7 @@ def _inbound_one(store, channel, credential, item):
     # Generic reply metadata never answers a question; only question_id does (M06/M18).
     in_reply_to = item.get("in_reply_to") or item.get("reply_to")
     before = store.db.execute("SELECT COALESCE(MAX(seq), 0) FROM events").fetchone()[0]
+    route = None
     if question_id and item.get("routed"):
         # C1: an operator relays a human's answer. Record who routed it to whom (audited
         # question.routed) so the answer is accepted from this sender; never silently.
@@ -97,22 +98,24 @@ def _inbound_one(store, channel, credential, item):
         if question is None:
             raise ChannelError("unknown_message", "No question %s in this home." % question_id)
         if question["status"] == "open" and item["sender"] not in (question["to"], question.get("to_id")):
-            try:
-                store.question_routed(question_id, item["sender"], "channel:%s" % channel["id"])
-            except ValueError as exc:
-                raise ChannelError("conflict", str(exc))
+            # Issue #9: the stamp is made inside the feed's transaction, so a rejected feed leaves none.
+            if question.get("to_id"):
+                raise ChannelError("conflict", "Question %s is already routed to %s; refusing to re-stamp it as %s."
+                                   % (question_id, question["to_id"], item["sender"]))
+            route = "channel:%s" % channel["id"]
     try:
         event = store.feed(item["sender"], item["body"], thread=item.get("thread"), reply_to=question_id,
                            source=item["source"], external_id=item["external_id"],
                            occurred_at=item.get("occurred_at"), in_reply_to=in_reply_to, credential=credential,
-                           recipient_work_id=item.get("recipient_work_id"), project=item.get("project"))
+                           recipient_work_id=item.get("recipient_work_id"), project=item.get("project"),
+                           route=route)
     except ChannelError:
         raise
     except ValueError as exc:
         text = str(exc)
         if "Reply must come from" in text:
             raise ChannelError("invalid_state", text + " (an operator relaying a human's answer sets \"routed\": true)")
-        if "different" in text or "idempotency" in text.lower():
+        if "different" in text or "idempotency" in text.lower() or "already routed" in text:
             raise ChannelError("conflict", text)
         raise ChannelError("bad_line", text)
     result = "duplicate" if event.get("seq", before + 1) <= before else "accepted"
