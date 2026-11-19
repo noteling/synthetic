@@ -88,9 +88,12 @@ There are no hardcoded IDs, and nothing is inferred from role text.
 
 ## Commands and who may run them (E3)
 
-**The whole provisioning sequence is owner-only.** `init`, `routine seed`, `cadence`, `restore`,
-`teardown` and `worker install` are refused to a session on every home, its own or another, including a
-disposable home under `/tmp`. A session may run only `routine list` on its own home and MCP `routine_rearm`.
+**The whole provisioning sequence is owner-only.** `init`, `routine seed`, `cadence`, `restore`
+and `teardown` are refused to a session on every home, its own or another, including a disposable home under
+`/tmp`. `worker install` is owner-only, except a delegated `worker.manage` reinstall of the standard worker
+plist on another home that the delegation covers (never the session's own home, which uses
+`runtime_restart`; see [authority.md](authority.md)). A session may run only `routine list` on its own home
+and MCP `routine_rearm`.
 
 | Command | Owner (host account, operator) | A session (SYNTHETICS_SESSION_RUN set) |
 |---|---|---|
@@ -147,7 +150,9 @@ Every step below runs in an owner shell (no `SYNTHETICS_SESSION_RUN`); see the t
    `--dream-at HH:MM`). Kinds come from the flag only; nothing defaults from the role.
    **Output.** Seed prints one JSON object:
    `{"created": [{kind, work_id, wake_at, every_minutes}], "existing": [{kind, work_id, status,
-   first_ignored?}], "route": {resolved, manager, via, self_is_manager, report_to, reason?}}`. A second seed
+   first_ignored?}], "route": {resolved, manager, via, self_is_manager?, report_to, reason?}}`
+   (`self_is_manager` is absent on an unresolved route; `reason` appears on an unresolved route, or when this
+   home is the manager and humans.json has no `default_human`). A second seed
    with the same kinds creates nothing: each kind is listed under `existing` (with `first_ignored: true` when
    `--first` named it). A kind counts as existing while any of its routine works is not cancelled.
    **Manager route.** The route is worked out each time it is used (seed, `routine list`, doctor,
@@ -167,8 +172,10 @@ Every step below runs in an owner shell (no `SYNTHETICS_SESSION_RUN`); see the t
    **Restore** (`routine restore KIND`) works on any routine that wasn't torn down, not only a quarantined
    one: it sets the routine waiting at the next target after its current `anchor_at`, clears `quarantine`
    (`failures` stay), reopens a done routine and consumes a held `work_due`. On a routine that is waiting
-   and not yet due, this moves its next wake one cycle later (the anchor is the pending wake, so the next
-   target is anchor + every). A torn-down routine is refused ("seed it again").
+   and not yet due, the next wake becomes `anchor_at + every`. Normally the anchor is the pending wake, so
+   this moves the next wake one cycle later. After `--first`, seed sets `wake_at` to the `--first` time but
+   `anchor_at` to the regular first wake minus `every`, so a restore before the first fire drops the
+   `--first` time and returns to the regular first wake. A torn-down routine is refused ("seed it again").
 5. **Verify.** `synthetics --home H routine list` shows each routine (status, wake_at, last fired, last
    re-armed, failures), its flags and the manager route. `synthetics --home H doctor` reports the flags below,
    and Lookout's Team page has a Routines block.
