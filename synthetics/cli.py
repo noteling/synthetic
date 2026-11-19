@@ -97,6 +97,19 @@ def _m28_gate(args, home):
         authority.owner_only("access " + args.access_command)
     elif cmd == "work" and getattr(args, "override", None) is not None:
         authority.owner_only("work --override")
+    elif cmd == "routine":
+        # RTN P1 (E3; G2 ruled owner-only, Codex event-d14945da): seed/cadence/restore/teardown are owner-only,
+        # like the other provisioning commands; a session proves and re-arms its own routine with MCP
+        # routine_rearm. list reads only the caller's own home.
+        if args.routine_command != "list":
+            authority.owner_only("routine " + args.routine_command)
+        else:
+            a = authority.actor()
+            if not a["owner"] and Path(a["home"]).resolve() != Path(home).resolve():
+                authority.audit(a["home"], "authority.refused", {"what": "routine list", "code": "own_home_only",
+                                                                 "run": a["run"], "actor": a["id"]})
+                raise authority.AuthorityError("own_home_only", "routine list in a session reads only its own home "
+                                               "(%s), not %s" % (a["home"], home), what="routine list")
     elif cmd == "runtime" and args.runtime_command == "request":
         a = authority.actor()
         if not a["owner"] and Path(a["home"]) == Path(home):
@@ -642,6 +655,26 @@ def parser():
     add_roster_parser(sub)
     from .authority import add_parser as add_authority_parser
     add_authority_parser(sub)
+    rtn = sub.add_parser("routine", help="RTN routines (docs/routines.md): seed, cadence, restore and teardown are "
+                         "owner-only; list reads this home")
+    rts_ = rtn.add_subparsers(dest="routine_command", required=True)
+    rseed = rts_.add_parser("seed", help="idempotent: create missing routine works, never touch existing ones")
+    rseed.add_argument("--kinds", required=True, help="comma-separated: hourly-check, team-review")
+    rseed.add_argument("--every", action="append", default=[], metavar="KIND=MIN",
+                       help="cadence in minutes (default 60, minimum 5)")
+    rseed.add_argument("--dream-at", help="dream time HH:MM UTC (default 01:30; dream ships in P2)")
+    rseed.add_argument("--first", action="append", default=[], metavar="KIND=WHEN",
+                       help="first wake for a newly created kind only: ISO-8601Z or +MIN, from now+1 min to now+every")
+    rcad = rts_.add_parser("cadence", help="change one routine's every_minutes (from the next re-arm)")
+    rcad.add_argument("kind")
+    rcad.add_argument("minutes", type=int)
+    rres = rts_.add_parser("restore", help="clear a quarantine (failures stay) or reopen a closed routine")
+    rres.add_argument("kind")
+    rtd = rts_.add_parser("teardown", help="cancel routines before `worker remove` (no routine_closed flag after)")
+    rtd.add_argument("kinds", nargs="*")
+    rtd.add_argument("--all", action="store_true")
+    rtd.add_argument("--reason", default="routine teardown")
+    rts_.add_parser("list", help="routines, their flags and the manager route")
     proj = sub.add_parser("project", help="project memory (M21): bindings, capture, grants, redaction, export")
     ps = proj.add_subparsers(dest="project_command", required=True)
     pbind = ps.add_parser("bind", help="capture a thread/source into project P from now on (allowed in a session; "
@@ -718,6 +751,40 @@ def parser():
                                 help="how a runtime request restarts the job: launchctl kickstart -k, or exit 75 "
                                      "for KeepAlive{SuccessfulExit:false} to relaunch")
     return p
+
+
+def _routine_command(store, args):
+    """RTN P1. The CLI gate (_m28_gate) has already refused sessions for everything but list."""
+    from . import routines
+    cmd = args.routine_command
+    if cmd == "seed":
+        kinds = [k.strip() for k in args.kinds.split(",") if k.strip()]
+        held = [k for k in kinds if k not in routines.SEED_KINDS]
+        if held:
+            raise ValueError("cannot seed %s: P1 seeds %s (dream guidance ships in RTN P2)"
+                             % (", ".join(held), ", ".join(routines.SEED_KINDS)))
+        every = {}
+        for item in args.every:
+            kind, _, minutes = item.partition("=")
+            if not minutes.strip().isdigit():
+                raise ValueError("--every takes KIND=MINUTES, got %r" % item)
+            every[kind.strip()] = int(minutes)
+        first = {}
+        for item in args.first:
+            kind, _, when = item.partition("=")
+            if not when.strip():
+                raise ValueError("--first takes KIND=<ISO-8601Z | +MIN>, got %r" % item)
+            first[kind.strip()] = when.strip()
+        return store.routine_seed(kinds, every=every, dream_at=args.dream_at, first=first)
+    if cmd == "cadence":
+        return store.routine_cadence(args.kind, args.minutes)
+    if cmd == "restore":
+        return store.routine_restore(args.kind)
+    if cmd == "teardown":
+        if not args.all and not args.kinds:
+            raise ValueError("name the kinds to tear down, or --all")
+        return store.routine_teardown(None if args.all else args.kinds, reason=args.reason)
+    return store.routine_list()
 
 
 def main(argv=None):
@@ -834,7 +901,7 @@ def main(argv=None):
             return 0
         if args.command == "channel" and args.channel_command in CONTRACT_COMMANDS:
             return channel_contract.run(args, home)
-        if args.command in ("init", "handoff-codex", "question-routed", "access", "limit", "work", "runtime"):
+        if args.command in ("init", "handoff-codex", "question-routed", "access", "limit", "work", "runtime", "routine"):
             _m28_gate(args, home)
         if args.command == "init":
             humans_written = _init_humans(home, args.human, args.human_channels)
@@ -936,6 +1003,8 @@ def main(argv=None):
                     output(store.event_get(args.id))
                 elif args.command == "usage":
                     output(store.usage(days=args.days))
+                elif args.command == "routine":
+                    output(_routine_command(store, args))
                 elif args.command == "backfill-cost":
                     output(store.run_cost_backfill())
                 elif args.command == "limit":

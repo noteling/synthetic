@@ -28,7 +28,7 @@ class FixtureTests(unittest.TestCase):
         # M21: store.py imports capture -> projects -> projectlog.
         # Backlog 40: capture imports sqlro. VIS P1: engine imports sharedstatus -> docket. RW-1: sharedstatus -> glance.
         for name in ("capture.py", "projects.py", "projectlog.py", "roster.py", "rostertools.py", "board.py",
-                     "sqlro.py", "sharedstatus.py", "docket.py", "glance.py"):
+                     "sqlro.py", "sharedstatus.py", "docket.py", "glance.py", "routines.py"):
             (self.source / "synthetics" / name).write_text((ROOT / "synthetics" / name).read_text())
         (self.source / "synthetics" / "prompts" / "employee.md").write_text(
             "Persistent employee.\n- Original directory /Users/someone/projects/synthetics is special.\n")

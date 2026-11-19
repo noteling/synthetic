@@ -76,7 +76,8 @@ class QuestionRoutingTests(unittest.TestCase):
 
     def test_not_exposed_through_mcp(self):
         names = {tool["name"] for tool in TOOLS}
-        self.assertFalse({n for n in names if "rout" in n})
+        # question_routed is adapter-only; "routed" (not "rout") so RTN's routine_rearm doesn't trip it.
+        self.assertFalse({n for n in names if "routed" in n})
         for tool in TOOLS:
             self.assertNotIn("to_id", json.dumps(tool.get("inputSchema", {})))
 

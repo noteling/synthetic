@@ -210,7 +210,7 @@ class Engine:
                 board.scan(store)
             except Exception:  # noqa: BLE001 - the cursor didn't move; retried next step
                 pass
-            if not store.event_pending() and not store.runnable_work():
+            if not store.event_admissible(limit=1) and not store.runnable_work():
                 return None
             if store.worker_hold() is not None:
                 return None  # M28 D10c: a delegated worker op holds the idle boundary
@@ -235,7 +235,7 @@ class Engine:
                     # Issue #6: scan every pending event, not the 50 oldest, so held peer traffic can't hide an
                     # admissible input; at most one ordinary batch (50) is admitted.
                     allowed = [e["id"] for e in store.event_pending_select(
-                        lambda e: self._admissible_during_limit(e, humans_cfg))]
+                        lambda e: not store.admission_held(e) and self._admissible_during_limit(e, humans_cfg))]
                 if not allowed:
                     return None
                 try:
