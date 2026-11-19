@@ -134,7 +134,7 @@ CREATE TABLE IF NOT EXISTS roster_log (
 
 class Store:
     TABLES = ("identity", "entities", "memories", "works", "questions", "messages", "reminders", "runs", "access_grants",
-              "thread_records", "runtime_requests", "channels", "launch_ops", "glances")
+              "thread_records", "runtime_requests", "channels", "launch_ops", "glances", "clicks")
 
     def __init__(self, employee_home, run_id=None):
         self.home = Path(employee_home).expanduser().resolve()
@@ -1227,7 +1227,9 @@ class Store:
         return [work for work in self.work_list("ready") if not (work.get("routine") or {}).get("quarantine")]
 
     def _send(self, to, body, work_id, key, question, thread=None, in_reply_to=None, recipient_work_id=None,
-              project=None, work_ids=None, relays=None):
+              project=None, work_ids=None, relays=None, marks=None):
+        """marks: engine-only fields stored on the question record (never a model tool argument), e.g. the
+        click_id of an engine-created click approval question (synthetics/click.py)."""
         to, body, key = _text(to, "to"), _text(body, "body"), _text(key, "key")
         work_id = self._resolve(work_id, "works")
         in_reply_to = self._resolve(in_reply_to)  # own message/question/event; recipient_work_id never (K5)
@@ -1317,8 +1319,8 @@ class Store:
                            kind=namespace, question_id=question_id, created_at=now)
             self._save("messages", message, "outbox.queued")
             if question:
-                result = dict(payload, **extra, id=question_id, message_id=message["id"], created_at=now,
-                              status="open", answer_event_id=None)
+                result = dict(payload, **extra, **(marks or {}), id=question_id, message_id=message["id"],
+                              created_at=now, status="open", answer_event_id=None)
                 if links:
                     result["relays"] = links
                 self._save("questions", result, "question.asked")
@@ -2267,6 +2269,10 @@ class Store:
                 work["waiting_question_ids"] = linked
                 self._save("works", work, "work.question_link_recovered")
 
+    CLICK_ONLY_CORRELATED = ("%s is a click approval question: only the human's own reply to it (correlated by "
+                             "its question ID) can answer it, so it can't be resolved or closed with another "
+                             "message. Withdraw it with question_close and no event_id if it is obsolete.")
+
     def question_resolve(self, question_id, event_id):
         """The asker records that an already received message answers its open question.
 
@@ -2285,6 +2291,8 @@ class Store:
                 return dict(question, already=True)
             if event.get("kind") != "message":
                 raise ValueError("Only a received message can answer a question.")
+            if question.get("click_id"):
+                raise ValueError(self.CLICK_ONLY_CORRELATED % question_id)
             if question["status"] != "open":
                 raise ValueError("Question %s is already %s (answer %s)." % (
                     question_id, question["status"], question.get("answer_event_id")))
@@ -2321,6 +2329,8 @@ class Store:
                 raise ValueError("Question %s is already %s." % (question_id, question["status"]))
             now = timestamp()
             if event_id is not None:
+                if question.get("click_id"):
+                    raise ValueError(self.CLICK_ONLY_CORRELATED % question_id)
                 event_id = _text(event_id, "event_id")
                 event = self._get("events", event_id)
                 if event.get("kind") != "message":

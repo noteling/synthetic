@@ -20,6 +20,8 @@ Fields (v1; add, never rename):
            (VIS G8: the newest Store.STUCK_ITEMS stuck items, as in the employee's snapshot; never a body)
   glances [{id, run_id, at, ok, exit, status, counts, find, browser}]   (RW-1, newest 5; already whitelisted by
            glance.py: counts and find summary only, never page text, hit labels or frames)
+  clicks [{id, run_id, created_at, updated_at, name, role, browser, host, state, reason, question_id, guard, find,
+           result}]   (stage 2, newest 5; whitelisted by click.recent: never tokens, why, labels or frames)
   works[].routine {kind, every_minutes, last_fired_at, last_rearmed_at, quarantined, failures}   (RTN P1, routine
            works only; never the review text)
   routine_flags [{code, severity, work_id, kind, detail?, total?, last_7_days?}]   (RTN P1, routines.flags)
@@ -32,7 +34,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import docket, glance, routines
+from . import click, docket, glance, routines
 
 VERSION = 1
 RUNS = 10
@@ -101,6 +103,10 @@ def build(store, paused=None, now=None):
         glances = [{k: g.get(k) for k in GLANCE_KEYS} for g in glance.recent(store)]
     except Exception:  # noqa: BLE001 - an older home without the table; the rest of the export still matters
         glances = []
+    try:
+        clicks = click.recent(store)
+    except Exception:  # noqa: BLE001 - an older home without the table
+        clicks = []
     return dict(
         v=VERSION, employee=identity["id"], name=identity.get("name"), role=identity.get("role"),
         written_at=now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"), pid=os.getpid(),
@@ -109,7 +115,7 @@ def build(store, paused=None, now=None):
         works=works, docket=dock, docket_error=dock_error, questions_open=questions, runs=run_rows,
         outbox_stuck=dict(count=stuck.get("count", 0), older_than_48h=stuck.get("older_than_48h", 0),
                           items=[{k: item.get(k) for k in STUCK_KEYS} for item in stuck.get("items") or []]),
-        glances=glances, routine_flags=routines.flags(store.work_list(), now, active is not None))
+        glances=glances, clicks=clicks, routine_flags=routines.flags(store.work_list(), now, active is not None))
 
 
 def read(home):

@@ -551,6 +551,19 @@ def _home_block(member, people, authors, now):
                        % (_rel(g.get("at"), now), _v(g.get("run_id")), _v(g.get("status")), _v(counts.get("site")),
                           E(seen_text), E(find_text)))
         out.append("</table>")
+    clicks = (status.get("clicks") or [])[:5]
+    if clicks:
+        out.append("<p id='clicks'><b>Recent clicks</b> <span class='muted'>(screen_click: one approved, named "
+                   "control)</span></p><table><tr><th>updated</th><th>control</th><th>site</th><th>state</th>"
+                   "<th>reason</th><th>question</th></tr>")
+        for c in clicks:
+            if not isinstance(c, dict):
+                continue
+            control = "“%s”%s" % (c.get("name"), " (%s)" % c["role"] if c.get("role") else "")
+            out.append("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td><code>%s</code></td></tr>"
+                       % (_rel(c.get("updated_at"), now), E(control), _v(c.get("host")), _v(c.get("state")),
+                          _v(c.get("reason")), _v(c.get("question_id"))))
+        out.append("</table>")
     stuck = status.get("outbox_stuck") or {}
     if stuck.get("count"):
         flagged = _stuck_problems(stuck)

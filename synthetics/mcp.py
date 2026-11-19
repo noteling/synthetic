@@ -170,9 +170,13 @@ TOOLS.extend(rostertools.TOOLS)
 from . import glance  # noqa: E402  (RW-1 Glance)
 
 TOOLS.extend(glance.TOOLS)
+from . import click  # noqa: E402  (stage 2: one approved, named click)
+
+TOOLS.extend(click.TOOLS)
 METHODS = {entry["name"]: entry for entry in TOOLS}
 MUTATIONS = {"entity_put", "memory_put", "work_put", "question_ask", "question_resolve", "question_close", "question_relays", "message_send", "reminder_set", "routine_rearm",
-             "runtime_restart"} | projecttools.MUTATIONS | rostertools.MUTATIONS | glance.MUTATIONS
+             "runtime_restart"} | projecttools.MUTATIONS | rostertools.MUTATIONS | glance.MUTATIONS \
+    | click.MUTATIONS
 
 
 def validate_arguments(specification, arguments):
@@ -222,15 +226,16 @@ def validate_value(name, field, value):
 
 
 def offered(home):
-    """The tools this home is offered: screen_glance only when the home opts in (RW-1 C1, glance.json)."""
-    if glance.enabled(home):
-        return TOOLS
-    return [entry for entry in TOOLS if entry["name"] not in glance.NAMES]
+    """The tools this home is offered: screen_glance only when the home opts in (RW-1 C1, glance.json), the click
+    tools only when it opts in to clicks (click.json)."""
+    hidden = (set() if glance.enabled(home) else glance.NAMES) | (set() if click.enabled(home) else click.NAMES)
+    return [entry for entry in TOOLS if entry["name"] not in hidden]
 
 
 # VIS C1: tools whose success rewrites <home>/shared/status.json.
 STATUS_TOOLS = frozenset({"work_put", "routine_rearm", "question_ask", "question_close", "question_resolve", "question_relays",
-                          "screen_glance"})  # RW-1: Lookout's Recent glances
+                          "screen_glance",  # RW-1: Lookout's Recent glances
+                          "screen_click_request", "screen_click"})  # stage 2: Lookout's Recent clicks
 
 
 class Server:
@@ -241,7 +246,8 @@ class Server:
 
     def call(self, name, arguments):
         try:
-            if name not in METHODS or (name in glance.NAMES and not glance.enabled(self.store.home)):
+            if (name not in METHODS or (name in glance.NAMES and not glance.enabled(self.store.home))
+                    or (name in click.NAMES and not click.enabled(self.store.home))):
                 raise ValueError("Unknown tool: %s" % name)
             validate_arguments(METHODS[name], arguments)
             self.store.resolved = {}
@@ -253,6 +259,8 @@ class Server:
                 value = rostertools.call(self.store, name, arguments)
             elif name in glance.NAMES:
                 value = glance.call(self.store, name, arguments)
+            elif name in click.NAMES:
+                value = click.call(self.store, name, arguments)
             else:
                 method = self.store.context if name == "employee_context" else getattr(self.store, name)
                 if name == "outbox_list":
