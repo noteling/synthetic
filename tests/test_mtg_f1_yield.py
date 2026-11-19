@@ -55,6 +55,17 @@ class Blocking:
         raise AssertionError("never stopped")
 
 
+class StopThenResult(Blocking):
+    """A CLI that still returns a successful result after the yield stop (the stop raced the turn's end)."""
+
+    def run(self, context):
+        self.contexts.append(context)
+        self.started.set()
+        if self.stopped.wait(20):
+            return SimpleNamespace(summary="finished as the stop landed", cost=0.3)
+        raise AssertionError("never stopped")
+
+
 class Quick:
     def __init__(self):
         self.contexts = []
@@ -142,6 +153,7 @@ class C2YieldNotice(Base):
             value = server.call("work_put", {"title": "save my next step"})
             listed = server.call("work_list", {})
         self.assertIn("a meeting is starting", value["yield"])
+        self.assertIn("start no new outbound action", value["yield"])  # F2: Rowan G6
         self.assertIn(pending["deadline"], value["yield"])
         self.assertIsInstance(listed, list)  # list results get no field; the stop covers them
         lines = (self.home / "runs" / (run["id"] + ".mcp.jsonl")).read_text().splitlines()
@@ -243,6 +255,13 @@ class C3YieldedRun(Base):
             self.assertEqual(store.event_pending(), [])
             self.assertIsNotNone(store.meeting_attach("m1"))
         self.assertTrue(events)
+
+    def test_c2_stop_sent_but_session_completed_is_audited_stopped_completed(self):
+        self.feed()
+        run, _ = self.run_engine_until_yield(StopThenResult())
+        self.assertEqual((run["status"], run["summary"]), ("finished", "finished as the stop landed"))
+        stops = [a for a in self.audits() if a[0] == "floor.yield"]
+        self.assertEqual([s[2]["outcome"] for s in stops], ["stopped_completed"])
 
     def test_c3_routine_left_ready_is_not_quarantined_by_a_yield(self):
         with Store(self.home) as store:

@@ -173,10 +173,12 @@ TOOLS.extend(glance.TOOLS)
 from . import click  # noqa: E402  (stage 2: one approved, named click)
 
 TOOLS.extend(click.TOOLS)
-METHODS = {entry["name"]: entry for entry in TOOLS}
+from . import floortools  # noqa: E402  (MTG F2: meeting runs only)
+
+METHODS = {entry["name"]: entry for entry in TOOLS + floortools.TOOLS}
 MUTATIONS = {"entity_put", "memory_put", "work_put", "question_ask", "question_resolve", "question_close", "question_relays", "message_send", "reminder_set", "routine_rearm",
              "runtime_restart"} | projecttools.MUTATIONS | rostertools.MUTATIONS | glance.MUTATIONS \
-    | click.MUTATIONS
+    | click.MUTATIONS | floortools.MUTATIONS
 
 
 def validate_arguments(specification, arguments):
@@ -242,6 +244,23 @@ class Server:
     def __init__(self, store, run_id=None):
         self.store = store
         self.run_id = run_id
+        # MTG F2 (C5): a meeting run sees only floortools.MEETING_TOOLS. Decided from the run row the attach created,
+        # never from anything the model sends.
+        self.meeting = None
+        self.text_mode = "full"
+        if run_id:
+            try:
+                run = store.run_get(run_id)
+            except Exception:  # noqa: BLE001 - unknown run: ordinary tools; ownership is checked on each write
+                run = None
+            if run and run.get("kind") == "meeting":
+                self.meeting = run.get("meeting")
+                self.text_mode = run.get("text_mode") or "full"  # C8: the meeting's heard-text mode
+
+    def tools(self):
+        if self.meeting:
+            return floortools.filter_tools(TOOLS + floortools.TOOLS)
+        return offered(self.store.home)
         self.tool_use_id = None  # E4a: set by respond() for the duration of one tools/call
 
     def call(self, name, arguments):
@@ -249,6 +268,9 @@ class Server:
             if (name not in METHODS or (name in glance.NAMES and not glance.enabled(self.store.home))
                     or (name in click.NAMES and not click.enabled(self.store.home))):
                 raise ValueError("Unknown tool: %s" % name)
+            if (self.meeting and name not in floortools.MEETING_TOOLS) or (
+                    not self.meeting and name in floortools.NAMES):
+                raise ValueError("Unknown tool: %s" % name)  # MTG F2 C5: the meeting allow-list, in code
             validate_arguments(METHODS[name], arguments)
             self.store.resolved = {}
             # Store(home, run_id=...) validates run ownership within the same write
@@ -261,6 +283,8 @@ class Server:
                 value = glance.call(self.store, name, arguments)
             elif name in click.NAMES:
                 value = click.call(self.store, name, arguments)
+            elif name in floortools.NAMES:
+                value = floortools.call(self.store.home, self.meeting, name, arguments, text_mode=self.text_mode)
             else:
                 method = self.store.context if name == "employee_context" else getattr(self.store, name)
                 if name == "outbox_list":
@@ -282,7 +306,8 @@ class Server:
         self.receipt(name, arguments, success=True, value=value)  # i17 E1: after the value is final
         return value
 
-    YIELD_TEXT = "a meeting is starting: save your next step with work_put and end now (stopped at %s)"
+    YIELD_TEXT = ("a meeting is starting: start no new outbound action (message, question, push); save your next "
+                  "step with work_put and end now (stopped at %s)")  # MTG F2: Rowan G6
 
     def _yield_notice(self):
         """MTG F1: the yield notice when a pending meeting names this session's run. None otherwise (C1: then the
@@ -390,7 +415,7 @@ class Server:
         elif method == "ping":
             result = {}
         elif method == "tools/list":
-            result = {"tools": offered(self.store.home)}
+            result = {"tools": self.tools()}
         elif method == "tools/call":
             params = message.get("params") or {}
             # E4a: the client's tool_use_id joins this call's receipt to what the executor stream shows it
