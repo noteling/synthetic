@@ -84,7 +84,7 @@ TOOLS = [
             },
         },
         "cancel_reason": text_property("Why this work is being cancelled. Required when status is cancelled."),
-        "publish": text_property("Optional: project whose Board backlog shows this work (you need a post grant). Published title, status, waiting_for, evidence refs and priority are visible to that project; description and note never are. \"\" unpublishes."),
+        "publish": text_property("Optional: project whose Board backlog shows this work (you need a post grant). Published title, status, waiting_for, evidence refs and priority are visible to that project; description and note never are. \"\" unpublishes. Published or not, the title, status, priority, waiting_for and wake_at of every open work (not done or cancelled) also appear on the host's local Lookout status page (synthetics web); keep private details in the description or note."),
         "origin": {"type": "string", "enum": ["self", "assigned"], "description": "Optional: whether you found this work yourself or it was assigned."},
     }),
     tool("work_list", "Inspect ongoing or completed work.", {"status": text_property()}),
