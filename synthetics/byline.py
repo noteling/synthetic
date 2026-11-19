@@ -111,7 +111,7 @@ def resolved(home):
 
 def normalize_remote(url: str) -> str:
     """git remote URL or scope name → host/owner/repo (lower-case host, no scheme, user, port or .git)."""
-    # Keep in step with norm() inside HOOK (test_i15_byline checks both on the same URLs).
+    # Keep in step with norm() inside HOOK (test_i15_byline.NormParity runs both on the same URL table).
     u = re.sub(r"^[a-z][a-z0-9+.-]*://", "", url.strip())
     u = re.sub(r"^[^@/]+@", "", u)
     if ":" in u.split("/", 1)[0]:
@@ -172,15 +172,29 @@ def set_config(home, data) -> dict:
     """Owner-only (the CLI calls authority.owner_only first). Validates, writes 0600 atomically."""
     cfg = validate(data)
     p = path(home)
-    tmp = p.with_name(FILE + ".tmp")
-    raw = dict(data)
-    with open(str(tmp), "w", encoding="utf-8") as fh:
-        fh.write(json.dumps(raw, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
-        fh.flush()
-        os.fsync(fh.fileno())
-    os.chmod(str(tmp), 0o600)
-    os.replace(str(tmp), str(p))
-    return {"written": str(p), "config": cfg}
+    text = json.dumps(dict(data), indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    _atomic_write(p, text, 0o600)
+    return {"written": str(p), "config": cfg, "sha8": footer_sha8(text)}
+
+
+def _atomic_write(target: Path, text: str, mode: int) -> None:
+    """A fresh mkstemp file (0600 from creation) in the target's directory, then chmod and rename into place.
+    A fixed temp name could be pre-planted (or be a symlink); mkstemp uses O_EXCL with a random name."""
+    import tempfile
+    fd, tmp = tempfile.mkstemp(prefix="." + target.name + ".", suffix=".tmp", dir=str(target.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.chmod(tmp, mode)
+        os.replace(tmp, str(target))
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def clear_config(home) -> dict:
@@ -223,10 +237,14 @@ HOOK = r'''#!/bin/sh
 %(mark)s
 # Installed by `synthetics byline hook install` for home %(home_q)s.
 # Adds the Byline trailer to commits made inside a session of that home, for an in-scope remote only.
-# Never edits author, committer, user.name/email; skips merges and squashes. Remove this file to stop it.
+# Never edits author, committer, user.name/email; skips merges, squashes, -c/-C/--amend reuse of an existing
+# message, and cherry-picks (work this session didn't write). Remove this file to stop it.
 [ -n "$SYNTHETICS_SESSION_RUN" ] || exit 0
 [ "$SYNTHETICS_HOME" = %(home_q)s ] || exit 0
-case "$2" in merge|squash) exit 0 ;; esac
+case "$2" in merge|squash|commit) exit 0 ;; esac
+gd=$(git rev-parse --git-dir 2>/dev/null) || exit 0
+[ -e "$gd/CHERRY_PICK_HEAD" ] && exit 0
+[ -x %(python_q)s ] || exit 0
 exec %(python_q)s -I -c '
 import json, os, re, subprocess, sys
 home, msg = sys.argv[1], sys.argv[2]
@@ -258,12 +276,17 @@ def _shq(s: str) -> str:
     return "'" + str(s).replace("'", "'\"'\"'") + "'"
 
 
-def hook_install(home, repo, python=None) -> dict:
-    """Write .git/hooks/prepare-commit-msg in ``repo``. Refuses to replace a hook Byline did not write."""
-    import sys
-    cfg = resolved(home)
-    if cfg is None:
-        raise BylineError("no %s in %s: the owner sets it first (synthetics byline set)" % (FILE, home))
+class HookOutside(BylineError):
+    """The hook file git would run for ``repo`` resolves outside the allowed directory (#70 F1)."""
+
+    def __init__(self, target, within):
+        super().__init__("the hook for this repo resolves to %s, outside %s" % (target, within))
+        self.target, self.within = target, within
+
+
+def hook_target(repo) -> Path:
+    """The fully resolved file git runs as prepare-commit-msg for ``repo`` (hooks dir per --git-path hooks, so a
+    linked worktree's common dir and core.hooksPath count; symlinks resolved). Nothing is created."""
     top = subprocess.run(["git", "-C", str(repo), "rev-parse", "--git-path", "hooks"],
                          capture_output=True, text=True)
     if top.returncode != 0:
@@ -271,15 +294,27 @@ def hook_install(home, repo, python=None) -> dict:
     hooks = Path(top.stdout.strip())
     if not hooks.is_absolute():
         hooks = Path(repo) / hooks
-    hooks.mkdir(parents=True, exist_ok=True)
-    target = hooks / "prepare-commit-msg"
+    return (hooks.resolve() / "prepare-commit-msg").resolve()
+
+
+def hook_install(home, repo, python=None, within=None) -> dict:
+    """Write the repo's prepare-commit-msg hook. Refuses to replace a hook Byline did not write. With ``within``
+    (a session installing), the resolved hook file must lie inside that directory (HookOutside, nothing
+    written)."""
+    import sys
+    cfg = resolved(home)
+    if cfg is None:
+        raise BylineError("no %s in %s: the owner sets it first (synthetics byline set)" % (FILE, home))
+    target = hook_target(repo)
+    if within is not None:
+        root = Path(within).resolve()
+        if root not in target.parents:
+            raise HookOutside(target, root)
+    target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists() and HOOK_MARK not in target.read_text(errors="replace"):
         raise BylineError("%s exists and was not written by Byline; refusing to replace it" % target)
     text = HOOK % {"mark": HOOK_MARK, "home_q": _shq(str(Path(home).resolve())),
                    "python_q": _shq(python or sys.executable), "trailer_q": _shq(cfg["trailer_line"])}
-    tmp = target.with_name("prepare-commit-msg.tmp")
-    tmp.write_text(text)
-    os.chmod(str(tmp), 0o755)
-    os.replace(str(tmp), str(target))
+    _atomic_write(target, text, 0o755)
     in_scope = sorted(set(repo_remotes(repo)) & set(cfg["scopes"]["repos"]))
     return {"installed": str(target), "trailer": cfg["trailer_line"], "in_scope_remotes": in_scope}

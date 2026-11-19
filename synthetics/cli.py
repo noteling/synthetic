@@ -137,13 +137,18 @@ def _byline(args, home):
     if op in ("set", "clear"):
         authority.owner_only("byline " + op)
         if op == "clear":
-            output(byline.clear_config(home))
+            result = byline.clear_config(home)
+            authority.audit(str(home), "byline.cleared", {"what": "byline clear", "actor": "owner",
+                                                          "removed": bool(result["removed"])})
+            output(result)
             return 0
         try:
             data = json.loads(Path(args.file).expanduser().read_text(encoding="utf-8"))
         except (OSError, ValueError) as exc:
             raise ValueError("--file unreadable: %s" % exc)
-        output(byline.set_config(home, data))
+        result = byline.set_config(home, data)
+        authority.audit(str(home), "byline.set", {"what": "byline set", "actor": "owner", "sha8": result["sha8"]})
+        output(result)
         return 0
     if op == "show":
         output(byline.show(home))
@@ -155,15 +160,24 @@ def _byline(args, home):
         return 0
     repo = Path(args.repo).expanduser().resolve()
     a = authority.actor()
-    if not a["owner"]:
-        own = Path(a["home"]).resolve()
-        if not authority.same_home(home, a["home"]) or not (repo == own or own in repo.parents):
-            authority.audit(a["home"], "authority.refused", {"what": "byline hook install", "code": "own_home_only",
-                                                             "target": str(repo), "run": a["run"], "actor": a["id"]})
-            raise authority.AuthorityError("own_home_only", "a session installs the Byline hook only for its own "
-                                           "home and a repo inside it (%s), not %s" % (own, repo),
-                                           what="byline hook install")
-    output(byline.hook_install(home, repo))
+    if a["owner"]:
+        output(byline.hook_install(home, repo))
+        return 0
+    own = Path(a["home"]).resolve()
+
+    def refuse(target, why):
+        authority.audit(a["home"], "authority.refused", {"what": "byline hook install", "code": "own_home_only",
+                                                         "target": str(target), "run": a["run"], "actor": a["id"]})
+        raise authority.AuthorityError("own_home_only", "a session installs the Byline hook only for its own "
+                                       "home and a repo inside it (%s): %s" % (own, why), what="byline hook install")
+    if not authority.same_home(home, a["home"]) or not (repo == own or own in repo.parents):
+        refuse(repo, "not %s" % repo)
+    try:
+        # #70 F1: the file written must be inside the home too, not only --repo (a linked worktree of an outside
+        # repo, or core.hooksPath, puts the hooks dir elsewhere).
+        output(byline.hook_install(home, repo, within=own))
+    except byline.HookOutside as exc:
+        refuse(exc.target, str(exc))
     return 0
 
 
