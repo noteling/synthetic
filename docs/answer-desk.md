@@ -134,6 +134,12 @@ Entries older than 7 days, or past the newest 200, are dropped.
   view of `/` again, so it costs no more subprocesses or audit rows. Sending the same form again
   still looks it up first: if a late inbound did land, the resend finds it; if not, the resend is a
   first send (open check included) and the entry is `pending` again.
+  Only the contract's `not_routed` answer ("no such event of this channel") counts as missing. Any
+  other refusal (`auth_failed` after a key rotation, `bad_line`, `in_session`, a malformed or silent
+  row) means the desk couldn't ask, so the entry stays `pending`. Reconcile settles only by
+  compare-and-set under the journal lock: the entry must still be `pending` with the same write time
+  it read, so a resend accepted meanwhile in another tab is never overwritten; a resend also renews
+  that time.
 
 The desk writes nothing to any store directly; its only write is `channel inbound`.
 

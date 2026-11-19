@@ -248,7 +248,9 @@ def journal_claim(root, home, qid, nonce, kind, sender, thread, work_ids=(), now
         entries = _journal_read(root, now)
         for entry in entries:
             if (entry.get("home"), entry.get("question_id"), entry.get("nonce")) == (home, qid, nonce):
-                if entry.get("state") == "lost":  # sent again after it settled lost: in flight once more
+                if entry.get("state") in ("lost", "pending"):
+                    # Sent again: in flight once more. A fresh `at` also makes a reconcile that read the old
+                    # entry fail its compare-and-set (Vesper's #72 L1/n1), so it can't settle this send `lost`.
                     entry.update(state="pending", at=now)
                     _write_private(_journal_path(root), dict(entries=entries))
                 return entry
@@ -259,14 +261,19 @@ def journal_claim(root, home, qid, nonce, kind, sender, thread, work_ids=(), now
         return entry
 
 
-def journal_settle(root, home, qid, nonce, state, event_id=None, error_code=None, now=None):
+def journal_settle(root, home, qid, nonce, state, event_id=None, error_code=None, now=None, expect_at=None):
+    """Settle one entry. With expect_at (reconcile), only by compare-and-set: the entry must still be `pending`
+    with that same `at`, so a send accepted meanwhile (another tab) is never overwritten (Vesper's #72 L1)."""
     now = time.time() if now is None else now
     with _locked(root):
         entries = _journal_read(root, now)
         for entry in entries:
             if (entry.get("home"), entry.get("question_id"), entry.get("nonce")) == (home, qid, nonce):
+                if expect_at is not None and (entry.get("state") != "pending" or entry.get("at") != expect_at):
+                    return False
                 entry.update(state=state, event_id=event_id or entry.get("event_id"), error_code=error_code)
         _write_private(_journal_path(root), dict(entries=entries))
+        return True
 
 
 def external_id(qid, nonce):
@@ -338,13 +345,21 @@ def _when(at):
 
 
 def lookup(home, key_file, qid, nonce):
-    """D2(b): this form's event ID if the store has it, None if not, "no_response" if the contract is silent."""
+    """D2(b): this form's event ID if the store has it; None only when the contract said `not_routed` (no such
+    event of this channel); "no_response" if the contract is silent; "unknown" for any other refusal or a
+    malformed row (auth_failed after a key rotation, bad_line, in_session...): the desk couldn't ask, so it
+    must not conclude the store has no record (Vesper's #72 F1)."""
     row = contract(home, key_file, "event-status", "--source", SOURCE, "--external-id", external_id(qid, nonce))
     if not isinstance(row, dict):
-        return None
-    if (row.get("error") or {}).get("code") == "no_response":
+        return "unknown"
+    code = (row.get("error") or {}).get("code")
+    if code == "no_response":
         return "no_response"
-    return row["event_id"] if not row.get("error") and EID.match(str(row.get("event_id") or "")) else None
+    if code == "not_routed":
+        return None
+    if not code and EID.match(str(row.get("event_id") or "")):
+        return row["event_id"]
+    return "unknown"
 
 
 def reconcile_pending(root, key_file, now=None):
@@ -359,11 +374,15 @@ def reconcile_pending(root, key_file, now=None):
         home = home_of(root, entry.get("home") or "")
         if not home:
             continue
+        at = entry.get("at")
         found = lookup(home, key_file, entry["question_id"], entry["nonce"])
-        if found and found != "no_response":
-            journal_settle(root, entry["home"], entry["question_id"], entry["nonce"], "accepted", event_id=found)
-        elif found is None and entry.get("at", now) <= now - LOST_AFTER:
-            journal_settle(root, entry["home"], entry["question_id"], entry["nonce"], "lost")
+        if found in ("no_response", "unknown"):
+            continue  # couldn't ask: stays pending
+        if found:
+            journal_settle(root, entry["home"], entry["question_id"], entry["nonce"], "accepted", event_id=found,
+                           expect_at=at)
+        elif isinstance(at, (int, float)) and at <= now - LOST_AFTER:
+            journal_settle(root, entry["home"], entry["question_id"], entry["nonce"], "lost", expect_at=at)
 
 
 def index_page(root, key_file=None):
@@ -657,7 +676,9 @@ def make_handler(root, key_file):
                         "<p>The desk could not check whether this form arrived (no response). Your text is "
                         "kept below.</p>%s") % answer_form(slug, qid, cookie, nonce=nonce, text=answer,
                                                           kinds=(kind,))))
-                if found is None:
+                if found in (None, "unknown"):
+                    # not_routed: never arrived. Any other refusal: the open check below asks the same contract
+                    # and fails closed (409), so nothing is sent on a guess.
                     entry = None
             if entry is None:
                 # First send of this form: the question must be open for the human now (D1(b)).

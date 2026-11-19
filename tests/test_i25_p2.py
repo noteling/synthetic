@@ -8,6 +8,7 @@ import sys
 import threading
 import unittest
 from unittest import mock
+from pathlib import Path
 
 from synthetics import answer_desk, sharedstatus
 from synthetics.store import Store
@@ -434,6 +435,64 @@ class LowsTests(P2Base):
         self.assertEqual(status, 303)
         self.assertEqual(headers["Location"], "/s/rowan/%s" % row["event_id"])
         self.assertEqual(len(self.desk_events()), 1)
+
+    def test_r1_f1_refused_lookup_keeps_an_old_pending_entry_pending(self):
+        """Vesper's #72 F1: only `not_routed` means "no record"; auth_failed (a rotated key) must not settle lost."""
+        _, cookie = self.paired()
+        _, nonce, _ = self.form(cookie)
+        self.old_pending(nonce)
+        wrong = Path(self.tmp.name) / "wrong.key"
+        wrong.write_text("not-the-channel-key\n")
+        answer_desk.reconcile_pending(self.root, wrong)
+        entry = answer_desk.journal_find(self.root, "rowan", self.question["id"], nonce)
+        self.assertEqual(entry["state"], "pending")
+        answer_desk.reconcile_pending(self.root, self.key)  # the real key: the contract says not_routed
+        self.assertEqual(answer_desk.journal_find(self.root, "rowan", self.question["id"], nonce)["state"], "lost")
+
+    def test_r1_f1_lookup_maps_contract_codes(self):
+        calls = []
+        real = answer_desk.contract
+        for row, want in ((dict(result="rejected", error=dict(code="not_routed")), None),
+                          (dict(result="rejected", error=dict(code="auth_failed")), "unknown"),
+                          (dict(result="rejected", error=dict(code="bad_line")), "unknown"),
+                          (dict(result="rejected", error=dict(code="in_session")), "unknown"),
+                          (dict(v=1, event_id="not-an-event"), "unknown"),
+                          (dict(result="rejected", error=dict(code="no_response")), "no_response"),
+                          (dict(v=1, event_id="event-" + "a" * 32), "event-" + "a" * 32)):
+            answer_desk.contract = lambda *a, row=row, **k: calls.append(a) or row
+            try:
+                self.assertEqual(answer_desk.lookup(self.home, self.key, self.question["id"], "n"), want, row)
+            finally:
+                answer_desk.contract = real
+
+    def test_r1_l1_reconcile_settles_by_compare_and_set(self):
+        """Vesper's #72 L1: a same-form resend accepted (another tab) while reconcile's lookup runs stays accepted."""
+        _, cookie = self.paired()
+        _, nonce, _ = self.form(cookie)
+        self.old_pending(nonce)
+        real = answer_desk.lookup
+        accepted = "event-" + "b" * 32
+
+        def racing(home, key_file, qid, n):
+            answer_desk.journal_settle(self.root, "rowan", qid, n, "accepted", event_id=accepted)
+            return None  # this lookup ran before the resend's inbound landed
+
+        answer_desk.lookup = racing
+        try:
+            answer_desk.reconcile_pending(self.root, self.key)
+        finally:
+            answer_desk.lookup = real
+        entry = answer_desk.journal_find(self.root, "rowan", self.question["id"], nonce)
+        self.assertEqual((entry["state"], entry["event_id"]), ("accepted", accepted))
+
+    def test_r1_n1_resend_of_old_pending_refreshes_at(self):
+        _, cookie = self.paired()
+        _, nonce, _ = self.form(cookie)
+        self.old_pending(nonce)
+        before = answer_desk.journal_find(self.root, "rowan", self.question["id"], nonce)["at"]
+        again = answer_desk.journal_claim(self.root, "rowan", self.question["id"], nonce, "answer", "david", None)
+        self.assertGreater(again["at"], before)
+        self.assertEqual(again["state"], "pending")
 
     def test_n1_lookup_arguments_are_bounded_before_the_audit(self):
         cap = getattr(Store, "EVENT_LOOKUP_MAX", 256)  # getattr: fail-first on fff5085
