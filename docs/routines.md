@@ -35,7 +35,14 @@ scheduler and no new database.
   another session or a shared timestamp never suppresses or re-arms it.
 - **work_put can't change a routine.** MCP `work_put` (and CLI `work update`) refuse a change to a routine's
   status or wake_at, naming `routine_rearm` and the CLI. Notes and titles may change.
+- **Nothing else moves a routine (P2-fix).** Its status and wake_at change only through `routine_rearm`, the
+  quarantine below, or the `routine` CLI. `question_ask` (`work_id` or `work_ids`), `work_put` `waiting_for`
+  naming a question, and `reminder_set` all refuse to link to a routine: link the question or reminder to the
+  real assignment work, or leave it unlinked. An authenticated message naming a routine as `recipient_work_id`
+  is received as usual but changes nothing (`work_ref.reason` says why). A reminder or question linked before
+  this rule only loses its link when it fires or is answered.
 - **Quarantine (D1).** At run end (finished, failed or timed out, interrupted), a routine that the run captured
+  any input for (its `work_due`, a reminder, a work ref), or that is ready with no pending input of its own,
   and that is still ready is quarantined: `quarantine {run, at, reason}` plus a `failures[]` entry that is
   never removed. It gets no wake, and `runnable_work` excludes it, so it can't start sessions. Unrelated work
   goes on. The next session sees it as `state: quarantined`. Only `routine_rearm` or `routine restore` clears
