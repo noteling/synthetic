@@ -141,14 +141,15 @@ CREDENTIAL_NAMES = r"token|key_file|credential|secret|password|key_sha256"
 ARG_KEEP = frozenset({
     "id", "work_id", "work_ids", "question_id", "event_id", "in_reply_to", "replaces", "subject", "thread",
     "project", "to", "person", "target", "status", "kind", "priority", "limit", "match", "body_offset",
-    "body_chars", "max_bytes", "mode", "since", "cursor", "wake_at", "at", "covered_through", "key", "cycle",
+    "body_chars", "max_bytes", "mode", "since", "cursor", "wake_at", "at", "covered_through", "cycle",
     "section", "certainty", "origin", "publish", "include_superseded", "expected_seq", "as_of", "history",
     "part", "reply_to", "recipient_work_id", "relays", "add", "reconciles", "mentions", "refs", "file",
 })
-# Argument keys whose value is free text: exported as {bytes, sha256} only (Q2: query and title too).
+# Argument keys whose value is free text: exported as {bytes, sha256} only (Q2: query and title too;
+# r2 n2: idempotency `key`, which callers write as descriptive text).
 ARG_TEXT = frozenset({
     "body", "value", "note", "description", "text", "reason", "review", "query", "excerpt", "title",
-    "predicate", "statement", "waiting_for", "cancel_reason", "topic", "name",
+    "predicate", "statement", "waiting_for", "cancel_reason", "topic", "name", "key",
 })
 
 # Audit actions: per-prefix allow-list of fields (IDs, status, codes). Unlisted actions export only the base.
@@ -473,6 +474,7 @@ def _chain(pages, start, cutoff, spill_bytes, chunks, breaks, name):
     end = start
     last_cursor = None
     used = set()
+    spills = []
     stopped = False
     stream = {"pages": len(pages), "end": end}
     changed = True
@@ -495,11 +497,17 @@ def _chain(pages, start, cutoff, spill_bytes, chunks, breaks, name):
             first = _ts(facts.get("created_first"))
             if facts.get("bytes", 0) > spill_bytes:
                 # The page wasn't seen. Items before its first one don't exist (oldest first, since inclusive).
+                # B1 (r2): record the break but keep scanning, and keep last_cursor, so a smaller re-read of the
+                # same since/cursor (the dream guidance) can carry the chain past it; see _heal below.
+                moved = first is not None and first > end
                 end = max(end, first or end)
-                breaks.append({"stream": name, "line": number, "from": first, "why": "possibly_spilled",
-                               "bytes": facts.get("bytes"), "unread_from": facts.get("unread_from")})
-                stopped = True
-                break
+                spills.append({"stream": name, "line": number, "from": first, "why": "possibly_spilled",
+                               "bytes": facts.get("bytes"), "unread_from": facts.get("unread_from"),
+                               "chain_at": end})
+                if moved:
+                    changed = True
+                    break
+                continue
             page_end = _ts(facts.get("created_last")) if facts.get("capped") else cutoff
             for item in facts.get("truncated") or []:
                 if not _covered(chunks.get(item.get("id"), []), item.get("body_len")):
@@ -518,4 +526,11 @@ def _chain(pages, start, cutoff, spill_bytes, chunks, breaks, name):
                 stopped = True
                 break
     stream["end"] = end
+    # A spill break counts only if a seen page later carried the chain past the point where the spill stopped it
+    # (`chain_at`, which is its `from` unless the chain already stood further on): a re-read healed it.
+    for spill in spills:
+        if end <= spill["chain_at"]:
+            breaks.append(spill)
+        else:
+            stream.setdefault("healed", []).append(dict(spill, healed=True))
     return stream

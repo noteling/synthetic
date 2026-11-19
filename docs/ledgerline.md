@@ -56,6 +56,9 @@ receipts, and builds the contiguous read chain per stream (events, memories):
 2. A page whose `result.bytes` exceeds the spill threshold (default 32000, F2's `max_bytes`) is
    `possibly_spilled`: the chain stops at its `created_first`. **This is predicted, not observed** (C2): only an
    executor stream (E4, not built) would show what the client displayed. The output says so in `spill_check`.
+   A smaller re-read of the same range (same `since`, or the same `cursor`, at a lower `max_bytes`, as the dream
+   guidance says) heals the break: verify keeps scanning, and a spill counts only if no seen page carries the
+   chain past its `from`; healed spills are listed under the stream's `healed` (B1, r2).
 3. A `truncated` item is unread unless `event_get` receipts for its ID cover `0..body_len`; the chain stops at its
    `created_at`. An `event_get` receipt covers only when its `result.bytes` is at or under the spill threshold: a
    plain `event_get` of a large body can spill too (listed under `spilled_event_get`). For a plain `event_get`,
@@ -81,7 +84,8 @@ finished before E1, or lines without `prev_sha256`) or `no_receipts`.
 ## Access (C5)
 
 `export runs` and `routine verify` use doctor's G4 fence (`cli._doctor_gate`): the owner on any home; a session
-on its own home, or on another home only with an active `worker.manage` / `runtime.request` delegation covering it
+on its own home, or on another home only with an active `worker.manage` / `adapter.manage` / `runtime.request`
+delegation covering it (`adapter.manage` is scoped by labels, so today it covers no home)
 (audited `authority.used`); otherwise `own_home_only`, audited `authority.refused` with `what` naming the command.
 
 ## Honest limits
@@ -90,6 +94,10 @@ on its own home, or on another home only with an active `worker.manage` / `runti
 - A session can rewrite its own `runs/` files and, by stripping its environment (it then looks like the owner), the run record too
   (`docs/authority.md` §0). The chain and anchor make an edit visible; they are not a sandbox.
 - `covered_through` is one timestamp for both streams, so the verdict uses the smaller chain end.
+- A capped page's chain end is its `created_last`, though items tied on that timestamp may sit on the next page.
+  A `through` equal to it is accepted because `since=` is inclusive: the next dream re-reads every item at that
+  timestamp, so nothing is skipped (L1).
+- Verify judges one run (G1): a catch-up read in another session doesn't count for this dream (L3).
 
 ## Not in this slice
 

@@ -94,7 +94,7 @@ class Export(HomeCase):
         self.assertEqual([c["tool"] for c in calls], ["event_search", "work_put", "self_note", "event_get", "event_get"])
         self.assertEqual(calls[0]["args"]["query"], {"bytes": 7, "sha256": hashlib.sha256(b"PRIVATE").hexdigest()})
         self.assertEqual(calls[1]["args"]["title"]["bytes"], len("SECRET TITLE"))
-        self.assertEqual(calls[1]["args"]["key"], "w1")
+        self.assertEqual(calls[1]["args"]["key"], {"bytes": 2, "sha256": hashlib.sha256(b"w1").hexdigest()})  # r2 n2
         self.assertEqual(calls[3]["args"]["id"], event["id"])
         self.assertEqual(calls[3]["result"]["id"], event["id"])
         self.assertFalse(calls[4]["success"])
@@ -223,6 +223,34 @@ class Verify(HomeCase):
     def test_run_30546289_shape_with_recorded_omission_is_consistent(self):
         verdict = self.run_30546289_shape(omissions=("2026-11-15T20:57:36.063976Z", "2026-11-16T18:09:02.030321Z"))
         self.assertEqual(verdict["verdict"], "consistent", verdict)
+
+    def test_b1_spill_then_reread_same_since_is_consistent(self):
+        # Rowan's probe P1: the guidance re-reads a spilled range with a smaller max_bytes.
+        events = [self.page(EPOCH, ts(1), ts(9), False, size=40000),
+                  self.page(EPOCH, ts(1), ts(9), False, size=20000)]
+        memories = [self.page(EPOCH, ts(1), ts(8), False)]
+        verdict, _ = self.dream(self.both(events, memories), through=ts(50))
+        self.assertEqual(verdict["verdict"], "consistent", verdict)
+        self.assertEqual(verdict["streams"]["events"]["healed"][0]["line"], 1)
+
+    def test_b1_spill_then_reread_same_cursor_is_consistent(self):
+        # Rowan's probe P2: the spilled page was a cursor page; the re-read names the same cursor.
+        events = [self.page(EPOCH, ts(1), ts(5), True, next_cursor="c1"),
+                  self.page(None, ts(6), ts(9), False, cursor="c1", size=40000),
+                  self.page(None, ts(6), ts(9), False, cursor="c1", size=20000)]
+        memories = [self.page(EPOCH, ts(1), ts(8), False)]
+        verdict, _ = self.dream(self.both(events, memories), through=ts(50))
+        self.assertEqual(verdict["verdict"], "consistent", verdict)
+
+    def test_b1_unhealed_spill_still_bounds_the_chain(self):
+        # A re-read that is itself spilled heals nothing; the break stays and through past it is overclaimed.
+        events = [self.page(EPOCH, ts(1), ts(9), False, size=40000),
+                  self.page(EPOCH, ts(1), ts(9), False, size=39000)]
+        memories = [self.page(EPOCH, ts(1), ts(8), False)]
+        verdict, _ = self.dream(self.both(events, memories), through=ts(50))
+        self.assertEqual(verdict["verdict"], "overclaimed", verdict)
+        self.assertEqual(verdict["first_unread"], ts(1))
+        self.assertNotIn("healed", verdict["streams"]["events"])
 
     def test_spill_threshold_is_configurable(self):
         events = [self.page(EPOCH, ts(1), ts(9), False, size=40000)]
