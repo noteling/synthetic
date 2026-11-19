@@ -270,6 +270,37 @@ class DoubleClickRaceTests(P2Base):
         self.assertNotIn("inbound", commands)
         self.assertEqual(self.desk_events(), [])
 
+    def test_silent_lookup_after_a_failed_open_check_is_503_text_kept(self):
+        """Vesper's #83 L1: the fallback's own lookup gets no response → 503 "Not confirmed" with the text kept,
+        never a 409 (the form may have arrived) and never a send on a guess."""
+        _, cookie = self.paired()
+        _, nonce, token = self.form(cookie)
+        qid = self.question["id"]
+        answer_desk.journal_claim(self.root, "rowan", qid, nonce, "answer", "david", None)
+        with Store(self.home) as store:
+            store.feed("david", "answered on telegram", source="manual", external_id="tg1", reply_to=qid)
+        real = answer_desk.contract
+        commands = []
+
+        def silent_second_lookup(home, key_file, command, *args, lines=None):
+            commands.append(command)
+            if command == "event-status" and commands.count("event-status") == 2:
+                return dict(result="rejected", error=dict(code="no_response", message="no contract response"))
+            return real(home, key_file, command, *args, lines=lines)
+        with mock.patch.object(answer_desk, "contract", silent_second_lookup):
+            status, _, text = self.post(cookie, nonce, token)
+        self.assertEqual(status, 503)
+        self.assertIn("Not confirmed", text)
+        self.assertIn("could not check whether this form arrived", text)
+        self.assertIn(ANSWER, text)
+        # The first lookup (not_routed) sent B to the open check; the fallback's lookup was the silent one.
+        self.assertEqual(commands.count("event-status"), 2)
+        self.assertIn("question", commands)
+        self.assertNotIn("inbound", commands)
+        self.assertEqual(self.desk_events(), [])
+        entry = answer_desk.journal_find(self.root, "rowan", qid, nonce)
+        self.assertEqual(entry["state"], "pending")
+
 
 class ContextTests(P2Base):
     def test_t6_context_keeps_the_question_open(self):
