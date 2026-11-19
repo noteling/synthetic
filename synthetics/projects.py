@@ -393,13 +393,20 @@ class ProjectStore:
                 body["size"] = len(data)
                 body["sha256"] = hashlib.sha256(data).hexdigest()
             elif kind == "intent":
-                _check_text(body.get("title", ""), TITLE_MAX, where, "title")
-                _check_text(body.get("scope_note", ""), SCOPE_MAX, where, "scope_note")
+                # Issue #3 low (a): wrong types are refused as bad_intent/bad_claims, never an AttributeError.
+                for f in ("title", "scope_note"):
+                    if body.get(f) is not None and not isinstance(body[f], str):
+                        raise ProjectError("bad_intent", f"{where}: {f} must be a string")
+                _check_text(body.get("title") or "", TITLE_MAX, where, "title")
+                _check_text(body.get("scope_note") or "", SCOPE_MAX, where, "scope_note")
                 claims = body.get("claims", [])
-                if not claims or len(claims) > MAX_CLAIMS:
+                if not isinstance(claims, list) or not claims or len(claims) > MAX_CLAIMS:
                     raise ProjectError("bad_claims", f"{where}: 1..{MAX_CLAIMS} claims required")
                 cids = set()
                 for c in claims:
+                    if (not isinstance(c, dict) or not isinstance(c.get("text", ""), str)
+                            or not isinstance(c.get("cid"), str)):
+                        raise ProjectError("bad_claims", f"{where}: each claim is {{cid, text}} with string values")
                     _check_text(c.get("text", ""), CLAIM_TEXT_MAX, where, "claim text")
                     if not c.get("cid") or c["cid"] in cids:
                         raise ProjectError("bad_claims", f"{where}: claim ids must be unique and non-empty")
@@ -549,10 +556,19 @@ class ProjectStore:
         author = warrant["actor"] if warrant is not None else "operator:" + by
         try:
             result = self.append([{"kind": "redact", "body": body}], author=author, operator=True, warrant=warrant)
-        finally:
+        except BaseException as exc:
             # Issue #3: rebuild even if something after the commit raised, so the removed text never stays in
             # log.jsonl. A refused append committed nothing, and the rebuild then rewrites the same lines.
-            self.export(rebuild=True)
+            # Low (c): a failing rebuild must not mask the original error; report both.
+            try:
+                self.export(rebuild=True)
+            except Exception as rebuild_exc:
+                raise ProjectError("redact_rebuild_failed",
+                                   f"redact failed ({type(exc).__name__}: {exc}) and the log.jsonl rebuild also "
+                                   f"failed ({type(rebuild_exc).__name__}: {rebuild_exc}); log.jsonl may still "
+                                   "hold the removed text") from exc
+            raise
+        self.export(rebuild=True)
         out = dict(result, redacted=entry_id, kind=row[0], sha256=body["sha256"], size=body["size"])
         if row[0] == "post":
             readers = [g["employee"] for g in self.grants()] if self.grants_enforced() else None

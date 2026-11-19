@@ -138,7 +138,11 @@ def render(entries: list[dict], project: str, source_bytes: Callable[[str], byte
             for field, label in (("applies_when", "applies when"), ("uncertainty", "uncertainty")):
                 if body.get(field):
                     w(f"  - {label}: {_md(_cut(body[field], TEXT))}")
-            refs = [str(ev["ref"]) for ev in body.get("evidence") or [] if isinstance(ev, dict) and ev.get("ref")]
+            evidence = body.get("evidence")
+            if isinstance(evidence, str):  # Issue #3 low (b): free-text evidence (8 live lessons) is shown too
+                refs = [evidence] if evidence.strip() else []
+            else:
+                refs = [str(ev["ref"]) for ev in evidence or [] if isinstance(ev, dict) and ev.get("ref")]
             if refs:
                 w(f"  - evidence: {_md(_cut(', '.join(refs), TEXT))}")
             if rec.get("disputed_with"):
