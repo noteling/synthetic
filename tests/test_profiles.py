@@ -156,6 +156,7 @@ class Prompt(Base):
             text = brain.system_prompt(self.home)
         employee = (PROMPTS / "employee.md").read_text()
         self.assertTrue(text.startswith(employee))
+        self.assertEqual(text.count("Role defaults (profile"), 1)
         at = [text.index(s) for s in ("Role defaults (profile developer v",
                                       "# Role defaults: developer",
                                       "COMPANY HOST RULE", "LOCAL HOST RULE")]
