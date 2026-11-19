@@ -132,14 +132,18 @@ def user_temp_dir():
 
 
 def processes():
-    """(pid, command line) of every process, for finding a glance instance left behind by a timeout."""
-    out = subprocess.run(["ps", "-axo", "pid=,args="], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                         stderr=subprocess.DEVNULL, text=True, check=False).stdout
+    """(pid, command line) of this user's own processes, for finding a glance instance left behind by a timeout.
+
+    Only processes whose real user (`ps -U`) and effective user (the uid column) are both this worker's uid: under
+    a second macOS user another account's Noteling must never be a kill candidate (ext-identity option A)."""
+    uid = os.getuid()
+    out = subprocess.run(["ps", "-U", str(uid), "-o", "pid=,uid=,args="], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False).stdout
     rows = []
     for line in out.splitlines():
-        pid, _, args = line.strip().partition(" ")
-        if pid.isdigit():
-            rows.append((int(pid), args.strip()))
+        parts = line.split(None, 2)
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1] == str(uid):
+            rows.append((int(parts[0]), parts[2].strip() if len(parts) > 2 else ""))
     return rows
 
 
