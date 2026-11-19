@@ -262,6 +262,11 @@ class ClaudeBrain:
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
+        except OSError:
+            # Darwin may report EPERM rather than ESRCH for an already-exited
+            # child's vanished group. Reap only our known child before ignoring it.
+            if process.poll() is None:
+                raise
         # Kill any escaped descendant process groups.
         for pid in descendants:
             try:
@@ -276,6 +281,9 @@ class ClaudeBrain:
             os.killpg(process.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+        except OSError:
+            if process.poll() is None:
+                raise
         for pid in descendants:
             try:
                 os.killpg(os.getpgid(pid), signal.SIGKILL)
