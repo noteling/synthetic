@@ -87,7 +87,7 @@ their shape (Codex C1, tested).
 - The `stand` key is a channel key like any other: a process running as the same OS user can read it
   (docs/channel-contract.md §7).
 
-## F2: the meeting (in progress, not frozen)
+## F2: the meeting
 
 A `begin` line with `goal` (the human's brief for this meeting) runs the meeting under the floor hold. Without
 `goal` the attach only holds the idle boundary, as in F1.
@@ -129,3 +129,58 @@ A `begin` line with `goal` (the human's brief for this meeting) runs the meeting
   sender is the channel, not the human.
 - **Retention (G5).** F2 never prunes `meetings/`. A pruning slice must pin journals cited by memories or work
   evidence first.
+
+## F3: the gate (floor_accept and floor verify)
+
+No invented commitment enters the records (P0 §3). Approved by Codex with Q1-Q4 and K1-K4
+(`management/realworld/meeting/f3-review.md`).
+
+### floor_accept(meeting, cid, title, priority?)
+
+An MCP store tool for ordinary sessions (the wrap session). It is not in `floortools.MEETING_TOOLS`, so a meeting
+run is never offered it, and the store refuses it from a meeting run as well.
+
+- **Checks** (in this order): `cid` is a `commit` line in `HOME/meetings/<meeting>/journal.jsonl` (`unknown_cid`);
+  the meeting has ended: an `end` line exists, and there is no pending row and no floor hold for it
+  (`meeting_running`); the wrap event exists (external_id `floor:<meeting>:wrap`, source `<prefix>:meeting`, with an
+  auth stamp: `no_wrap`); the journal chain verifies against the wrap event's `head` (`chain_broken`); the latest
+  panel `confirm` for the cid is not `yes: false` (`declined`).
+- **Effect**: one work with `origin: "meeting"`, description = the promise text verbatim (plus `Due (as said): …`
+  when the commit had `due`), the caller's title and priority, a `meeting` field {id, cid, line, wrap_event}, and
+  one `observed` evidence item citing the wrap event with note `meeting <id> journal line N, <cid> (<confirmed_by>)`.
+  `confirmed_by` is `human-panel line N` (latest confirm yes) or `issued`.
+- **Existing work** (K2): a commit naming `work_id` adds that evidence item to the work instead. `unknown_work` when
+  it isn't a work of this home, `work_closed` when it is done or cancelled; it is never reopened.
+- **Atomic and unique** (K1): the checks, the work write, the idempotency row (namespace `floor_accept`, key
+  `<meeting>:<cid>`) and the audit row are one `BEGIN IMMEDIATE` transaction. A second call (or a concurrent one)
+  returns the same work with `accepted.repeated: true`.
+- **Audit**: `floor.accepted {meeting, cid, line, work, confirmed_by, existing, run}`; a refusal `floor.refused
+  {command: floor_accept, code, cid, run}`. Never text.
+- `work_put` refuses `origin: "meeting"`; the MCP enum stays `self|assigned`. A published meeting work shows
+  `origin: meeting` in the backlog, and Lookout's Board marks it "(from a meeting)".
+
+### floor verify RUN
+
+`synthetics --home HOME floor verify RUN` (read-only, sqlro; fenced exactly like `doctor` and `routine verify`).
+For each `stand:meeting` wrap event among the run's inputs it reads the run's MCP receipts (`runs/RUN.mcp.jsonl`):
+
+- `chain`: the journal against the wrap head (`chain_ok`; anything else is a violation).
+- `unattributed_meeting_work` (violation): a successful `work_put` whose title, description, note, waiting_for or an
+  evidence ref/note **cites the meeting**: contains the meeting ID as a whole token (not inside a longer run of
+  `[A-Za-z0-9_.:-]`), the path segment `meetings/<id>`, or the wrap event ID (full, or `event-` + 8 or more of its
+  hex). Not a violation when the work_put's `id` is a work floor_accept created or extended for this meeting
+  (`floor.accepted` audit rows), or when an evidence ref is a question that is `answered` (not proxy, not
+  withdrawn), was addressed to the default human, and whose answer event has a non-null auth (Codex Q2).
+- `room_correction_replaces` (violation): a successful `memory_put` with `replaces` whose `source` cites the meeting
+  and names `line N` / `lines N` / `line #N` where journal line N is `room-unidentified`.
+- Per meeting: `accepted`, `declined` and `unaccepted` cids (info).
+- Verdict `clean`, `violations`, or `no_evidence` (no such run, no wrap event in its inputs, or no receipts).
+
+### Honest limits
+
+- verify makes a violation visible; it does not prevent it. Memories are flagged only (Q4), no new gate.
+- The match is textual: a work that describes the meeting without its ID, path or wrap event ID is not seen.
+- A spoken promise without a cid is not accepted by floor_accept (Q2 deferred): ask the human, cite the answered
+  question. Panel-authored promises come with the Stand slice (Q3).
+- If the store raises while attach drops a pending meeting on the busy path, attach still prints `busy` (exit 2)
+  and makes one separate attempt to audit `floor.ended_failed` (#76 nit, K4).

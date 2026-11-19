@@ -133,8 +133,16 @@ def attach(home, key_file, stdin=None, stdout=None, renew_seconds=None, sleep=ti
                 if time.monotonic() > limit:
                     # #74 L3: nobody will attach, so drop the pending row now (audited floor.ended, reason busy)
                     # instead of leaving it to block runs until it expires.
-                    with Store(home) as store:
-                        store.meeting_end(meeting, reason="busy")
+                    try:
+                        with Store(home) as store:
+                            store.meeting_end(meeting, reason="busy")
+                    except Exception as exc:  # noqa: BLE001 - #76 nit: the busy line is emitted whatever the store did
+                        try:  # F3 K4: the audit attempt has its own try, so it can't hide the busy line either
+                            with Store(home) as store:
+                                store.audit_note("floor.ended_failed", meeting,
+                                                 dict(reason="busy", error=type(exc).__name__))
+                        except Exception:  # noqa: BLE001
+                            pass
                     _emit(stdout, dict(type="error", code="busy", message="the running session was not recorded "
                                                                           "as ended in time"))
                     return 2
@@ -343,3 +351,7 @@ def add_parsers(sub):
     attach_parser = floor_sub.add_parser("attach", help="JSON lines on stdin/stdout: begin, then hold the idle "
                                                          "boundary for the meeting until end or EOF")
     attach_parser.add_argument("--key-file", help="the provisioned stand channel key (0600)")
+    verify_parser = floor_sub.add_parser("verify", help="F3: what a wrap session recorded about its meeting: journal "
+                                                         "chain, unattributed meeting work, room corrections that "
+                                                         "replaced memories, unaccepted promises (read-only)")
+    verify_parser.add_argument("run", help="the run whose inputs hold the stand:meeting wrap event")

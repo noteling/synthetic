@@ -105,6 +105,12 @@ TOOLS = [
     }),
     tool("work_list", "Inspect ongoing or completed work.", {"status": text_property()}),
     tool("work_get", "Read one assignment and its latest state. shared_with (present only when shared) lists, per linked question, your other waiting works that share it.", {"id": text_property()}, ["id"]),
+    tool("floor_accept", "MTG Floor F3: turn ONE promise you issued in a meeting (a cid from the meeting's wrap event, field issued) into work. The only way to record a meeting promise as work: it copies the promise text verbatim (you choose only title and priority), sets origin meeting, cites the wrap event and journal line, and is refused unless the meeting has ended, its journal chain matches the wrap head, and the human did not decline it on the panel. Repeating it for the same cid returns the same work. A promise without a cid is not accepted here: ask the human (question_ask) before recording it.", {
+        "meeting": text_property("The meeting ID from the wrap event."),
+        "cid": text_property("The issued cid (cid-...)."),
+        "title": text_property("Short title for the work."),
+        "priority": {"type": "integer", "description": "Optional priority (default 0)."},
+    }, ["meeting", "cid", "title"]),
     tool("question_ask", "Queue a question addressed to a colleague and remember that you await their answer. Configured adapters may deliver it; queuing is not proof of receipt. Linked work waits until the answer arrives.", {
         "to": text_property(), "body": text_property(), "work_id": text_property(), "key": KEY,
         "recipient_work_id": text_property("Optional: the recipient's own work ID this concerns, if they gave you one. work_id is always your own work; recipient_work_id is theirs and only a hint to them unless the delivery is authenticated."),
@@ -176,7 +182,7 @@ TOOLS.extend(click.TOOLS)
 from . import floortools  # noqa: E402  (MTG F2: meeting runs only)
 
 METHODS = {entry["name"]: entry for entry in TOOLS + floortools.TOOLS}
-MUTATIONS = {"entity_put", "memory_put", "work_put", "question_ask", "question_resolve", "question_close", "question_relays", "message_send", "reminder_set", "routine_rearm",
+MUTATIONS = {"entity_put", "memory_put", "work_put", "floor_accept", "question_ask", "question_resolve", "question_close", "question_relays", "message_send", "reminder_set", "routine_rearm",
              "runtime_restart"} | projecttools.MUTATIONS | rostertools.MUTATIONS | glance.MUTATIONS \
     | click.MUTATIONS | floortools.MUTATIONS
 
@@ -235,7 +241,7 @@ def offered(home):
 
 
 # VIS C1: tools whose success rewrites <home>/shared/status.json.
-STATUS_TOOLS = frozenset({"work_put", "routine_rearm", "question_ask", "question_close", "question_resolve", "question_relays",
+STATUS_TOOLS = frozenset({"work_put", "floor_accept", "routine_rearm", "question_ask", "question_close", "question_resolve", "question_relays",
                           "screen_glance",  # RW-1: Lookout's Recent glances
                           "screen_click_request", "screen_click"})  # stage 2: Lookout's Recent clicks
 
