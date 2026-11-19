@@ -421,11 +421,29 @@ class ProjectStore:
                     raise ProjectError("bad_lesson", f"{where}: {', '.join(missing)} required (lesson body: "
                                        "statement, applies_when, uncertainty; optional lesson_kind, evidence)",
                                        missing=missing)
+                # Issue #3: fold and view read these after commit, so a wrong type must be refused here.
+                for f in ("statement", "applies_when", "uncertainty", "title", "lesson_kind"):
+                    if body.get(f) is not None and not isinstance(body[f], str):
+                        raise ProjectError("bad_lesson", f"{where}: {f} must be text")
+                ev = body.get("evidence")
+                if not (ev is None or isinstance(ev, str) or (isinstance(ev, list) and all(
+                        isinstance(x, dict) and isinstance(x.get("ref"), str) and x["ref"] for x in ev))):
+                    raise ProjectError("bad_lesson", f"{where}: evidence is a list of {{ref, level?, note?}} "
+                                                     "objects (or one line of text)")
             elif kind == "relate":
                 rel = body.get("rel")
                 if rel not in CLAIM_RELS:
                     raise ProjectError("bad_rel", f"{where}: rel {rel!r}")
+                # Issue #3: `from` names an existing record (pm-...) or claim (pm-...#cN); fold splits it.
+                src = body.get("from")
+                if not isinstance(src, str) or not src:
+                    raise ProjectError("bad_rel", f"{where}: from must be a record or claim ID (pm-...[#cN])")
+                sid, scid = split_ref(src)
+                if sid not in state["records"] or (scid is not None and src not in state["claims"]):
+                    raise ProjectError("unknown_target", f"{where}: from {src} is not a record or claim")
                 target = body.get("target", "")
+                if not isinstance(target, str) or not target:
+                    raise ProjectError("unknown_target", f"{where}: target {target!r}")
                 tid, tcid = split_ref(target)
                 if tid not in state["records"] and tid not in state["sources"]:
                     raise ProjectError("unknown_target", f"{where}: {target}")
@@ -529,8 +547,12 @@ class ProjectStore:
                 "reason": reason, "by": by}
         # M28: a delegated redaction is authored by the session actor itself, never a forgeable operator:* label.
         author = warrant["actor"] if warrant is not None else "operator:" + by
-        result = self.append([{"kind": "redact", "body": body}], author=author, operator=True, warrant=warrant)
-        self.export(rebuild=True)
+        try:
+            result = self.append([{"kind": "redact", "body": body}], author=author, operator=True, warrant=warrant)
+        finally:
+            # Issue #3: rebuild even if something after the commit raised, so the removed text never stays in
+            # log.jsonl. A refused append committed nothing, and the rebuild then rewrites the same lines.
+            self.export(rebuild=True)
         out = dict(result, redacted=entry_id, kind=row[0], sha256=body["sha256"], size=body["size"])
         if row[0] == "post":
             readers = [g["employee"] for g in self.grants()] if self.grants_enforced() else None
@@ -594,7 +616,7 @@ class ProjectStore:
                 fh.write(text)
             os.replace(str(tmp), str(self.view_path))
             return True
-        except (OSError, sqlite3.Error, ProjectError):
+        except Exception:  # Issue #3: any render error, not only I/O, must leave the committed append alone.
             try:
                 tmp.unlink()
             except OSError:

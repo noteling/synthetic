@@ -166,7 +166,9 @@ def _head(state: dict, ref: str) -> str:
 
 
 def _apply_relate(state: dict, body: dict, e: dict) -> None:
-    rel, src, target = body["rel"], body["from"], body["target"]
+    rel, src, target = body.get("rel"), body.get("from"), body.get("target")
+    if not isinstance(src, str) or not isinstance(target, str):
+        return  # Issue #3: a malformed relate written before validation existed has no effect (never crash).
     tid, tcid = split_ref(target)
     if rel == "revises" and tcid is not None:
         claim = state["claims"].get(target)
