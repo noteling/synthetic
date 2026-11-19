@@ -375,9 +375,13 @@ class ExitCodeTests(unittest.TestCase):
         return str(path)
 
     def serve(self, fake, *extra):
+        # A suite started with `&` from a non-interactive shell (nohup, scripts) inherits SIGINT=SIG_IGN, and
+        # Python keeps an inherited SIG_IGN, so serve would never see the SIGINT this class sends (backlog 45).
+        # Give serve the default disposition, as an interactive Ctrl-C would find it.
         return subprocess.Popen([sys.executable, "-m", "synthetics", "--home", str(self.home), "serve",
                                  "--claude", fake, "--poll", "0.05", "--retry", "0.05", *extra],
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                preexec_fn=lambda: signal.signal(signal.SIGINT, signal.SIG_DFL))
 
     def wait_started(self, process, marker):
         deadline = time.monotonic() + 10
