@@ -170,7 +170,15 @@ message remains part of the conversation without automatically closing a questio
 
 The initial pairing wakeup is best-effort if the employee store fails at that
 moment; the authenticated binding is retained. Ordinary human message writes are
-retryable and cannot be acknowledged past a failed item in the batch. Ambiguous
+retryable and cannot be acknowledged past a failed item in the batch; the retry
+backs off (1 s doubling to 60 s) instead of polling the same update every second.
+Feed errors are classified (issue #5): a channel key that is not registered in the
+home, or whose source prefixes do not allow `telegram:<bot id>`, stops the adapter
+with that reason, at startup and if it happens later, without moving the cursor.
+Any other refusal (`ValueError`) of one update is recorded in the state's
+`feed_rejections` (the last 50: update ID, time, error; never the text) and the
+cursor moves on, so later messages are not blocked. `telegram status` shows the
+count and the latest record. Ambiguous
 outbound sends remain uncertain without automatic resending. Keep the channel
 state and its adjacent initialization guard together when backing them up.
 
