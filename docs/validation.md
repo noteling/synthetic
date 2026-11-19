@@ -51,6 +51,7 @@ Review evidence for each milestone lives outside source control, under
 | Docket | Waiting-on-David queue and relay hops | `channel-contract.md` §4.1 | `test_docket.py`, `test_docket_links.py`, `test_hops.py` | Live: deployed, Fieldpost carries hop notices |
 | VIS | Lookout read-only team page | `lookout.md` | `test_lookout.py`, `test_vis_g*.py` | Live: running as `com.synthetics.lookout` |
 | RW-1 | Glance (Noteling screen read) | `glance.md` | `test_glance.py` | Not yet: live P3 waits on a sitting with Noteling 0.10.5 |
+| Click P1 | One approved, named click (engine slice) | `click.md` | `test_click.py` | Not yet: needs Noteling `--click` (P2) and a live sitting (P3) |
 
 SG-01 to SG-09 are the standing gaps in `openclaw-gap-review.md`, not milestones; MG-xx are
 manager-loop gaps. GitHub issue fixes carry their own modules (`test_issue<N>_*.py`).
