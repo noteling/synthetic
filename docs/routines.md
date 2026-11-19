@@ -231,9 +231,13 @@ The `## dream` section of `synthetics/prompts/routines.md` is the guidance; the 
 - **Bounded dreams (H5).** Each dream reads at most about 200 event records, 100 memory records and 10
   topical older lookups; these are ceilings, not targets. Read them in pages: start at about 15-20 events
   and 20-30 memories per call (`limit=`), and continue with `cursor=next_cursor`. A page that comes back
-  spilled to a file, summarized, truncated or shown only in part is **not read**: halve `limit` and re-read
-  that same range (same `since`/`cursor`); until it is read in full, record it as an omission with `from` =
-  its first item's `created_at` and don't advance `covered_through` past it. Event records vary widely in
+  spilled to a file, truncated or shown only in part is **not read**: seeing only a saved-file path, a
+  preview or prefix, or a generated summary does not count. Halve `limit` and re-read that same range (same
+  `since`/`cursor`); until it is read in full, record it as an omission with `from` = its first item's
+  `created_at` and don't advance `covered_through` past it. Summarizing *after* the complete originals have
+  been read is fine. If even `limit=1` spills (one very large item, such as a `source_update` document),
+  read that item's saved original body in bounded sequential chunks, keeping its ID; any unread remainder is
+  an omission with `from` = that item's `created_at`. Event records vary widely in
   size (early `source_update` events carry whole document bodies, ~3.8 KB per event on average in one home),
   so a fixed page size can still spill. It looks at current goals and the newest
   consequential feedback and outcomes first, and spends what is left on chronological backfill from
