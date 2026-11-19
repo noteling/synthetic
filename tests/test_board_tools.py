@@ -105,6 +105,17 @@ class BoardToolsTest(unittest.TestCase):
         with self.assertRaises(ProjectError):
             self.server.call("board_read", {"project": "synthetics", "thread": root, "since": 0})
 
+    def test_board_read_backlog_higher_priority_first(self):
+        """Same order as store.work_list and Lookout (projectview.priority_rank): higher first, 0 before missing."""
+        with self.ps() as ps:
+            for wid, pr in (("work-a", 1), ("work-b", 3), ("work-c", None), ("work-d", 0), ("work-e", 2)):
+                body = dict(work_id=wid, title=wid, status="ready")
+                if pr is not None:
+                    body["priority"] = pr
+                ps.append([{"kind": "backlog", "body": body}], author=ROWAN)
+        backlog = self.server.call("board_read", {"project": "synthetics"})["backlog"]
+        self.assertEqual([r["work_id"] for r in backlog], ["work-b", "work-e", "work-a", "work-d", "work-c"])
+
     def test_c7_prompt_lines(self):
         text = PROMPT.read_text(encoding="utf-8")
         self.assertIn("board_post", text)
