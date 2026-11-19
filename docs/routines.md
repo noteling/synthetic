@@ -161,6 +161,15 @@ The `## dream` section of `synthetics/prompts/routines.md` is the guidance; the 
   the `created_at` of the first item not returned (the `from` of an omission if the dream stops there), and
   `next_cursor` continues strictly after the last item returned (`cursor=`), so items sharing a timestamp are
   never repeated or skipped (H2). Without `since` or `cursor` both tools behave and return exactly as before.
+- **Bounded dreams (H5).** Each dream reads at most about 200 event records, 100 memory records and 10
+  topical older lookups; these are ceilings, not targets. It looks at current goals and the newest
+  consequential feedback and outcomes first, and spends what is left on chronological backfill from
+  `covered_through`. Coverage is contiguous: reading newer material first never moves `covered_through` past
+  an older unread gap, so it advances only to the end of the unbroken run read from the previous checkpoint,
+  or stays put, with the gap recorded as an omission. A current-day lesson may still be kept. A home with a
+  null or old checkpoint catches up over several dreams. Nothing claims lifetime coverage and no raw history
+  is deleted. The bound is guidance only: no new cursor, checkpoint field or service, and the runtime guards
+  (E1 validation in `routine_rearm`, the next self-rearm) are unchanged.
 - **Checkpoint.** The dream passes `covered_through` (≤ `evidence_cutoff`, ≤ every omission's `from`) and its
   omissions to `routine_rearm`, as in "Dream checkpoint" above. The inclusive `since` means a T equal to an
   omission's `from` re-reads the items at that timestamp next time and skips nothing.
@@ -190,3 +199,4 @@ The `## dream` section of `synthetics/prompts/routines.md` is the guidance; the 
 | H2 since= paging with tied `created_at` | `test_rtn_p2_dream.H2SinceTies` |
 | H3 working_context kind and provenance | `test_rtn_p2_dream.H3WorkingContextKind` |
 | H4 brief owner-level quarantine notice | `test_rtn_p2_dream.H4BriefNotice` |
+| H5 bounded dream, current first, contiguous checkpoint | prose only (`## dream` and "Bounded dreams" above); read review, no wording test; runtime unchanged |
