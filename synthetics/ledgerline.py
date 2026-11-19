@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import re
 import sqlite3
+import threading
 
 IDS_CAP = 200
 TAIL_CHUNK = 65536
@@ -593,6 +594,9 @@ STREAM_ALLOWED = {
     "turn": frozenset({"text_blocks", "text_bytes"}),
     "result": frozenset({"subtype", "is_error", "num_turns", "total_cost_usd", "duration_ms"}),
     "stream_error": frozenset({"stage", "type"}),
+    # E4-r2 (Rowan B1): the pipe was still held open after the CLI exited (an escaped descendant); the reader was
+    # left to its daemon thread and later lines are ignored. join_seconds is how long the worker waited for it.
+    "reader_detached": frozenset({"join_seconds"}),
 }
 # Never in stream.jsonl (Codex C2); a static test checks none of them is allowed.
 STREAM_FORBIDDEN = ("session_id", "cwd", "original_cwd", "messaging_socket_path", "credential_expires_at",
@@ -643,6 +647,8 @@ class StreamReducer:
         self.seq = 0
         self.handle = None
         self.errors = 0
+        self.detached = False
+        self.lock = threading.Lock()  # E4-r2: the reader thread feeds while the worker may detach or close
         try:
             descriptor = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             self.handle = os.fdopen(descriptor, "w", encoding="utf-8")
@@ -651,6 +657,12 @@ class StreamReducer:
             self.handle = None
 
     def feed(self, line):
+        with self.lock:
+            if self.detached or self.closed:
+                return
+            self._feed(line)
+
+    def _feed(self, line):
         try:
             data = json.loads(line)
         except ValueError:
@@ -735,9 +747,29 @@ class StreamReducer:
 
     def output_text(self):
         """What <run>.claude.json gets: the result line, else the non-stream stdout as json mode wrote it."""
-        return self.result_line if self.result_line is not None else "".join(self.passthrough)
+        with self.lock:
+            return self.result_line if self.result_line is not None else "".join(self.passthrough)
+
+    def detach(self, join_seconds):
+        """E4-r2 (Rowan B1): the worker stops waiting for a reader that is still blocked on the pipe. Record it and
+        ignore anything the reader delivers afterwards, so claude.json holds what was read up to now."""
+        with self.lock:
+            if self.detached:
+                return
+            self.detached = True
+            try:
+                self.write({"kind": "reader_detached", "join_seconds": float(join_seconds)})
+            except Exception:  # noqa: BLE001
+                pass
+
+    closed = False
 
     def close(self):
+        with self.lock:
+            self.closed = True
+            self._close()
+
+    def _close(self):
         if self.handle is not None:
             try:
                 self.handle.flush()

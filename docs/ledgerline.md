@@ -128,11 +128,19 @@ Proposal `reviews/E4/proposal.md` (Vesper's workspace), approved with Q1 E4-B (n
   input_bytes, input_sha256}`; `displayed {tool_use_id, shape, bytes, sha256, reported_chars?,
   saved_outside_home?}` with shape `full`, `spilled` (the client's "exceeds maximum allowed tokens" form),
   `preview` (`<persisted-output>`), `error`, or `unknown` (never guessed); `turn {text_blocks, text_bytes}`;
-  `result {subtype, is_error, num_turns, total_cost_usd, duration_ms}`; `stream_error {stage, type}`. Never text,
+  `result {subtype, is_error, num_turns, total_cost_usd, duration_ms}`; `stream_error {stage, type}`;
+  `reader_detached {join_seconds}` (below). Never text,
   input, thinking, paths, cwd, session ID, socket path, credential expiry or memory paths (static test,
   `STREAM_FORBIDDEN`). The stream's `result` line is kept apart before any reduction and written to
   `<run>.claude.json` as json mode wrote it, so cost, budget-cap and error handling are unchanged; a reducer or
   stream-file failure only means fewer facts.
+- **Escaped pipe holder (E4-r2, Rowan B1).** After the CLI exits and its process group is stopped, the worker
+  waits at most `ClaudeBrain.READER_JOIN` (10 s) for the reader. A descendant that left the group (setsid and a
+  double fork) can still hold the pipe's write end; closing the stream then would block until that holder exits,
+  past `timeout`. So if the reader is still alive, the worker leaves the stream to the daemon reader, writes
+  `reader_detached`, ignores later lines and keeps what was read (the result line included). Limit: that pipe's fd
+  and the reader thread stay open until the holder exits; a stream session can take up to 10 s longer than json mode
+  in this case (Rowan's probe: 25 s holder → 10.2 s, was 25 s; json 0.4 s).
 - **Fallback (C1).** `runtime.json` `"stream_output": false` restores the pre-E4 `--output-format json` path
   exactly (same argv and files). It is optional: a config without it stays valid and keeps its digest. Change it
   with `synthetics --home H runtime request --set stream_output=false --reason R --by ID` (not employee
@@ -163,9 +171,14 @@ row. The worker prunes at an idle point at most once per UTC day; `synthetics --
 A session prunes by exactly the configured rules (E4-r1 G2): `--keep-days` and `--max-mb` are owner-only
 (`owner_only`, audited), and `runs_keep_days` / `runs_max_mb` are owner config in `runtime.json`, not
 self-service (`runtime_restart` refuses them).
+The size bound counts only the files a prune manages (E4-r2, Rowan L2): files of unknown runs and other names
+are never removed and never drive the size pass, so they can't make it delete young runs; the result reports them
+as `unremovable_bytes`, with `over_bound_after` for `runs/` as a whole.
 No approval step. A prune that removes something writes audit `runs.pruned {runs, files, bytes, oldest, newest,
-kept_pinned, size_before, size_after, ...}`. Doctor reports info `runs_size` when `runs/` is over 80% of its
-bound.
+kept_pinned, size_before, size_after, unremovable_bytes, over_bound_after, ...}`. Doctor reports info `runs_size`
+when `runs/` is over 80% of its bound, and warning `runs_over_bound` when it is over (after the daily prune that
+means pinned, newest, running or unknown files fill it). The worker checks the day once per process day, not on
+every idle poll (E4-r2 L1); a failed prune is reported once and retried the next UTC day.
 
 Measurements (C4) are in the E4 build handoff.
 
@@ -175,4 +188,5 @@ Measurements (C4) are in the E4 build handoff.
 credential names, unchanged home bytes; E3 fixtures incl. the run-30546289 shape; C5 fence).
 `tests/test_e4_stream.py` (E4a join key, reducer shapes and allow-list, C1 json fallback and identical results,
 timeout, E4c observed verdicts, stream export) and `tests/test_e4_retention.py` (bounds, pins, file rules, dry
-run, C3 unchanged costs/Lookout/doctor/recovery, CLI fence, once-a-day idle prune).
+run, C3 unchanged costs/Lookout/doctor/recovery, CLI fence, once-a-day idle prune), and `tests/test_e4_r2.py` (escaped pipe holder, reducer detach, idle-poll
+cache, unremovable bytes, doctor `runs_over_bound`).

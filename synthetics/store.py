@@ -3214,6 +3214,7 @@ class Store:
         pins = self.runs_pins()
         files = {}
         total = 0
+        unremovable = 0  # E4-r2 (Rowan L2): bytes no prune can remove (unknown runs, other names)
         try:
             entries = list(os.scandir(str(folder)))
         except FileNotFoundError:
@@ -3226,6 +3227,8 @@ class Store:
             total += size
             if "." in entry.name and run_id in status and ledgerline.RUN_ID.fullmatch(run_id):
                 files.setdefault(run_id, []).append((entry.name, size))
+            else:
+                unremovable += size
         kept_pinned = []
         candidates = []
         for run in runs:
@@ -3243,9 +3246,12 @@ class Store:
         chosen = []
         remaining = total
         limit = float(max_mb) * 1024 * 1024
+        # E4-r2 (Rowan L2): the size bound applies to the files a prune manages. Bytes it can never remove (files
+        # of unknown runs, other names) don't count, so they can't make the size pass delete young runs; they are
+        # reported as unremovable_bytes, and doctor warns runs_over_bound when runs/ as a whole is over.
         for run in candidates:  # oldest first
             old = str(run.get("started_at") or "") < horizon
-            if old or remaining > limit:
+            if old or remaining - unremovable > limit:
                 chosen.append(run)
                 remaining -= sum(size for _, size in files[run["id"]])
         removed_bytes = 0
@@ -3266,6 +3272,7 @@ class Store:
                   "oldest": chosen[0].get("started_at") if chosen else None,
                   "newest": chosen[-1].get("started_at") if chosen else None,
                   "kept_pinned": len(kept_pinned), "size_before": total, "size_after": total - removed_bytes,
+                  "unremovable_bytes": unremovable, "over_bound_after": total - removed_bytes > limit,
                   "keep_days": float(keep_days), "max_mb": float(max_mb), "keep_newest": keep_newest}
         if dry_run:
             result["would_remove"] = [r.get("id") for r in chosen]

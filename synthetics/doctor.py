@@ -415,7 +415,13 @@ def runs_size_check(home, add):
                     if e.is_file(follow_symlinks=False))
     except Exception:  # noqa: BLE001 - no runs/ yet, or unreadable: nothing to report
         return
-    if total > 0.8 * bound:
+    if total > bound:
+        # E4-r2 (Rowan L2): still over after the daily prune means pinned, recent or unknown files fill runs/.
+        add("warning", "runs_over_bound", "runs/ holds %.1f MB, over its %.0f MB bound; if the daily prune already ran, "
+            "what is left is pinned, among the newest runs, running, or not a known run's file "
+            "(`synthetics prune-runs --dry-run` shows unremovable_bytes and over_bound_after)"
+            % (total / 1048576.0, bound / 1048576.0))
+    elif total > 0.8 * bound:
         add("info", "runs_size", "runs/ holds %.1f MB of a %.0f MB bound; the worker prunes once a day at idle "
             "(`synthetics prune-runs --dry-run` lists what would go)" % (total / 1048576.0, bound / 1048576.0))
 

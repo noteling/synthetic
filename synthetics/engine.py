@@ -310,20 +310,25 @@ class Engine:
 
     def prune_runs_if_due(self):
         """E4 retention: at an idle point (no session running), at most once per UTC day. Never raises."""
+        today = utc_day()
+        if getattr(self, "_runs_checked_day", None) == today:
+            return None  # E4-r2 (Rowan L1): already checked today in this process; no Store open per idle poll
         try:
-            today = utc_day()
             with Store(self.home) as store:
                 row = store.db.execute("SELECT v FROM capture_meta WHERE k=?", (self.PRUNE_KEY,)).fetchone()
                 if row is not None and row["v"] == today:
+                    self._runs_checked_day = today
                     return None
                 result = store.runs_prune(**self.retention)
                 with store._tx():
                     store.db.execute("INSERT INTO capture_meta(k,v) VALUES (?,?) ON CONFLICT(k) DO UPDATE SET "
                                      "v=excluded.v", (self.PRUNE_KEY, today))
+            self._runs_checked_day = today
             if result.get("runs"):
                 self.on_update({"type": "runs_pruned", "runs": result["runs"], "bytes": result["bytes"]})
             return result
         except Exception as error:  # noqa: BLE001 - housekeeping never stops the worker
+            self._runs_checked_day = today  # one failure report per day, not one per idle poll; retried tomorrow
             self.on_update({"type": "runs_prune_failed", "error": type(error).__name__})
             return None
 

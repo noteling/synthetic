@@ -284,6 +284,8 @@ class ClaudeBrain:
             except (BrokenPipeError, OSError, ValueError):
                 pass
 
+    READER_JOIN = 10.0  # seconds the worker waits for the stdout reader after the CLI's process group is stopped
+
     def _run_stream(self, command, workspace, environment, user_message, output_path, error_path, stream_path):
         """E4 (Codex Q1, E4-B): stdout is a pipe read by a reducer thread; only facts go to stream.jsonl and only
         the result line goes to claude.json, so cost and result readers stay unchanged."""
@@ -315,12 +317,19 @@ class ClaudeBrain:
                     raise
                 finally:
                     self._stop_group(process)
-                    reader.join(timeout=10)
+                    reader.join(timeout=self.READER_JOIN)
                     feeder.join(timeout=2)
-                    try:
-                        process.stdout.close()
-                    except Exception:  # noqa: BLE001
-                        pass
+                    if reader.is_alive():
+                        # E4-r2 (Rowan B1): a descendant that left the process group still holds the pipe's write
+                        # end. Closing the stream here would block on the reader's buffer lock until that holder
+                        # exits (possibly never), past `timeout`. Leave the stream to the daemon reader, record
+                        # the fact, and keep what the reducer has already read (the result line included).
+                        reducer.detach(self.READER_JOIN)
+                    else:
+                        try:
+                            process.stdout.close()
+                        except Exception:  # noqa: BLE001
+                            pass
         finally:
             reducer.close()
             # Write what json mode would have left: the result line (or a non-stream stdout), even after a
