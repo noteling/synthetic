@@ -88,14 +88,23 @@ There are no hardcoded IDs, and nothing is inferred from role text.
 
 ## Commands and who may run them (E3)
 
+**The whole provisioning sequence is owner-only.** `init`, `routine seed`, `cadence`, `restore`,
+`teardown` and `worker install` are refused to a session on every home, its own or another, including a
+disposable home under `/tmp`. A session may run only `routine list` on its own home and MCP `routine_rearm`.
+
 | Command | Owner (host account, operator) | A session (SYNTHETICS_SESSION_RUN set) |
 |---|---|---|
-| `synthetics --home H routine seed --kinds K[,K] [--every K=MIN] [--dream-at HH:MM] [--first K=WHEN]` | yes | refused `owner_only`, own home or any other |
-| `routine cadence KIND MIN` | yes | refused `owner_only` |
-| `routine restore KIND` | yes | refused `owner_only`; a session clears its own quarantine with `routine_rearm` |
-| `routine teardown KIND… \| --all [--reason R]` | yes | refused `owner_only` |
-| `routine list` | yes | own home only; another home is refused `own_home_only` |
+| `synthetics --home H init --name N --role R [--purpose P] --human ID` | yes | refused `owner_only` (`docs/authority.md`) |
+| `synthetics --home H routine seed --kinds K[,K] [--every K=MIN] [--dream-at HH:MM] [--first K=WHEN]…` | yes | refused `owner_only`, own home or any other |
+| `synthetics --home H routine cadence KIND MIN` | yes | refused `owner_only` |
+| `synthetics --home H routine restore KIND` | yes | refused `owner_only`; a session clears its own quarantine with `routine_rearm` |
+| `synthetics --home H routine teardown KIND… \| --all [--reason R]` | yes | refused `owner_only` |
+| `synthetics --home H routine list` | yes | own home only; another home is refused `own_home_only` |
+| `synthetics --home H doctor` | yes | not fenced: runs on any home (see "doctor on another home" below) |
 | MCP `routine_rearm` | no: it needs a run, and operators use `restore` | yes, own home (the MCP server is bound to the session's run) |
+
+A refused command prints `synthetics: owner_only: routine seed is owner-only: provisioning (RTN,
+docs/routines.md); …` (or `own_home_only: …`), exits 1 and writes an `authority.refused` audit row.
 
 These reuse the existing guards. The CLI checks the caller with `authority.actor()`/`owner_only` before it
 opens a Store, as `init` and `access grant` do. G2 (P1-r1): there is no delegated path; the owner (Root's or the
@@ -106,28 +115,66 @@ strips its environment looks like the owner. The fence keeps the supported path 
 (`authority.refused` rows).
 
 `--first KIND=<ISO-8601Z | +MIN>` (G1) sets only the first wake of a kind that seed creates, from now+1 min to
-now+every; anything else is refused. For a kind that already exists it is ignored and listed under `existing`
+now+every; anything else is refused. Repeat the flag once per kind (`--first hourly-check=+2 --first
+dream=+5`). A comma list in one flag is refused, because everything after the first `=` is read as the time.
+If a kind is given twice, the last one wins; a `--first` for a kind not in `--kinds` is checked and then
+ignored. For a kind that already exists it is ignored and listed under `existing`
 with `first_ignored`. The anchor stays on the regular grid, so the first `routine_rearm` returns to the normal
 cadence (dream: the next `--dream-at`).
 
 ## Provisioning a home
 
-1. **Order.** `init` and provision the home, then `routine seed`, then `worker install`. A worker that is
-   already running must restart to load the new code and `prompts/routines.md` (after the merge, restart every
-   worker anyway).
+Every step below runs in an owner shell (no `SYNTHETICS_SESSION_RUN`); see the table above.
+
+1. **Order.** `synthetics --home H init --name N --role R --human ID` (add `--purpose P`; `--human` writes
+   humans.json, without it doctor warns `humans_missing`). Then `worker install --runtime-config
+   --limit-notify MANAGER` (see Manager route below), then `routine seed`. Seeding before the worker is
+   installed also works; only the route reads differently (step 2). A worker that is already running must
+   restart to load the new code and `prompts/routines.md` (after the merge, restart every worker anyway).
+   **Which code runs:** the worker plist runs the absolute Python that ran `worker install`, as
+   `python -u -m synthetics --home H serve …`, with `PYTHONPATH` set to the checkout that `worker install`
+   was run from. So it runs that tree, fixed at install time: update that checkout and restart the worker to
+   load new code; to run a different checkout, reinstall from it.
 2. **Seed.** `synthetics --home H routine seed --kinds hourly-check` (developer), or `--kinds team-review` for
    the manager (team review includes the manager's own check, so it doesn't also need hourly-check). Add
    `dream` for any employee whose memory should be consolidated daily (`--kinds hourly-check,dream`,
    `--dream-at HH:MM`). Kinds come from the flag only; nothing defaults from the role.
+   **Output.** Seed prints one JSON object:
+   `{"created": [{kind, work_id, wake_at, every_minutes}], "existing": [{kind, work_id, status,
+   first_ignored?}], "route": {resolved, manager, via, self_is_manager, report_to, reason?}}`. A second seed
+   with the same kinds creates nothing: each kind is listed under `existing` (with `first_ignored: true` when
+   `--first` named it). A kind counts as existing while any of its routine works is not cancelled.
+   **Manager route.** The route is worked out each time it is used (seed, `routine list`, doctor,
+   `routines_due`, a quarantine notice), never stored at seed. `limit_notify` lives in the worker's runtime
+   configuration, which the worker writes on its first start from `worker install --runtime-config
+   --limit-notify MANAGER`. Install the worker that way before seeding to see `resolved: true` in seed's
+   output; seeding first shows `resolved: false` ("no manager resolved: runtime limit_notify is not set for
+   this home") and doctor warns `routine_no_manager` until the worker's first start. To fix
+   `routine_no_manager` on a home whose worker already runs, set it with `synthetics --home H runtime request
+   --set limit_notify=MANAGER --reason R --by ID` (owner, or a session holding `runtime.request` on that
+   home, `docs/authority.md`); the change applies when the worker restarts.
 3. **Initial wake.** Each routine starts waiting with `wake_at = now + every` (dream: the next `--dream-at`,
    default 01:30Z, just after the UTC daily-limit reset). `anchor_at` starts there.
 4. **Cadence.** `--every` is in minutes, minimum 5 (use 5 in a test home to watch two fires). The default is 60
    for hourly-check and team-review, and daily for dream. `routine cadence` changes `every_minutes` from the
    next re-arm.
+   **Restore** (`routine restore KIND`) works on any routine that wasn't torn down, not only a quarantined
+   one: it sets the routine waiting at the next target after its current `anchor_at`, clears `quarantine`
+   (`failures` stay), reopens a done routine and consumes a held `work_due`. On a routine that is waiting
+   and not yet due, this moves its next wake one cycle later (the anchor is the pending wake, so the next
+   target is anchor + every). A torn-down routine is refused ("seed it again").
 5. **Verify.** `synthetics --home H routine list` shows each routine (status, wake_at, last fired, last
    re-armed, failures), its flags and the manager route. `synthetics --home H doctor` reports the flags below,
    and Lookout's Team page has a Routines block.
-6. **Teardown.** Before `worker remove`, run `routine teardown --all --reason "..."`. It cancels the routines,
+   **doctor on another home.** doctor is read-only and has no session fence: a session can run it on any
+   home it can read. It opens that home's `state.sqlite3` read-only and prints a health report: identity ID
+   and name, schema version, worker and launch-agent state, outbox counts (and for stuck messages the newest
+   message ID and the recipient addresses), relay and capture counts, daily-limit self-raises and pending
+   launch ops, roster findings (including the IDs of people that home's private views name, for
+   `view_unresolvable` and `view_stale`), and routine work IDs, kinds, flags and route. It doesn't print
+   message bodies, memory or view text, or event text. Whether it should be fenced is an open
+   decision, not part of this page.
+6. **Teardown.** Before `worker remove`, run `synthetics --home H routine teardown --all --reason "..."`. It cancels the routines,
    so nothing fires into a removed home and no `routine_closed` flag is raised. Seeding again later creates
    fresh routines.
 
