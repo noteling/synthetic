@@ -59,6 +59,18 @@ class ExecutorRuntimeTests(unittest.TestCase):
             self.assertFalse(loaded["stream_output"])
             self.assertEqual(controller.allowed_codex, [sys.executable])
 
+    def test_unresolved_baseline_cannot_authorize_an_executable(self):
+        with tempfile.TemporaryDirectory() as folder:
+            for config in (baseline(claude=""), baseline(brain="codex", claude="", codex=None, model="")):
+                with self.subTest(brain=config.get("brain", "claude")):
+                    controller = runtime.Controller(folder, config)
+                    self.assertEqual(controller.allowed_claude, [])
+                    self.assertEqual(controller.allowed_codex, [])
+                    provisioned = runtime.Controller(folder, config, allowed_claude=[sys.executable],
+                                                     allowed_codex=[sys.executable])
+                    self.assertEqual(provisioned.allowed_claude, [sys.executable])
+                    self.assertEqual(provisioned.allowed_codex, [sys.executable])
+
     def test_persisted_switch_requires_provisioned_codex_path(self):
         with tempfile.TemporaryDirectory() as folder:
             home = Path(folder)
@@ -234,6 +246,86 @@ class ExecutorCLITests(unittest.TestCase):
                                        "--allow-codex", sys.executable)
         self.assertEqual(code, 0, err)
         self.assertEqual(captured, ["codex"])
+
+    def executable_fixture(self, name):
+        executable = Path(self.temp.name) / name
+        executable.write_text("#!/bin/sh\nexit 99\n")
+        executable.chmod(0o700)
+        return str(executable)
+
+    def test_saved_codex_does_not_require_removed_claude_baseline(self):
+        codex = self.executable_fixture("codex-fixture")
+        missing = str(Path(self.temp.name) / "removed-claude")
+        config = baseline(brain="codex", codex=codex, claude=missing, model="")
+        for source in ("file", "last-good"):
+            with self.subTest(source=source):
+                path = self.home / (runtime.CONFIG_FILE if source == "file" else runtime.LAST_GOOD_FILE)
+                runtime.write_atomic(path, config)
+                if source == "last-good":
+                    (self.home / runtime.CONFIG_FILE).write_text("{broken")
+                captured = []
+                def start_without_model(engine, **kwargs):
+                    with Store(self.home) as store:
+                        state = engine.runtime.start(store)
+                    engine.apply_runtime(state["effective"])
+                    captured.append((engine.brain.backend, engine.brain.executable, state["source"]))
+                with patch("synthetics.engine.Engine.serve", autospec=True, side_effect=start_without_model):
+                    code, out, err = self.call("serve", "--claude", missing,
+                                               "--runtime-config", str(self.home / runtime.CONFIG_FILE),
+                                               "--allow-codex", codex, "--allow-model", "",
+                                               "--allow-model", "claude-opus-5-5")
+                self.assertEqual(code, 0, err)
+                self.assertEqual(captured, [("codex", codex, source)])
+
+    def test_saved_claude_does_not_require_removed_codex_baseline(self):
+        claude = self.executable_fixture("claude-fixture")
+        missing = str(Path(self.temp.name) / "removed-codex")
+        config = baseline(claude=claude)
+        for source in ("file", "last-good"):
+            with self.subTest(source=source):
+                path = self.home / (runtime.CONFIG_FILE if source == "file" else runtime.LAST_GOOD_FILE)
+                runtime.write_atomic(path, config)
+                if source == "last-good":
+                    (self.home / runtime.CONFIG_FILE).write_text("{broken")
+                captured = []
+                def start_without_model(engine, **kwargs):
+                    with Store(self.home) as store:
+                        state = engine.runtime.start(store)
+                    engine.apply_runtime(state["effective"])
+                    captured.append((engine.brain.backend, engine.brain.executable, state["source"]))
+                with patch("synthetics.engine.Engine.serve", autospec=True, side_effect=start_without_model):
+                    code, out, err = self.call("serve", "--brain", "codex", "--codex", missing,
+                                               "--runtime-config", str(self.home / runtime.CONFIG_FILE),
+                                               "--allow-claude", claude, "--allow-model", "",
+                                               "--allow-model", "claude-opus-5-5")
+                self.assertEqual(code, 0, err)
+                self.assertEqual(captured, [("claude", claude, source)])
+
+    def test_missing_baseline_still_refuses_invalid_or_disallowed_saved_executor(self):
+        executable = self.executable_fixture("unprovisioned-executor")
+        missing = str(Path(self.temp.name) / "removed-executor")
+        for launch in ("claude", "codex"):
+            for saved in ("absent", "broken", "disallowed"):
+                with self.subTest(launch=launch, saved=saved):
+                    for name in (runtime.CONFIG_FILE, runtime.LAST_GOOD_FILE):
+                        path = self.home / name
+                        if path.exists():
+                            path.unlink()
+                    if saved == "broken":
+                        (self.home / runtime.CONFIG_FILE).write_text("{broken")
+                    elif saved == "disallowed":
+                        config = (baseline(brain="codex", codex=executable, model="")
+                                  if launch == "claude" else baseline(claude=executable))
+                        runtime.write_atomic(self.home / runtime.CONFIG_FILE, config)
+                    with patch("synthetics.engine.Engine.serve") as serve:
+                        code, out, err = self.call("serve", "--brain", launch, "--" + launch, missing,
+                                                   "--runtime-config", str(self.home / runtime.CONFIG_FILE),
+                                                   "--allow-model", "", "--allow-model", "claude-opus-5-5")
+                    self.assertEqual(code, 1, err)
+                    self.assertIn("not an executable file", err)
+                    if saved == "disallowed":
+                        self.assertIn("not an allowed executable", err)
+                    serve.assert_not_called()
 
 
 if __name__ == "__main__":

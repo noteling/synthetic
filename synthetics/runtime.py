@@ -400,8 +400,10 @@ class Controller:
         self.home = Path(home).resolve()
         self.baseline = _present(baseline)
         self.allowed_models = sorted(set(allowed_models or [self.baseline["model"]]))
-        self.allowed_claude = sorted(set(allowed_claude or [self.baseline["claude"]]))
-        default_codex = [self.baseline["codex"]] if self.baseline.get("brain") == "codex" else []
+        default_claude = [self.baseline["claude"]] if self.baseline["claude"] else []
+        self.allowed_claude = sorted(set(allowed_claude or default_claude))
+        default_codex = ([self.baseline["codex"]]
+                         if self.baseline.get("brain") == "codex" and self.baseline.get("codex") else [])
         self.allowed_codex = sorted(set(default_codex if allowed_codex is None else allowed_codex))
         self.label = label
         self.restarter = restarter

@@ -1052,17 +1052,33 @@ def main(argv=None):
                 if args.runtime_config and Path(args.runtime_config).expanduser().resolve() != home / runtime.CONFIG_FILE:
                     raise ValueError("--runtime-config must be %s." % (home / runtime.CONFIG_FILE))
                 from .install import resolve_claude, resolve_codex
-                claude = resolve_claude(args.claude if args.claude != "claude" else None) if args.brain == "claude" else ""
-                baseline = dict(claude=claude, model=model, budget=args.budget, timeout=args.timeout,
+                baseline = dict(claude="", model=model, budget=args.budget, timeout=args.timeout,
                                 poll=args.poll, retry=args.retry, daily_limit=args.daily_limit,
                                 limit_notify=args.limit_notify, limit_allow=args.limit_allow)
                 if args.brain == "codex":
-                    baseline.update(brain="codex", codex=resolve_codex(args.codex if args.codex != "codex" else None))
+                    baseline.update(brain="codex", codex=None)
+                resolution_error = None
+                try:
+                    if args.brain == "claude":
+                        baseline["claude"] = resolve_claude(args.claude if args.claude != "claude" else None)
+                    else:
+                        baseline["codex"] = resolve_codex(args.codex if args.codex != "codex" else None)
+                except ValueError as error:
+                    if not args.runtime_config:
+                        raise
+                    # An explicit saved-runtime launch can outlive its original CLI installation.
+                    # Do not grant a path on failed resolution; only a validated saved executor may win.
+                    resolution_error = error
                 controller = runtime.Controller(home, baseline, allowed_models=args.allow_model,
                                                 allowed_claude=args.allow_claude,
                                                 allowed_codex=args.allow_codex or None,
                                                 label=os.environ.get("XPC_SERVICE_NAME"), restarter=request_restart,
                                                 mode=args.restart_mode, argv=sys.argv)
+                if resolution_error is not None:
+                    loaded = controller.load()
+                    if loaded["source"] not in ("file", "last-good"):
+                        raise ValueError("%s No valid saved runtime is available: %s" %
+                                         (resolution_error, "; ".join(loaded["problems"])))
                 if args.brain == "codex" and not args.runtime_config:
                     # Auto-persisting Codex state makes its capabilities visible to Floor; it must not
                     # turn an explicit executor choice into permission to run a previously saved Claude.
