@@ -32,7 +32,9 @@ public in every profile (`roster_get`, people files) and retractable.
   `not_delegated`, `unknown_parent`.
 - **Use**: `require()` finds an active delegation for the actor whose scope covers the target and walks
   child → parent; a retracted root invalidates its children. The owner retracts anything; a delegate
-  retracts only children it wrote (`not_author`).
+  retracts only children it wrote (`not_author`). Only the owner retracts a `retract` or `retire` entry
+  (`owner_only`: undoing a revocation or a retirement); a session's retract of a `person` entry follows the role
+  rules (`own_role`, `unauthenticated_role`) and may not remove a profile (`owner_only`) (issue #2).
 
 ### Catalogue (no owner-only or credential item, nothing about private views — static test)
 
@@ -72,7 +74,8 @@ Scope semantics (D6):
 
 `require()` returns a warrant. Every delegated write to shared or target state ATTACHes the actor's Store
 (and the company log) before `BEGIN IMMEDIATE` and re-checks, inside the target's write transaction, that
-the actor's run is still `running` and that no delegation in the chain was retracted. It then writes a
+the actor's run is still `running` and that every delegation in the chain is still active in the company fold
+(the same fold `covering()` reads, so a retract that was itself retracted no longer counts). It then writes a
 receipt `{actor, run, delegation, chain, action, key}` in the target: project/company DB `audit` action
 `warrant`, home audit `authority.receipt`. If the run finished or the chain was retracted in between,
 nothing is written and the actor home audits `authority.refused` with `stage: write`.
