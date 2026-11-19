@@ -55,8 +55,9 @@ def write_limit_override(home, **fields):
 
 def failure_streak(runs, window=FAILURE_WINDOW):
     """Latest run id when the newest `window` runs all failed or were interrupted, else None.
-    MTG F1 (C3): a run stopped for a meeting (`yielded`) is no verdict; it is skipped, neither failure nor success."""
-    recent = [run for run in runs if not run.get("yielded")][:window]
+    MTG F1 (C3): a run stopped for a meeting (`yielded`) is no verdict; it is skipped, neither failure nor success.
+    MTG F2: a meeting run (kind `meeting`) is run by the attach process, not the worker: skipped too."""
+    recent = [run for run in runs if not run.get("yielded") and run.get("kind") != "meeting"][:window]
     if len(recent) < window or any(run.get("status") not in ("failed", "interrupted") for run in recent):
         return None
     return recent[0]["id"]
@@ -327,10 +328,13 @@ class Engine:
                     continue
                 yielded.update(meeting=pending["meeting"], grace=pending.get("grace_seconds"))
                 if pending.get("deadline") and pending["deadline"] <= timestamp():
-                    yielded["stopped"] = True
                     stop = getattr(self.brain, "yield_stop", None)
-                    if stop is not None:
-                        stop()
+                    # #74 L2: keep polling until the stop actually hits a live process. A brain whose yield_stop
+                    # returns False has nothing running yet (the CLI isn't spawned); one returning None predates
+                    # the bool and counts as stopped.
+                    if stop is not None and stop() is False:
+                        continue
+                    yielded["stopped"] = True
                     return
 
         watcher = threading.Thread(target=watch, name="floor-yield-watch", daemon=True)
@@ -342,14 +346,18 @@ class Engine:
             watcher.join(timeout=5)
 
     def _yield_ended_itself(self, store, run_id, yielded):
-        """C2: a yield target that finished on its own (inside the grace, or racing the stop) is audited `ended`."""
+        """C2: a yield target that finished on its own inside the grace is audited `ended`; one that returned a
+        successful result after the stop was sent is `stopped_completed`."""
         try:
             pending = store.meeting_pending()
             if pending and pending.get("yield_run") == run_id:
                 yielded.setdefault("meeting", pending["meeting"])
                 yielded.setdefault("grace", pending.get("grace_seconds"))
             if yielded.get("meeting"):
-                store.floor_yield_audit(run_id, yielded["meeting"], yielded.get("grace"), "ended")
+                # #74 (Codex): the stop was sent but the CLI still returned a successful result: the turn completed
+                # as the stop landed. The run is honestly finished; the audit says the stop was sent.
+                outcome = "stopped_completed" if yielded.get("stopped") else "ended"
+                store.floor_yield_audit(run_id, yielded["meeting"], yielded.get("grace"), outcome)
                 self.on_update({"type": "yield_ended", "run_id": run_id, "meeting": yielded["meeting"]})
         except Exception:  # noqa: BLE001 - the audit row never changes the run's outcome
             pass

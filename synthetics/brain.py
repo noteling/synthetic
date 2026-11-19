@@ -236,10 +236,14 @@ class ClaudeBrain:
 
     def yield_stop(self):
         """MTG F1: stop the running session's process group because a meeting's grace has passed (called from the
-        engine's watcher thread). The session then ends like any stopped CLI; the engine records it as yielded."""
+        engine's watcher thread). The session then ends like any stopped CLI; the engine records it as yielded.
+        Returns True only when it stopped a live process; False when none is running yet (not spawned, or only the
+        previous run's finished process), so the watcher keeps polling (#74 L2)."""
         process = getattr(self, "_current", None)
-        if process is not None and process.poll() is None:
-            self._stop_group(process)
+        if process is None or process.poll() is not None:
+            return False
+        self._stop_group(process)
+        return True
 
     def run(self, context):
         workspace = self.home / "workspace"

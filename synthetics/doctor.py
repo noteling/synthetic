@@ -236,6 +236,13 @@ def diagnose(home, label=None, compare=None, key_files=(), launchd=_launchd_pid,
                               + list(lb.get("channel_prefixes") or [])
                               + list((cfg.get("operators") or {}).get("source_prefixes") or [])
                               if str(x).startswith("board") or capture.BOARD_SOURCE.startswith(str(x))]
+            # MTG F2 (Rowan G4): the floor wrap event comes from the stand channel (source stand:meeting). A human
+            # prefix that matches it would make a meeting's channel line count as the human's words.
+            stand_prefixes = [x for x in list(cfg.get("channel_prefixes") or []) + list(lb.get("channel_prefixes") or [])
+                              if str(x) and "stand:meeting".startswith(str(x))]
+            if stand_prefixes:
+                add("warning", "stand_prefix_as_human", "humans.json human prefixes match the stand channel's meeting "
+                    "events (panel lines and the wrap are never the human's words): %s" % ", ".join(map(str, stand_prefixes)))
             if board_prefixes:
                 add("warning", "humans_board_prefix", "humans.json prefixes match board events (M27 Q4: board "
                     "posts are never a human's words or a limit bypass): %s" % ", ".join(map(str, board_prefixes)))

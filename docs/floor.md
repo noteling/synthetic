@@ -50,13 +50,15 @@ F1 accepts only `begin` and `end`; other lines get `unsupported`. F2 adds `heard
    run if any, its deadline). While it is pending the worker starts no new session (`run_begin` refuses
    with `WorkerHeld`). One meeting at a time per home; repeating `begin` for the same meeting is a no-op.
 2. **Yield.** If a session was running at `begin`, every dict result of its Synthetics tools carries
-   `"yield": "a meeting is starting: save your next step with work_put and end now (stopped at <deadline>)"`.
+   `"yield": "a meeting is starting: start no new outbound action (message, question, push); save your next step with work_put and end now (stopped at <deadline>)"`.
    The field is added before the i17 receipt is written, so the receipt hashes what the session saw.
    List results get no field; the stop covers them.
 3. **Stop.** The worker checks every second. Once the deadline passes it stops the session's process group
    (`ClaudeBrain.yield_stop`, the same `_stop_group` as a timeout). The run ends `failed` with error
    `yielded: meeting <id>` and field `yielded: <id>`, audited `floor.yield` with outcome `stopped`.
-   A session that ends by itself first is recorded normally and audited `floor.yield` outcome `ended`.
+   A session that ends by itself first is recorded normally and audited `floor.yield` outcome `ended`. If the
+   stop was already sent but the CLI still returns a successful result (the turn completed as the stop landed),
+   the run is recorded finished and the audit outcome is `stopped_completed`.
 4. A yielded run is **not a verdict**: `failure_streak` skips it (it neither fails nor resets the streak),
    it decides no runtime probation, the worker's serve loop does not count it, and it quarantines no
    routine. Its inputs stay pending and go to the first session after the meeting.
@@ -66,6 +68,10 @@ F1 accepts only `begin` and `end`; other lines get `unsupported`. F2 adds `heard
 6. **End.** `end` or EOF releases the hold (audited `floor.ended`); ordinary work resumes.
 
 A pending meeting nobody attaches to lapses after its grace plus 5 min.
+If the yield target isn't recorded as ended within grace + 60 s, attach exits with `busy` and drops the pending
+meeting itself (audited `floor.ended`, reason `busy`), so ordinary work isn't held for nobody (#74 L3). The
+worker's stop is retried every second until it reaches a running CLI process; a CLI not yet spawned when the
+deadline passes is stopped as soon as it is (#74 L2).
 
 ### Without a meeting
 
@@ -80,3 +86,46 @@ their shape (Codex C1, tested).
   attach wait until that hold is released or expires.
 - The `stand` key is a channel key like any other: a process running as the same OS user can read it
   (docs/channel-contract.md §7).
+
+## F2: the meeting (in progress, not frozen)
+
+A `begin` line with `goal` (the human's brief for this meeting) runs the meeting under the floor hold. Without
+`goal` the attach only holds the idle boundary, as in F1.
+
+    in:  {"type": "begin", "meeting", "goal", "started_by"?, "text_mode"?: "full"|"hash", "grace"?}
+         {"type": "heard", "seq", "t"?, "text"}       room speech: speaker unidentified, never a verified person
+         {"type": "spoken", "seq", "text", "played", "cut_at"?}
+         {"type": "note", "seq", "text"}              the human's private panel note (a correction)
+         {"type": "ask", "id", "rev", "question"}     rev = last seq Stand sent
+         {"type": "cancel", "id"}   {"type": "confirm", "cid", "yes"}   {"type": "end"} or EOF
+    out: {"type": "ready", "meeting", "run", "name", "role", "persona", "aliases", "brief_sha256", ...}
+         {"type": "answer", "id", "rev", "text", "commitments": [{"cid", "text"}]}
+         {"type": "stale", "id", "reason"}             a panel note arrived after the ask's rev; not spoken
+         {"type": "error", "code", "message", "id"?}   bad_line, conflict, invalid_state, no_answer, session_failed
+         {"type": "ended", "meeting", "reason", "head", "wrap_event"}
+
+- **Persona (G3).** `ready` carries only identity and the goal plus the works the goal names by ID.
+- **Run.** One run row of kind `meeting` (`store.meeting_run_begin`, needs this meeting's hold token), with
+  `text_mode`. A worker restart doesn't recover it while its hold is live; it never counts toward failure_streak.
+- **Session.** One persistent `claude --input-format stream-json --output-format stream-json` process
+  (`floorsession.MeetingSession`) with `--tools ""` (no built-in tools) and `--allowedTools` limited to
+  `floortools.MEETING_TOOLS`; its MCP server offers only those tools for a meeting run, in code (C5). Asks are
+  answered one at a time, in order. Cancelling the ask in flight restarts the process with the journal tail.
+- **Journal.** `HOME/meetings/<id>/journal.jsonl`, hash-chained, speaker class fixed by the line type.
+  `text_mode: hash` stores only the size and sha256 of room words: a `heard` line's text and an `ask` line's
+  question (C8). Panel notes and the employee's own answers are kept. The session itself still sees the question in
+  memory while it answers, and a restarted session's journal tail then has no question text.
+- **Stale (§4).** Only a panel `note` journaled after an ask makes that ask's answer `stale`. A `floor_note` the
+  session writes never does: it answers asks in order, so the answer already accounts for its own correction, which
+  the prompt asks it to say aloud (#76 r1 L4).
+- **Memory (E3).** `memory_search` is one of the read-only meeting tools, so anything in the employee's memory can
+  be spoken in the room. That is approved (E3); keep it in mind when a meeting has outside guests.
+- **End.** `end`, EOF, the 90 min cap, a lost hold or a dead session: stop emitting, stop the session, journal
+  still-open asks as `late`, close the journal, finish the run (with its cost), feed one wrap event through the
+  stand channel (source `stand:meeting`, sender `stand`, body = pointer facts and the chain head, no text, no
+  `question_id`), release the hold.
+- **Panel lines (G4).** `note` and `confirm` live only in the journal (`human-panel`). They never become store
+  events, so they can't answer a question, approve a click or stand in for the default human. The wrap event's
+  sender is the channel, not the human.
+- **Retention (G5).** F2 never prunes `meetings/`. A pruning slice must pin journals cited by memories or work
+  evidence first.

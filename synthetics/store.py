@@ -3180,6 +3180,8 @@ class Store:
 
     def meeting_renew(self, token):
         """Extend the floor hold. None when it is gone or expired (the attach then ends the meeting)."""
+        if self.run_id is not None:  # #74 n1: like the other meeting calls, never from a session-bound Store
+            raise ValueError("floor meetings are held by the stand channel's attach process, not by a session tool.")
         with self._tx():
             hold = self._hold_row()
             if hold is None or hold.get("kind") != "floor" or hold.get("token") != token:
@@ -3207,8 +3209,32 @@ class Store:
                                                            dropped_pending=dropped))
             return dict(meeting=meeting_id, released_hold=released, dropped_pending=dropped)
 
+    def meeting_run_begin(self, meeting_id, token, text_mode="full"):
+        """F2: the meeting session's run row (kind `meeting`), created only by the attach that holds this meeting's
+        floor hold (by token). run_begin refuses while any hold is held; this is the one run allowed under the floor
+        hold. It captures no inbox events (they stay pending for the next ordinary session). Audited."""
+        self._floor_only(meeting_id)
+        with self._tx():
+            hold = self._hold_row()
+            if hold is None or hold.get("kind") != "floor" or hold.get("token") != token \
+                    or hold.get("meeting") != meeting_id:
+                raise ValueError("meeting %s does not hold this home's floor." % meeting_id)
+            if any(run["status"] == "running" for run in self._all("runs")):
+                raise ValueError("Another run is active.")
+            if text_mode not in ("full", "hash"):
+                raise ValueError("text_mode must be full or hash.")
+            now = timestamp()
+            history_sequence = self.db.execute("SELECT COALESCE(MAX(seq),0) AS seq FROM audit").fetchone()["seq"]
+            record = dict(id="run-" + uuid.uuid4().hex, status="running", started_at=now, created_at=now,
+                          kind="meeting", meeting=meeting_id, text_mode=text_mode, event_ids=[], events=[],
+                          history_sequence=history_sequence, finished_at=None, summary="", error=None, cost=None)
+            return self._save("runs", record, "run.started")
+
     def floor_yield_audit(self, run_id, meeting, grace, outcome):
-        """C2: the worker records how a yield target ended: `stopped` after the grace, or `ended` by itself."""
+        """C2: the worker records how a yield target ended: `stopped` after the grace, `ended` by itself, or
+        `stopped_completed` (stop sent, yet the CLI returned a successful result)."""
+        if self.run_id is not None:  # #74 n1: the worker writes this, never a session-bound Store
+            raise ValueError("floor.yield is audited by the worker, not by a session tool.")
         with self._tx():
             self._audit("floor.yield", run_id, dict(run=run_id, meeting=meeting, grace_seconds=grace, outcome=outcome))
 
@@ -3486,8 +3512,12 @@ class Store:
     def recover_runs(self):
         count = 0
         with self._tx():
+            hold = self._hold_row()
             for run in self._all("runs"):
                 if run["status"] == "running":
+                    if (run.get("kind") == "meeting" and hold is not None and hold.get("kind") == "floor"
+                            and hold.get("meeting") == run.get("meeting")):
+                        continue  # MTG F2: the live attach owns this run while its floor hold is unexpired
                     run.update(status="interrupted", error="Worker stopped before completing this run; inspect existing effects before retrying.",
                                finished_at=timestamp())
                     run["receipt_chain"] = self._receipt_chain(run["id"])
