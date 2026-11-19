@@ -199,6 +199,15 @@ def diagnose(home, label=None, compare=None, key_files=(), launchd=_launchd_pid,
         else:
             report["identity"] = {"id": identities[0].get("id"), "name": identities[0].get("name")}
 
+        # Role profile (docs/profiles.md): metadata only; an invalid profile.json means sessions will refuse to start.
+        from . import profiles
+        prof = profiles.triple(home)
+        if prof is not None:
+            report["profile"] = prof
+        if prof is not None and "error" in prof:
+            add("error", "profile_invalid", "%s: sessions refuse to start until the owner fixes it "
+                "(synthetics profile set NAME, or profile clear)." % prof.get("detail"))
+
         # runtime.json: valid, and its claude executable (allowlists are the worker's argv; not checked here)
         config, problem = runtime._read(home / runtime.CONFIG_FILE, None, None)
         limit_allow = []
@@ -570,7 +579,7 @@ def render(report):
     lines = ["home %s: %s" % (report["home"], "ok" if report.get("ok") else "PROBLEMS")]
     for f in report["findings"]:
         lines.append("  %-7s %s%s" % (f["level"], f["code"], (": " + f["detail"]) if f.get("detail") else ""))
-    for key in ("identity", "runtime", "worker", "launch_agent", "relay", "outbox", "capture", "compare_legacy",
+    for key in ("identity", "profile", "runtime", "worker", "launch_agent", "relay", "outbox", "capture", "compare_legacy",
                 "roster", "collector"):
         if key in report:
             lines.append("  %s: %s" % (key, json.dumps(report[key], sort_keys=True)))
