@@ -126,8 +126,14 @@ cadence (dream: the next `--dream-at`).
 
 Every step below runs in an owner shell (no `SYNTHETICS_SESSION_RUN`); see the table above.
 
-1. **Order.** `synthetics --home H init --name N --role R --human ID` (add `--purpose P`; `--human` writes
-   humans.json, without it doctor warns `humans_missing`). Then `worker install --runtime-config
+1. **Order.** `synthetics --home H init --name N --role R --human ID` (add `--purpose P`). On a fresh home
+   `--human ID` is required: it writes `H/humans.json` with that person as `default_human` and sender, and
+   makes them the initial colleague. Without `--human` (or `--by ID`) init fails with `no --by given and
+   H/humans.json has no default_human` and leaves an empty humans.json, after which `--human` is refused
+   (`already exists; edit it instead`): set `"default_human"` and `"senders"` in that file and rerun init
+   without `--human`, or delete the empty file and rerun with `--human`. `--by ID` alone initializes the
+   home but writes no default_human (the humans.json stays empty, so doctor warns `humans_empty`) and later commands such
+   as `access grant` need `--by`. Then `worker install --runtime-config
    --limit-notify MANAGER` (see Manager route below), then `routine seed`. Seeding before the worker is
    installed also works; only the route reads differently (step 2). A worker that is already running must
    restart to load the new code and `prompts/routines.md` (after the merge, restart every worker anyway).
@@ -216,7 +222,13 @@ The `## dream` section of `synthetics/prompts/routines.md` is the guidance; the 
   `next_cursor` continues strictly after the last item returned (`cursor=`), so items sharing a timestamp are
   never repeated or skipped (H2). Without `since` or `cursor` both tools behave and return exactly as before.
 - **Bounded dreams (H5).** Each dream reads at most about 200 event records, 100 memory records and 10
-  topical older lookups; these are ceilings, not targets. It looks at current goals and the newest
+  topical older lookups; these are ceilings, not targets. Read them in pages: start at about 15-20 events
+  and 20-30 memories per call (`limit=`), and continue with `cursor=next_cursor`. A page that comes back
+  spilled to a file, summarized, truncated or shown only in part is **not read**: halve `limit` and re-read
+  that same range (same `since`/`cursor`); until it is read in full, record it as an omission with `from` =
+  its first item's `created_at` and don't advance `covered_through` past it. Event records vary widely in
+  size (early `source_update` events carry whole document bodies, ~3.8 KB per event on average in one home),
+  so a fixed page size can still spill. It looks at current goals and the newest
   consequential feedback and outcomes first, and spends what is left on chronological backfill from
   `covered_through`. Coverage is contiguous: reading newer material first never moves `covered_through` past
   an older unread gap, so it advances only to the end of the unbroken run read from the previous checkpoint,
@@ -258,3 +270,5 @@ The `## dream` section of `synthetics/prompts/routines.md` is the guidance; the 
 | H3 working_context kind and provenance | `test_rtn_p2_dream.H3WorkingContextKind` |
 | H4 brief owner-level quarantine notice | `test_rtn_p2_dream.H4BriefNotice` |
 | H5 bounded dream, current first, contiguous checkpoint | prose only (`## dream` and "Bounded dreams" above); read review, no wording test; runtime unchanged |
+| Dream page size; spilled/summarized output is not read (P3 finding) | prose only (`## dream` step 1 and "Bounded dreams"); read review, no wording test; runtime unchanged |
+| Fresh-home init needs `--human` (README, Provisioning step 1) | existing `tests/test_humans_cli.py` (`test_no_file_and_no_flag_fails_clearly`, `test_init_human_writes_config_and_is_default_everywhere`) |
