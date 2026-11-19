@@ -17,7 +17,7 @@ pages need no JavaScript, and a Content-Security-Policy forbids scripts.
 
 | Path | Shows |
 |---|---|
-| `/` | Team: one block per employee home with the three liveness states, work (title, status, priority, waiting_for, published), waiting-on-David asks (Docket), open questions (first line), last 5 sessions (id, status, times, cost, failed tool count), last 5 screen glances (RW-1: time, run, status, element counts, find name → match ×count). Then other people from the company log, then loaded adapters. |
+| `/` | Team: one block per employee home with the three liveness states, work (title, status, priority, waiting_for, published), waiting-on-David asks (Docket), open questions (first line; relay hops linked on both sides, G3), last 5 sessions (id, status, times, cost, failed tool count), last 5 screen glances (RW-1: time, run, status, element counts, find name → match ×count). Then other people from the company log, then loaded adapters. |
 | `/p/<project>/threads` | Captured conversations, newest first. |
 | `/p/<project>/thread/<key>` | One conversation, both directions in time order, with sender, recipient, time, auth, channel and which home captured it. |
 | `/p/<project>/board` | Board backlog (with blocked_by) and posts. |
@@ -37,6 +37,7 @@ Lookout reads only these files. It never opens a SQLite database.
 | Profiles, roles, aliases | `company/log.jsonl` (company fold) | Private views and self notes (`<home>/roster/`) |
 | Work title, status, priority, waiting_for, wake_at, waiting question IDs | `<home>/shared/status.json` | Work description and note |
 | Docket asks (first line, ages, ack, hop, blocked works) | `<home>/shared/status.json` | The rest of the question body |
+| Open questions: first line, recipient, age, hop and the onward question it went via (`hop_via`), the askers' questions it carries (`carries`: question ID and asker ID only) | `<home>/shared/status.json` | The rest of the question body; the body of a relayed question |
 | Session id, status, times, cost, event count, failed tool count | `<home>/shared/status.json` | Run summary, error text, transcripts (`<home>/runs/`) |
 | Screen glances (RW-1): time, run, status, Noteling's counts, the name/role asked, match kind, count, unique, visible/enabled per hit; `site` as its host only (no port, path, query or fragment) | `<home>/shared/status.json` (`glances`, from the home's `glances` table, already whitelisted by `synthetics/glance.py`) | Page text (never requested: no `--full`/`--contains`), hit labels and frames (the employee's tool result only; an alike label carries page words) |
 | Liveness | `launchctl list`, `<home>/runtime.state.json`, `<home>/worker.lock` (its pid text; no lock is taken), `<home>/shared/status.json` | — |
@@ -57,7 +58,7 @@ from the home's own database (`synthetics/sharedstatus.py`), replacing it atomic
 
 A failed write never fails the operation that triggered it; the next trigger rewrites the file.
 Its fields (v1; fields are added, never renamed): `v, employee, name, role, written_at, pid,
-session {state, run, started_at, paused}, works[], docket, docket_error, questions_open[], runs[]
+session {state, run, started_at, paused}, works[], docket, docket_error, questions_open[] (G3 adds hop_via, carries), runs[]
 (newest 10), outbox_stuck {count, older_than_48h}`.
 
 ## Liveness: three states
@@ -84,3 +85,10 @@ unordered sender/recipient pair plus the set of `work-id`/`for-work` headers, so
 of an exchange about the same pair of works join one conversation. Otherwise it is the pair alone.
 Outgoing captures carry no recipient; when the recipient's inbound copy was captured too, its
 headers fill it in, otherwise the recipient shows as `?`.
+
+## Relay hops (G3)
+
+When an employee asks someone else on behalf of a colleague (`question_ask relays=[…]`), the Team page links both
+sides. The carrier's open question reads "carries <asker's question> for <asker>"; the asker's open question reads
+"<hop> via <onward question>" once the hop notice has arrived. Each open question is an anchor `#q-<id>`, so the
+link jumps to the other home's block when that question is still open; otherwise it is just the ID.

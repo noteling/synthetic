@@ -312,6 +312,28 @@ def _age(ts, now):
     return "%dd %dh" % (days, hours) if days else ("%dh %dm" % (hours, mins) if hours else "%dm" % mins)
 
 
+def _anchor(qid):
+    """Page anchor of an open question, so relay hops can link both sides on the Team page (G3)."""
+    return "q-" + re.sub(r"[^0-9A-Za-z_-]", "", str(qid or ""))
+
+
+def _qlink(qid):
+    return "<a href='#%s'><code>%s</code></a>" % (_anchor(qid), _v(qid))
+
+
+def _relay_links(people, q):
+    """G3: the asker's side shows where its question is now (hop) and links the onward question; the carrier's
+    side shows which askers' questions it carries and links them. The link resolves when the other home's open
+    question is on the same page; otherwise it is just the ID."""
+    parts = []
+    if q.get("hop"):
+        parts.append(E(q["hop"]) + (" via " + _qlink(q["hop_via"]) if q.get("hop_via") else ""))
+    for link in q.get("carries") or []:
+        if isinstance(link, dict) and link.get("question_id"):
+            parts.append("carries %s for %s" % (_qlink(link["question_id"]), E(_name(people, link.get("asker")))))
+    return "".join(" — " + part for part in parts)
+
+
 def _name(people, pid):
     profile = people.get(pid) or {}
     return profile.get("name") or pid or "?"
@@ -399,9 +421,9 @@ def team_page(root, agents=None, now=None):
         questions = status.get("questions_open") or []
         if questions:
             out.append("<p><b>Open questions</b></p><ul>" + "".join(
-                "<li><code>%s</code> to %s, %s ago: %s%s</li>" % (
-                    _v(q.get("id")), E(_name(people, q.get("to"))), _age(q.get("asked_at"), now), _v(q.get("first_line")),
-                    " — %s" % E(q["hop"]) if q.get("hop") else "") for q in questions) + "</ul>")
+                "<li id='%s'><code>%s</code> to %s, %s ago: %s%s</li>" % (
+                    _anchor(q.get("id")), _v(q.get("id")), E(_name(people, q.get("to"))), _age(q.get("asked_at"), now),
+                    _v(q.get("first_line")), _relay_links(people, q)) for q in questions) + "</ul>")
         runs = (status.get("runs") or [])[:5]
         if runs:
             out.append("<p><b>Recent sessions</b></p><table><tr><th>run</th><th>status</th><th>started</th>"
