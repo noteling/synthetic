@@ -183,7 +183,9 @@ class BoundaryTests(_Root):
         ProjectStore(self.root / "projects" / "noteling" / "memory.sqlite3", "noteling").close()  # C3: empty store
         self.paths = ["/", "/p/synthetics/threads", "/p/synthetics/board", "/p/synthetics/memory",
                       "/p/noteling/threads", "/p/noteling/board", "/p/noteling/memory",
-                      "/p/synthetics/work", "/p/noteling/work"]  # VIS G1
+                      "/p/synthetics/work", "/p/noteling/work",  # VIS G1
+                      "/e/vesper", "/diagnostics", "/team", "/projects", "/p/synthetics", "/p/noteling",
+                      "/p/synthetics/direction", "/p/noteling/direction"]  # VIS-O
 
     def all_pages(self):
         out = {}
@@ -264,6 +266,166 @@ class BoundaryTests(_Root):
         self.project.redact(sid, reason="private", by="op")
         pages = self.all_pages()
         self.assertFalse(any("Please build" in body for body in pages.values()))
+
+
+class OverviewTests(BoundaryTests):
+    """VIS-O: / is an overview for David; the per-home detail moves to /e/<home>, service rows to /diagnostics."""
+    LABEL = "com.synthetics.worker.x"
+
+    def setUp(self):
+        super().setUp()
+        state = json.loads((self.home / "runtime.state.json").read_text())
+        state["effective"]["limit_notify"] = "codex-manager"  # E2's source: the manager is resolved, not hardcoded
+        (self.home / "runtime.state.json").write_text(json.dumps(state))
+        self.manager = self.root / "manager"
+        (self.manager / "shared").mkdir(parents=True)
+        (self.manager / "runtime.state.json").write_text(json.dumps(
+            {"label": "com.synthetics.worker.m", "pid": os.getpid(), "started_at": "2026-01-01T00:00:00Z",
+             "effective": {"timeout": 600, "limit_notify": "david"}}))
+        (self.manager / "worker.lock").write_text(str(os.getpid()))
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        works = [{"id": "work-%032x" % i, "title": "Goal %d" % i, "status": "waiting", "priority": 1 if i < 7 else 3,
+                  "waiting_for": "", "wake_at": None, "waiting_question_ids": [], "published": None,
+                  "updated_at": now} for i in range(8)]
+        works[0]["waiting_for"] = "Vesper's %s, then review" % self.work["id"][:13]
+        works.append({"id": "work-" + "f" * 32, "title": "Routine: hourly-check", "status": "waiting", "priority": 0,
+                      "waiting_for": "routine", "updated_at": now,
+                      "routine": {"kind": "hourly-check", "quarantined": False}})
+        self.write_manager(works=works)
+
+    def write_manager(self, **fields):
+        value = {"v": 1, "employee": CODEX, "name": "Codex", "role": "manager",
+                 "written_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                 "session": {"state": "idle", "run": None, "started_at": None, "paused": None},
+                 "works": [], "docket": None, "questions_open": [], "runs": [],
+                 "outbox_stuck": {"count": 0, "older_than_48h": 0, "items": []}, "routine_flags": []}
+        path = self.manager / "shared" / "status.json"
+        if path.exists():
+            value.update(json.loads(path.read_text()))
+        value.update(fields)
+        path.write_text(json.dumps(value))
+
+    def get(self, path, agents=None):
+        agents = {self.LABEL: os.getpid(), "com.synthetics.worker.m": os.getpid()} if agents is None else agents
+        return lookout.route(str(self.root), path, agents=agents)
+
+    def stuck(self, *items):
+        self.write_manager(outbox_stuck={"count": len(items), "older_than_48h": 0, "items": [
+            dict({"id": "message-%d" % n, "to": "codex-desktop", "kind": "message", "question_id": None,
+                  "state": "pending", "age_minutes": 30}, **item) for n, item in enumerate(items)]})
+
+    def test_overview_has_no_raw_diagnostics_and_details_do(self):
+        code, overview = self.get("/")
+        self.assertEqual(code, 200)
+        for raw in (self.LABEL, "com.synthetics.worker.m", "launchd pid", "run-", "$", "status.json written"):
+            self.assertNotIn(raw, overview)
+        self.assertIn("Needs you", overview)
+        code, details = self.get("/e/vesper")
+        self.assertEqual(code, 200)
+        for raw in (self.LABEL, "launchd pid", "run-", "$1.50"):
+            self.assertIn(raw, details)
+        code, diag = self.get("/diagnostics")
+        self.assertIn(self.LABEL, diag)
+        self.assertIn("<a href='/e/vesper'>", diag)
+
+    def test_unknown_home_404(self):
+        self.assertEqual(self.get("/e/nope")[0], 404)
+        self.assertEqual(self.get("/e/..")[0], 404)
+
+    def test_docket_item_on_overview_with_how_to_answer(self):
+        overview = self.get("/")[1]
+        self.assertIn("<b>Vesper</b> asks: ", overview)
+        self.assertIn("Should Lookout show summaries?", overview)
+        self.assertIn("holds up: Build Lookout", overview)
+        self.assertIn("How to answer: delivery not known (this home publishes no Docket).", overview)
+        self.write_manager(docket={"person": "david", "count": 1, "items": [
+            {"question_id": "question-" + "a" * 32, "summary": "May we ship?", "asked_at": "2026-11-19T10:00:00Z",
+             "ack": "delivered", "routes": ["telegram"], "works": [{"id": "work-1", "title": "Ship it"}]}]})
+        overview = self.get("/")[1]
+        self.assertIn("<b>Codex</b> asks: <span title='question-%s'>May we ship?</span>" % ("a" * 32), overview)
+        self.assertIn("How to answer: reply on Telegram.", overview)
+        self.assertIn("Needs you (2)", overview)
+
+    def test_goals_are_managers_open_works_capped_without_routines(self):
+        overview = self.get("/")[1]
+        self.assertIn("Codex's open work, top 6 by priority.", overview)
+        for i in range(6):
+            self.assertIn("Goal %d" % i, overview)
+        self.assertNotIn("Goal 7", overview)  # priority 3: past the cap
+        self.assertNotIn("Routine: hourly-check", overview)
+        self.assertIn("2 more on <a href='/e/manager#work'>", overview)
+        # waiting_for IDs read as titles, the raw ID only in the tooltip
+        self.assertIn("waiting: Vesper&#x27;s <span title='%s'>“Build Lookout”</span>, then review"
+                      % self.work["id"][:13], overview)
+        self.assertIn("<a href='/p/synthetics/direction'>synthetics</a>", overview)  # D1(b)
+
+    def test_no_manager_said_plainly(self):
+        state = json.loads((self.home / "runtime.state.json").read_text())
+        state["effective"]["limit_notify"] = "david"
+        (self.home / "runtime.state.json").write_text(json.dumps(state))
+        self.assertIn("No manager resolved", self.get("/")[1])
+
+    def test_each_problem_kind_is_one_linked_line(self):
+        self.assertNotIn("<h2>Problems</h2>", self.get("/")[1])
+        # worker not loaded (manager's launch agent missing) -> service line
+        overview = self.get("/", agents={self.LABEL: os.getpid()})[1]
+        self.assertIn("<li class='bad'><a href='/e/manager#service'>Codex&#x27;s worker looks inconsistent", overview)
+        # dead worker
+        (self.manager / "worker.lock").write_text(str(2 ** 22 + 12345))
+        self.assertIn("<a href='/e/manager#service'>Codex&#x27;s worker is not running.</a>", self.get("/")[1])
+        self.assertIn("<span class='bad'>needs attention</span>", self.get("/")[1])
+        (self.manager / "worker.lock").write_text(str(os.getpid()))
+        # quarantined routine
+        works = json.loads((self.manager / "shared" / "status.json").read_text())["works"]
+        works[-1]["routine"]["quarantined"] = True
+        self.write_manager(works=works)
+        self.assertIn("<a href='/e/manager#routines'>Codex&#x27;s hourly-check routine is quarantined",
+                      self.get("/")[1])
+        # paused
+        self.write_manager(session={"state": "idle", "run": None, "started_at": None, "paused": {"reason": "daily_limit"}})
+        self.assertIn("Codex is paused (daily_limit).", self.get("/")[1])
+        # adapter loaded without a pid
+        overview = self.get("/", agents={self.LABEL: os.getpid(), "com.synthetics.worker.m": os.getpid(),
+                                         "com.synthetics.telegram.abc": None})[1]
+        self.assertIn("<a href='/diagnostics#adapters'>The telegram adapter is loaded but not running.</a>", overview)
+
+    def test_stuck_outbox_flag_only_without_route_or_unconfirmed(self):
+        """Codex point 1: pending on a routed (pull) channel is Details only, with a count."""
+        self.stuck({"routed_by": ["codex-desktop"]}, {"routed_by": ["codex-desktop"]})
+        overview = self.get("/")[1]
+        self.assertNotIn("<h2>Problems</h2>", overview)
+        self.assertNotIn("could not", overview)
+        self.assertNotIn("no channel can deliver", overview)
+        details = self.get("/e/manager")[1]
+        self.assertIn("<p id='outbox' class='muted'>Outbox: 2 message(s) stuck over 10 minutes; 0 of the newest 2", details)
+        self.stuck({"routed_by": ["codex-desktop"]}, {"routed_by": []}, {"routed_by": ["fieldpost"], "state": "uncertain"})
+        overview = self.get("/")[1]
+        self.assertIn("<a href='/e/manager#outbox'>Codex has 1 message that no channel can deliver.</a>", overview)
+        self.assertIn("<a href='/e/manager#outbox'>Codex has 1 message whose delivery was not confirmed.</a>", overview)
+        self.assertIn("<p id='outbox' class='bad'>", self.get("/e/manager")[1])
+
+    def test_project_landing_is_open_work_with_ids_in_tooltips(self):
+        self.project.append([{"kind": "backlog", "body": {"work_id": "work-" + "b" * 32, "title": "Shared work",
+                                                           "status": "waiting", "priority": 1,
+                                                           "waiting_for": "%s first" % self.work["id"]}}],
+                            author=VESPER, run="run-q")
+        code, landing = self.get("/p/synthetics")
+        self.assertEqual(code, 200)
+        self.assertIn("<b>Open work</b>", landing)
+        self.assertIn("<span title='work-%s'>Shared work</span>" % ("b" * 32), landing)
+        self.assertIn("<span title='%s'>“Build Lookout”</span> first" % self.work["id"], landing)
+        self.assertNotIn("<code>work-", landing)
+        self.assertEqual(self.get("/p/synthetics/work")[1].count("Shared work"), 1)  # old URL kept
+        memory = self.get("/p/synthetics/memory")[1]
+        self.assertIn("<details><summary>Sources</summary>", memory)
+        direction = self.get("/p/synthetics/direction")[1]
+        self.assertIn("Standing direction", direction)
+        self.assertNotIn("## Lessons", direction)
+
+    def test_nav_is_overview_projects_diagnostics(self):
+        page = self.get("/p/synthetics/board")[1]
+        self.assertIn('<nav><a href="/">Overview</a><a href="/projects">Projects</a>'
+                      '<a href="/diagnostics">Diagnostics</a></nav>', page)
 
 
 class LivenessTests(_Root):
@@ -362,7 +524,7 @@ class ServerTests(_Root):
             head = urllib.request.Request("http://127.0.0.1:%d/" % port, method="HEAD")
             with urllib.request.urlopen(head, timeout=5) as resp:
                 self.assertEqual((resp.status, resp.read()), (200, b""))
-            with mock.patch.object(lookout, "team_page", side_effect=RuntimeError("SENTINEL-ERROR")):
+            with mock.patch.object(lookout, "overview_page", side_effect=RuntimeError("SENTINEL-ERROR")):
                 with self.assertRaises(urllib.error.HTTPError) as caught:
                     urllib.request.urlopen("http://127.0.0.1:%d/" % port, timeout=5)
                 self.assertEqual(caught.exception.code, 500)

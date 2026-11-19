@@ -15,14 +15,24 @@ pages need no JavaScript, and a Content-Security-Policy forbids scripts.
 
 ## Pages
 
-| Path | Shows |
-|---|---|
-| `/` | Team: one block per employee home with the three liveness states, work (title, status, priority, waiting_for, published), waiting-on-David asks (Docket), open questions (first line; relay hops linked on both sides, G3), last 5 sessions (id, status, times, cost, failed tool count), last 5 screen glances (RW-1: time, run, status, element counts, find name → match ×count). Then other people from the company log, then loaded adapters. |
-| `/p/<project>/threads` | Captured conversations, newest first. "About" shows the titles of the conversation's works (G-a1), else its thread ID. |
-| `/p/<project>/thread/<key>` | One conversation, both directions in time order, with sender, recipient, time, auth, channel and which home captured it. Paged at 50 messages (G10): the newest page by default, `?page=N` (1 = oldest) for the others; an out-of-range or malformed N shows the nearest page. |
-| `/p/<project>/work` | Open work (VIS G1): the project's published works that are ready or waiting, grouped by owner name, with status, priority, title, waiting_for, blocked_by, the age of the owner's latest projection, and the count of closed rows (done/cancelled) left to the board. Built from the same backlog rows as the board; unpublished work shows only on the Team page. |
-| `/p/<project>/board` | Board backlog (with blocked_by) and posts. |
-| `/p/<project>/memory` | The M21 project memory view (projectview.render), then its sources (VIS G5): every source the view counts, newest first, with seq, time, sender, role, auth channel, coverage (considered ×N / not considered), a redacted mark, and a link to the thread that shows it. Two captures of one message link to the same thread. Text is never in the table; it stays on the thread page. |
+Every page answers three questions: who it is for, what they come for, and how they get there
+quickly (VIS-O, David intent pm-09b11d39). Each page opens with a one-line caption saying so. The
+nav is Overview · Projects · Diagnostics; a project's pages share the sub-tabs Open work · Threads ·
+Board · Memory · David's direction.
+
+| Path | For whom | What for |
+|---|---|---|
+| `/` | David (human management) | **Overview**, in plain words, without labels, PIDs, run IDs or costs (IDs only as tooltips). **Problems**, only when there are any, one linked line each: a worker not loaded or not running or inconsistent, a session past its timeout, a home without status, an out-of-date status, a pause, a quarantined routine or an error routine flag, stuck messages that no channel can deliver or whose delivery was not confirmed (pending on a routed channel, such as a pull channel a secretary drains, is not a problem and shows on the details page only), an adapter loaded but not running. **Needs you**: every home's open asks of the human (the Docket; a home without a Docket contributes its open questions to that human), oldest first: who asks, the first line, when, the works it holds up, and how to answer in one phrase from the delivery route ("reply on Telegram", or "not delivered to you yet"). **Goals**: the manager's open non-routine works, at most 6 by priority (then most recently updated), with status in words; work and question IDs in waiting_for read as the work's title or "<name>'s answer". The manager is the employee the homes' runtime `limit_notify` names (routines E2's source, via `runtime.state.json`), resolved through company aliases; none or a tie is said plainly. **Team**: one line per employee: name, short role, working now / idle / needs attention, open and waiting counts (and how many wait on the human), the top ready work. Footer: each project's David's direction, Projects, Diagnostics. |
+| `/e/<home>` | Maintainers (manager, Synthetics maintainer, the employee) | **Details** of one employee, as the pre-VIS-O Team page showed it: three liveness states, work with IDs, routines and flags, Docket, open questions (relay hops linked, G3), last 5 sessions with cost, last 5 glances (RW-1), stuck outbox with how many are a problem and the drill-down. Sections have anchors (`#service`, `#work`, `#routines`, `#docket`, `#questions`, `#sessions`, `#glances`, `#outbox`) that the overview's problem lines link to. An unknown home is 404. |
+| `/diagnostics` | Maintainers | Every home's worker row (label, loaded, launchd pid, lock pid, alive, session, status age), then other people from the company log, then loaded adapters. |
+| `/team` | Maintainers | Every home's details block on one page, then People and Adapters (the pre-VIS-O `/`). |
+| `/projects` | Everyone | The project list, each with its open work and David's direction. |
+| `/p/<project>` | David and the manager | **Open work** (the landing page; same as `/p/<project>/work`, VIS G1): published works that are ready or waiting, grouped by owner name, with status, priority, title (work ID as tooltip), waiting_for and blocked_by in plain words, the age of the owner's latest projection, and the count of closed rows left to the board. Unpublished work shows only on its owner's details page. |
+| `/p/<project>/direction` | Everyone | David's own words: the "Standing direction" section of the project memory view (current intents and claims) only. |
+| `/p/<project>/threads` | David or a reviewer | Captured conversations, newest first. "About" shows the titles of the conversation's works (G-a1), else its thread ID. |
+| `/p/<project>/thread/<key>` | David or a reviewer | One conversation, both directions in time order, with sender, recipient, time, auth, channel and which home captured it. Paged at 50 messages (G10): the newest page by default, `?page=N` (1 = oldest) for the others; an out-of-range or malformed N shows the nearest page. |
+| `/p/<project>/board` | The team | Board backlog (with blocked_by) and posts. |
+| `/p/<project>/memory` | Auditors | The M21 project memory view (projectview.render), then its sources (VIS G5) in a collapsed section: every source the view counts, newest first, with seq, time, sender, role, auth channel, coverage (considered ×N / not considered), a redacted mark, and a link to the thread that shows it. Two captures of one message link to the same thread. Text is never in the table; it stays on the thread page. |
 
 A project with no `log.jsonl` (for example an empty `noteling` store) renders as empty.
 
@@ -32,10 +42,10 @@ A project with no `log.jsonl` (for example an empty `noteling` store) renders as
   recipients and stuck-message recipients show the company profile name; the raw ID is the tooltip. An address
   with no profile is shown as it is.
 - **Work titles (G-a1).** A work ID is shown by its title: first from the project's backlog (published works), else
-  from a home's `status.json` works (open works, already shown on the Team page). An unknown work stays an ID.
+  from a home's `status.json` works (open works, already shown on the details pages). An unknown work stays an ID.
 - **Times (G9).** Timestamps read "5m ago", "in 2h 3m" or "just now", with the stored timestamp as the tooltip
   (`<time datetime=…>`). The open-work page's "updated" column keeps its plain age.
-- **Updated (G7).** The Team page work table and the board backlog have an "updated" column: the work's
+- **Updated (G7).** The details page work table and the board backlog have an "updated" column: the work's
   `updated_at` from status.json, and the backlog row's latest projection time.
 - **Stuck outbox (G8).** Under the stuck count, a collapsed table lists the newest stuck messages (as many as the
   employee's own snapshot shows): message ID, linked question, recipient, kind, state, the channels that route it
@@ -106,9 +116,10 @@ headers fill it in, otherwise the recipient shows as `?`.
 
 ## Relay hops (G3)
 
-When an employee asks someone else on behalf of a colleague (`question_ask relays=[…]`), the Team page links both
+When an employee asks someone else on behalf of a colleague (`question_ask relays=[…]`), the details pages link both
 sides. The carrier's open question reads "carries <asker's question> for <asker>"; the asker's open question reads
 "<hop> via <onward question>" once the hop notice has arrived. Each open question is an anchor `#q-<id>`, so the
-link jumps to the other home's block when that question is still open; otherwise it is just the ID.
+link jumps to the other home's block on `/team` (where every home is on one page) when that question is still open;
+on a single `/e/<home>` page a link to another home's question does not resolve, and otherwise it is just the ID.
 The Docket table uses the same links: its question cell links to that question's entry under open questions,
 and its "now" cell shows the hop with the question it went via and the questions it carries.
