@@ -19,9 +19,11 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .projectlog import (BACKLOG_ORIGINS, BACKLOG_STATUSES, CLAIM_RELS, ENTRY_KINDS, SOURCE_ROLES, fold,
-                         split_ref)
+from .projectlog import (BACKLOG_ORIGINS, BACKLOG_STATUSES, CLAIM_RELS, ENTRY_KINDS, FOLD_CODE, SOURCE_ROLES,
+                         fold, split_ref)
 
+# Backlog 60: name of the state row that records which fold code wrote the rest (never a fold key).
+FOLD_STAMP = "__fold_code__"
 QUOTE_MAX = 65536
 EXCERPT_GET = 2048
 EXCERPT_FLOOR = 512
@@ -92,6 +94,9 @@ def is_boundary(data: bytes, offset: int) -> bool:
 class ProjectStore:
     # M26: subclasses (roster.CompanyStore) swap the fold and override _validate.
     _fold = staticmethod(fold)
+    # Backlog 60: the code ID of ``_fold`` as loaded in this process. The materialised state carries it in a
+    # FOLD_STAMP row of the ``state`` table; state() re-folds when the stamp differs or is missing.
+    _fold_code = FOLD_CODE
 
     def __init__(self, path: str | os.PathLike, project: str):
         self.path = Path(path)
@@ -132,14 +137,29 @@ class ProjectStore:
             raise ProjectError("not_found", f"no source entry {entry_id}")
         return bytes(row[0])
 
-    def materialised(self) -> dict:
+    def _materialised_rows(self) -> tuple[dict, str | None]:
         rows = self.db.execute("SELECT name,value FROM state").fetchall()
-        return {name: json.loads(value) for name, value in rows}
+        st = {name: json.loads(value) for name, value in rows}
+        return st, st.pop(FOLD_STAMP, None)
+
+    def materialised(self) -> dict:
+        return self._materialised_rows()[0]
+
+    def fold_stamp(self) -> str | None:
+        """Code ID of the fold that last materialised ``state``; None if written by code without stamps."""
+        return self._materialised_rows()[1]
 
     def state(self, as_of: int | None = None) -> dict:
         head = self.head_seq()
         if as_of is None or as_of >= head:
-            return self.materialised() or self._fold([])
+            # Backlog 60: a long-lived process running older fold code (or code from before stamps, whose
+            # DELETE FROM state also drops the stamp) may have appended last. Serve its cache only when it was
+            # written by the fold this process runs; otherwise fold in memory. Reads never write the cache;
+            # the next append from current code re-materialises it with a matching stamp.
+            st, stamp = self._materialised_rows()
+            if stamp == self._fold_code:
+                return st
+            return self._fold(self.entries())
         if as_of < 0:
             raise ProjectError("bad_as_of", "as_of must be >= 0")
         if as_of > AS_OF_CAP:
@@ -358,6 +378,7 @@ class ProjectStore:
         db.execute("DELETE FROM state")
         for name, value in st.items():
             db.execute("INSERT INTO state(name,value) VALUES (?,?)", (name, _canon(value)))
+        db.execute("INSERT INTO state(name,value) VALUES (?,?)", (FOLD_STAMP, _canon(self._fold_code)))
 
     def _validate(self, existing: list[dict], batch: list[dict], *, author: str, operator: bool):
         sim = list(existing)

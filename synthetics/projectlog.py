@@ -8,6 +8,29 @@ materialised result of this fold and tests assert a full re-fold equals it.
 from __future__ import annotations
 
 import copy
+import hashlib
+import uuid
+
+
+def code_id(path: str, *parts: str) -> str:
+    """sha256 of a module's source file as read now (plus ``parts``, the code IDs it depends on).
+
+    Backlog 60: modules call this once at import, so the value names the fold code this process runs, not
+    what is on disk later. If the file can't be read the ID is random, so it matches no stamp and that process always re-folds.
+    """
+    h = hashlib.sha256()
+    for p in parts:
+        h.update(p.encode("ascii") + b"\0")
+    try:
+        with open(path, "rb") as fh:
+            h.update(fh.read())
+    except OSError:
+        h.update(b"unreadable:" + uuid.uuid4().bytes)
+    return h.hexdigest()
+
+
+# Backlog 60: the project store stamps its materialised state with this and re-folds on mismatch.
+FOLD_CODE = code_id(__file__)
 
 ENTRY_KINDS = (
     "source", "intent", "lesson", "relate", "status", "retract",
