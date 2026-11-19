@@ -200,6 +200,33 @@ other sender (or with no humans.json) the line is rejected with
 `humans.json` are never treated as the human, so a relayed answer is visible as
 secondhand, not silently promoted.
 
+### 3.2 Reading one question in full (`channel question`, #25)
+
+```sh
+channel question --key-file KEY --id question-…
+```
+
+prints one line with the full text of an open question addressed to this
+home's human, so an answer surface (docs/answer-desk.md) can show what is
+being answered; `status.json` carries only the first line.
+
+```json
+{"v": 1, "question_id": "question-…", "to": "david", "body": "…", "work_ids": ["work-…"], "created_at": "…", "thread": null, "error": null}
+```
+
+- It returns the body only when the question is `open`, its `to` is the
+  home's `humans.json` `default_human`, it has not been routed to anyone else
+  (`to_id` empty or that human), and the key belongs to a channel registered in
+  this home. Every other case (unknown ID, answered or withdrawn, addressed to
+  an employee, relayed to an operator, no `humans.json`) gets the same
+  `unknown_message` line with the same message, so the response never says
+  whether the question exists.
+- It is read-only. Every call writes one audit row `channel.question_read`
+  with the question ID, the channel and `returned|refused`, never the body.
+- A key from another home is `auth_failed` (exit 2, no audit row); inside an
+  employee session it is `in_session`.
+- A consumer must not log or cache the body.
+
 ## 4. Outbound
 
 Delivery state is kept per message × channel:

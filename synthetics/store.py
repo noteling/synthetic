@@ -2147,6 +2147,33 @@ class Store:
         return dict(v=1, event_id=event["id"], state="processed" if row["processed_run"] else "accepted",
                     run_id=row["processed_run"])
 
+    QUESTION_HIDDEN = "No open question for the human of this home with that ID is visible to this channel."
+
+    def channel_question(self, credential, question_id):
+        """#25 D1: the full body of one open question addressed to this home's default_human, for a keyed
+        channel registered in this home (the answer desk). Read-only. Every call is audited with the channel
+        and question ID only, never the body. Every refusal is the same error, so the response never says
+        whether the question exists."""
+        if self.run_id is not None:
+            raise ChannelError("in_session", "Channel commands are adapter/operator operations, not model tools.")
+        channel = self._channel_by_key(credential)
+        if not isinstance(question_id, str) or not question_id.strip():
+            raise ChannelError("bad_line", "--id is required")
+        from .capture import default_human
+        human = default_human(self)
+        question = self._find("questions", question_id)
+        visible = bool(human and question and question["status"] == "open" and question["to"] == human
+                       and question.get("to_id") in (None, human))
+        with self._tx():
+            self._audit("channel.question_read", question_id,
+                        dict(channel=channel["id"], result="returned" if visible else "refused"))
+        if not visible:
+            raise ChannelError("unknown_message", self.QUESTION_HIDDEN)
+        return dict(v=1, question_id=question["id"], to=question["to"], body=question["body"],
+                    work_ids=list(question.get("work_ids") or ([question["work_id"]] if question.get("work_id")
+                                                                else [])),
+                    created_at=question["created_at"], thread=question.get("thread"), error=None)
+
     def event_auth_backfill(self, event_id, credential, basis):
         """Operator/adapter only: stamp a legacy event whose delivery the channel's own
         journal independently records. Never overwrites an existing stamp."""

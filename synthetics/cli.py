@@ -368,7 +368,7 @@ def _delegated_adapter(home, args):
     return install.delegated_adapter(home, args, res["warrant"], refuse)
 
 
-CONTRACT_COMMANDS = ("version", "inbound", "event-status", "pending", "claim", "ack", "reconcile", "uncertain")
+CONTRACT_COMMANDS = ("version", "inbound", "event-status", "question", "pending", "claim", "ack", "reconcile", "uncertain")
 
 
 def _refuse_in_session(what):
@@ -564,6 +564,19 @@ def parser():
     web_parser.add_argument("--root", help="homes root (default: the directory holding --home)")
     web_parser.add_argument("--port", type=int, default=8765)
     web_parser.add_argument("--bind", default="127.0.0.1", help="only 127.0.0.1 is accepted")
+    web_parser.add_argument("--desk-port", type=int, help="port of a running answer desk (docs/answer-desk.md); "
+                            "adds an \"Answer here\" link to each Needs-you line")
+    desk_parser = sub.add_parser("answer-desk", help="#25: local page where the human answers tracked questions "
+                                 "(docs/answer-desk.md); the human's own operation, refused in sessions")
+    desk_sub = desk_parser.add_subparsers(dest="desk_command", required=True)
+    for name, text in (("pair", "print a one-time code (5 min, 5 tries) to pair a browser"),
+                       ("serve", "serve the desk on 127.0.0.1"),
+                       ("logout-all", "forget every paired browser and any pending code")):
+        cmd = desk_sub.add_parser(name, help=text)
+        cmd.add_argument("--root", help="homes root (default: the directory holding --home)")
+        if name == "serve":
+            cmd.add_argument("--key-file", required=True, help="the lookout-desk channel key (0600)")
+            cmd.add_argument("--port", type=int, default=8766)
     docket_parser = sub.add_parser("docket", help="read-only: this home's open questions to a person, oldest first")
     docket_parser.add_argument("--person", help="person ID, name or alias (default: humans.json default_human)")
     docket_parser.add_argument("--format", choices=["text", "json"], default="text")
@@ -959,6 +972,26 @@ def main(argv=None):
         if args.command == "status":
             output(status(home))
             return 0
+        if args.command == "answer-desk":
+            from . import answer_desk
+            answer_desk.refuse_in_session(args.desk_command)
+            root = Path(args.root).expanduser().resolve() if args.root else home.parent
+            if args.desk_command == "pair":
+                code = answer_desk.pair(root)
+                print("Type this code at http://127.0.0.1:<desk port>/pair within 5 minutes: %s" % code)
+                return 0
+            if args.desk_command == "logout-all":
+                answer_desk.logout_all(root)
+                print("Every paired browser is logged out.")
+                return 0
+            def desk_ready(server):
+                print(json.dumps({"answer_desk": "http://%s:%d/" % server.server_address[:2], "root": str(root)}),
+                      file=sys.stderr, flush=True)
+            try:
+                answer_desk.serve(root, args.key_file, port=args.port, ready=desk_ready)
+            except KeyboardInterrupt:
+                pass
+            return 0
         if args.command == "web":
             from . import lookout
             root = Path(args.root).expanduser().resolve() if args.root else home.parent
@@ -968,7 +1001,7 @@ def main(argv=None):
                 print(json.dumps({"lookout": "http://%s:%d/" % server.server_address[:2], "root": str(root)}),
                       file=sys.stderr, flush=True)
             try:
-                lookout.serve(root, port=args.port, ready=ready)
+                lookout.serve(root, port=args.port, ready=ready, desk=args.desk_port)
             except KeyboardInterrupt:
                 pass
             return 0

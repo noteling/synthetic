@@ -827,7 +827,15 @@ def problems(members, agents):
     return out
 
 
-def overview_page(root, agents=None, now=None):
+def _desk_link(desk, member, item):
+    """#25 D3: an "answer here" link to the separate answer desk, only when one is configured."""
+    qid = str(item.get("question_id") or "")
+    if not desk or not re.match(r"^question-[0-9a-f]{32}$", qid):
+        return ""
+    return " <a href='http://%s:%d/q/%s/%s'>Answer here</a>." % (BIND, int(desk), quote(member["slug"]), quote(qid))
+
+
+def overview_page(root, agents=None, now=None, desk=None):
     """VIS-O /: for David. Problems (only when there are any), what needs him, goals, one line per employee."""
     now = now or datetime.now(timezone.utc)
     agents = launchctl_list() if agents is None else agents
@@ -853,10 +861,11 @@ def overview_page(root, agents=None, now=None):
         for m, item in asks:
             holds = [w.get("title") for w in item.get("works") or [] if isinstance(w, dict) and w.get("title")]
             rows.append("<li><b>%s</b> asks: <span title='%s'>%s</span> — asked %s%s. <span class='muted'>"
-                        "How to answer: %s.</span></li>" % (
+                        "How to answer: %s.</span>%s</li>" % (
                             E(m["name"]), E(str(item.get("question_id") or "")), _v(item.get("summary")),
                             _rel(item.get("asked_at"), now),
-                            " — holds up: " + E("; ".join(holds)) if holds else "", E(_how_to_answer(item))))
+                            " — holds up: " + E("; ".join(holds)) if holds else "", E(_how_to_answer(item)),
+                            _desk_link(desk, m, item)))
         out.append("<ul>%s</ul>" % "".join(rows))
     else:
         out.append("<p>Nothing is waiting on %s.</p>" % E(_name(people, human) if human else "you"))
@@ -1139,12 +1148,12 @@ def sources_table(root, project, entries, texts):
 # ---------------------------------------------------------------- server
 
 
-def route(root, path, agents=None):
+def route(root, path, agents=None, desk=None):
     """(status, html) for one GET path."""
     split = urlsplit(path)
     parts = [unquote(p) for p in split.path.split("/") if p]
     if not parts:
-        return 200, overview_page(root, agents)
+        return 200, overview_page(root, agents, desk=desk)
     if parts == ["team"]:
         return 200, team_page(root, agents)
     if parts == ["diagnostics"]:
@@ -1176,7 +1185,7 @@ def route(root, path, agents=None):
     return 404, page("Not found", "<p>No such page.</p>", projects(root))
 
 
-def make_handler(root):
+def make_handler(root, desk=None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "Lookout/1"
 
@@ -1194,7 +1203,7 @@ def make_handler(root):
 
         def _route(self):
             try:
-                return route(root, self.path)
+                return route(root, self.path, desk=desk)
             except Exception as exc:  # noqa: BLE001 - never a traceback page
                 return 500, page("Error", "<p>%s</p>" % E(type(exc).__name__))
 
@@ -1214,10 +1223,10 @@ def make_handler(root):
     return Handler
 
 
-def serve(root, port=DEFAULT_PORT, bind=BIND, ready=None):
+def serve(root, port=DEFAULT_PORT, bind=BIND, ready=None, desk=None):
     if bind != BIND:
         raise ValueError("Lookout binds to 127.0.0.1 only.")
-    server = ThreadingHTTPServer((BIND, port), make_handler(str(Path(root).resolve())))
+    server = ThreadingHTTPServer((BIND, port), make_handler(str(Path(root).resolve()), desk=desk))
     if ready is not None:
         ready(server)
     try:

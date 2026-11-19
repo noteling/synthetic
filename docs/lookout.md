@@ -13,6 +13,10 @@ refused. It answers GET and HEAD only; other methods get 405. Every page is rend
 records on each request, nothing is cached or written, and every value is HTML-escaped. The
 pages need no JavaScript, and a Content-Security-Policy forbids scripts.
 
+Lookout never takes answers. `web --desk-port PORT` names a running answer desk
+(docs/answer-desk.md, a separate keyed process); then each Needs-you line on `/` also links
+"Answer here" to `http://127.0.0.1:PORT/q/<home>/<question>`. Without it no link is rendered.
+
 ## Pages
 
 Every page answers three questions: who it is for, what they come for, and how they get there
