@@ -195,6 +195,11 @@ model summaries. Built-in shell/file tool outcomes are not independently journal
 truthful reporting, and useful prioritization are capabilities to evaluate through actual work. Database
 recovery cannot prove that an arbitrary Bash or external effect happened exactly once.
 
+Attribution on outbound artifacts is opt-in per home: the owner sets `attribution.json` with
+`synthetics byline set`, scoped to named repos and channels. Without it nothing changes. It adds a commit
+trailer or footer as provenance and never touches the commit author or copyright
+([docs/byline.md](docs/byline.md)).
+
 ## Development
 
 ```sh

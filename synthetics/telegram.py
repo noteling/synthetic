@@ -177,6 +177,24 @@ def split_text(text: str, max_len: int = MAX_MESSAGE_LENGTH) -> List[str]:
     return parts or [text]
 
 
+FOOTER_SEPARATOR = "\n\n"
+
+
+def _footer(store: Any) -> Optional[str]:
+    """Byline (#15) footer for this channel, or None (no attribution.json, invalid, or not in scope)."""
+    home = getattr(store, "home", None)
+    if home is None:
+        return None
+    from . import byline
+    return byline.footer_for(home, "telegram")
+
+
+def _receipt(chat_id: Any, ids: str, record: Dict[str, Any]) -> str:
+    """telegram:<chat>:<ids>, plus ;footer:<sha8> when a Byline footer was sent (#15)."""
+    from . import byline
+    return byline.with_footer_receipt("telegram:%s:%s" % (chat_id, ids), (record or {}).get("footer"))
+
+
 def redact_token(text: str, token: str) -> str:
     """Remove the bot token string from *text*. Safe to call with empty token."""
     if token and token in text:
@@ -1089,7 +1107,7 @@ class OutboxDelivery:
             try:
                 store.delivery_record(
                     msg["id"], self.credential, "delivered",
-                    receipt="telegram:%s:%s" % (self.state.bound_chat_id, ids),
+                    receipt=_receipt(self.state.bound_chat_id, ids, delivery),
                     detail={"accepted_at": delivery.get("accepted_at")},
                 )
                 recorded += 1
@@ -1112,6 +1130,7 @@ class OutboxDelivery:
         self.record_receipts(store)
 
         expected_thread = self._expected_thread()
+        footer: List[Optional[str]] = []   # Byline footer, looked up once per pass and only if something is sent
 
         attempted: List[str] = []
         for msg in store.outbox_list():
@@ -1133,7 +1152,9 @@ class OutboxDelivery:
 
             if self.credential is not None and not self._claim(store, msg_id):
                 continue
-            self._deliver(msg_id, msg)
+            if not footer:
+                footer.append(_footer(store))
+            self._deliver(msg_id, msg, footer=footer[0])
             if self.credential is not None:
                 self._ack(store, msg_id)
             attempted.append(msg_id)
@@ -1160,13 +1181,13 @@ class OutboxDelivery:
         status = record.get("status")
         ids = ",".join(str(i) for i in record.get("telegram_message_ids") or [])
         if status == "accepted":
-            outcome, receipt = "delivered", "telegram:%s:%s" % (self.state.bound_chat_id, ids)
+            outcome, receipt = "delivered", _receipt(self.state.bound_chat_id, ids, record)
         elif status == "failed":
             # The local journal treats an API rejection as terminal, so the Store
             # outcome is permanent too; an operator retry is `channel reconcile`.
             outcome, receipt = "failed", None
         else:
-            outcome, receipt = "uncertain", ("telegram:%s:%s" % (self.state.bound_chat_id, ids)) if ids else None
+            outcome, receipt = "uncertain", _receipt(self.state.bound_chat_id, ids, record) if ids else None
         detail = {k: record[k] for k in ("error", "parts_total", "accepted_at") if record.get(k) is not None}
         try:
             store.channel_ack(self.credential, message_id, outcome, receipt=receipt, retryable=False,
@@ -1175,7 +1196,7 @@ class OutboxDelivery:
             # record_receipts() backfills accepted deliveries on the next pass.
             logger.error("Could not record %s outcome for %s: %s", outcome, message_id, exc)
 
-    def _deliver(self, message_id: str, msg: Dict[str, Any]) -> None:
+    def _deliver(self, message_id: str, msg: Dict[str, Any], footer: Optional[str] = None) -> None:
         """
         Attempt to deliver *message_id* to Telegram.
 
@@ -1186,10 +1207,20 @@ class OutboxDelivery:
         Atomic question mapping: each accepted part's question_map entry is
         written in the same save() call as that part's delivery receipt, so
         no crash window exists between acceptance and correlation.
+        Byline (#15): *footer* (None unless this channel is in the home's
+        attribution.json scope) is appended to the last part only; the body is
+        split with room for it so every part stays within MAX_MESSAGE_LENGTH.
+        The stored outbox body is unchanged; the record and receipt carry
+        footer:<sha8>.
         """
         chat_id = self.state.bound_chat_id
         body = msg.get("body", "")
-        parts = split_text(body, MAX_MESSAGE_LENGTH)
+        if footer:
+            sep = FOOTER_SEPARATOR + footer
+            parts = split_text(body, MAX_MESSAGE_LENGTH - len(sep))
+            parts[-1] = parts[-1] + sep
+        else:
+            parts = split_text(body, MAX_MESSAGE_LENGTH)
         question_id: Optional[str] = msg.get("question_id") or None
 
         # Mark in-flight durably before the first network call
@@ -1200,6 +1231,9 @@ class OutboxDelivery:
             "parts_total": len(parts),
             "error": None,
         }
+        if footer:
+            from . import byline
+            record["footer"] = byline.footer_sha8(footer)
         self.state.set_delivery(message_id, record)
 
         sent_ids: List[int] = []
