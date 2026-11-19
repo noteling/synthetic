@@ -84,6 +84,8 @@ OWNER_ONLY = {
                        "under delegation",
     "adapter stop": "cuts a channel; delegated adapter ops are start/restart/reinstall only",
     "adapter remove": "cuts a channel; delegated adapter ops are start/restart/reinstall only",
+    "byline set": "attribution.json is the owner's statement of how this employee is attributed (#15 Byline)",
+    "byline clear": "attribution.json is the owner's statement of how this employee is attributed (#15 Byline)",
     "roster delegate (root)": "the owner's judgement that a human's words authorize this scope (D1)",
 }
 CREDENTIAL = ("channel provision", "channel register", "feed --credential-file", "ingest --credential-file",

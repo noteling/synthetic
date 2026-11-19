@@ -129,6 +129,58 @@ DOCTOR_HOST_FLAGS = (("key_file", "--key-file"), ("collector_plist", "--collecto
                      ("collector_dir", "--collector-dir"), ("label", "--label"))
 
 
+def _byline(args, home):
+    """#15 Byline. set/clear are owner-only (a session cannot write attribution.json); show and trailer are
+    read-only; hook install is the owner's, or a session's for a repo inside its own home."""
+    from . import authority, byline
+    op = args.byline_command
+    if op in ("set", "clear"):
+        authority.owner_only("byline " + op)
+        if op == "clear":
+            result = byline.clear_config(home)
+            authority.audit(str(home), "byline.cleared", {"what": "byline clear", "actor": "owner",
+                                                          "removed": bool(result["removed"])})
+            output(result)
+            return 0
+        try:
+            data = json.loads(Path(args.file).expanduser().read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ValueError("--file unreadable: %s" % exc)
+        result = byline.set_config(home, data)
+        authority.audit(str(home), "byline.set", {"what": "byline set", "actor": "owner", "sha8": result["sha8"]})
+        output(result)
+        return 0
+    if op == "show":
+        output(byline.show(home))
+        return 0
+    if op == "trailer":
+        line = byline.trailer(home, repo=Path(args.repo).expanduser().resolve() if args.repo else None)
+        if line:
+            print(line)
+        return 0
+    repo = Path(args.repo).expanduser().resolve()
+    a = authority.actor()
+    if a["owner"]:
+        output(byline.hook_install(home, repo))
+        return 0
+    own = Path(a["home"]).resolve()
+
+    def refuse(target, why):
+        authority.audit(a["home"], "authority.refused", {"what": "byline hook install", "code": "own_home_only",
+                                                         "target": str(target), "run": a["run"], "actor": a["id"]})
+        raise authority.AuthorityError("own_home_only", "a session installs the Byline hook only for its own "
+                                       "home and a repo inside it (%s): %s" % (own, why), what="byline hook install")
+    if not authority.same_home(home, a["home"]) or not (repo == own or own in repo.parents):
+        refuse(repo, "not %s" % repo)
+    try:
+        # #70 F1: the file written must be inside the home too, not only --repo (a linked worktree of an outside
+        # repo, or core.hooksPath, puts the hooks dir elsewhere).
+        output(byline.hook_install(home, repo, within=own))
+    except byline.HookOutside as exc:
+        refuse(exc.target, str(exc))
+    return 0
+
+
 def _doctor_gate(args, home, what="doctor"):
     """G4: the owner is unchanged. A session runs doctor on its own home; on another home H only while it holds
     an active worker.manage / adapter.manage / runtime.request delegation whose homes cover H (audited
@@ -581,8 +633,21 @@ def parser():
     docket_parser.add_argument("--person", help="person ID, name or alias (default: humans.json default_human)")
     docket_parser.add_argument("--format", choices=["text", "json"], default="text")
     sub.add_parser("system-prompt", help="read-only: print the system prompt a new session of this home gets "
-                   "(shipped prompt + host rules)")
+                   "(shipped prompt + host rules + Byline block if attribution.json is set)")
     sub.add_parser("inbox", help="read events awaiting attention")
+    byl = sub.add_parser("byline", help="#15 Byline: owner-set attribution (attribution.json) on outbound artifacts "
+                         "(docs/byline.md)")
+    byls = byl.add_subparsers(dest="byline_command", required=True)
+    byls.add_parser("show", help="read-only: the home's attribution config and whether it is valid")
+    bset = byls.add_parser("set", help="owner-only: validate and write <home>/attribution.json")
+    bset.add_argument("--file", required=True, help="JSON file with {v, line?, trailer?, scopes: {repos, channels}}")
+    byls.add_parser("clear", help="owner-only: remove <home>/attribution.json (back to no attribution)")
+    btr = byls.add_parser("trailer", help="read-only: print the commit trailer for a handoff (empty if unconfigured)")
+    btr.add_argument("--repo", help="print it only if a remote of this repo is in scope")
+    bhook = byls.add_parser("hook", help="prepare-commit-msg hook for a repo the employee commits in itself")
+    bhooks = bhook.add_subparsers(dest="hook_command", required=True)
+    bhi = bhooks.add_parser("install", help="owner, or a session for a repo inside its own home")
+    bhi.add_argument("--repo", required=True)
     send = sub.add_parser("send", help="queue an outgoing message for a configured delivery adapter")
     send.add_argument("to")
     send.add_argument("body")
@@ -1061,6 +1126,9 @@ def main(argv=None):
             return channel_contract.run(args, home)
         if args.command in ("init", "handoff-codex", "question-routed", "access", "limit", "work", "runtime", "routine"):
             _m28_gate(args, home)
+        if args.command == "byline":
+            # #15 Byline: never opens a Store (identity is read with sqlro).
+            return _byline(args, home)
         if args.command == "init":
             humans_written = _init_humans(home, args.human, args.human_channels)
             colleague = _human_or_fail(home, args.by or args.human, "--by")

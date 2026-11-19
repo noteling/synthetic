@@ -43,10 +43,13 @@ def host_rules(home):
 
 
 def system_prompt(home):
-    """The shipped employee prompt plus the host rules in force for this home (``host_rules``)."""
+    """The shipped employee prompt plus the host rules in force for this home (``host_rules``), then the
+    Byline attribution block when the owner set ``attribution.json`` (#15; "" otherwise)."""
     system = (Path(__file__).parent / "prompts" / "employee.md").read_text()
     for label, text in host_rules(home):
         system += "\n\nHost rules (" + label + "):\n" + text + "\n"
+    from . import byline
+    system += byline.prompt_block(home)  # #15 Byline: "" unless the owner set <home>/attribution.json
     return system
 
 
