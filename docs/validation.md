@@ -16,6 +16,11 @@ Run it outside an employee session (or with those two variables cleared, as abov
 checkout root, on both supported interpreters. For orientation only: main `858fb04`
 (2026-11-19) ran 926 tests in 94 `test_*.py` modules on Python 3.9 and 3.14.
 
+To check for test launchd labels after a run, use `python3 -m tests.test_service_recovery labels`, not a bare
+`launchctl list | grep`. It prints each loaded `com.synthetics.test.*` label with its owner: `live pid N` (a
+concurrent run, still working), `dead pid N` (an orphan the next run's sweep boots out) or `legacy` (no pid in
+the label). The suite fails in `tests.test_service_recovery` teardown if it leaves one of its own labels loaded.
+
 ## Milestone index
 
 Milestone IDs appear in `design.md`, `authority.md`, the docs below and test docstrings.

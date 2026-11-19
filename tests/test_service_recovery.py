@@ -20,21 +20,49 @@ def _test_label(kind):
     return "com.synthetics.test.%s.p%d.%s" % (kind, os.getpid(), uuid.uuid4().hex)
 
 
-def _owner_dead(label):
-    """True when LABEL names an owning test pid (see _test_label) that is no longer running."""
+def _label_owner(label):
+    """The owning test pid recorded in LABEL (see _test_label), or None for a legacy label without one."""
     part = label.split(".")[-2] if label.count(".") >= 4 else ""
     if not (part.startswith("p") and part[1:].isdigit()):
-        return False
-    pid = int(part[1:])
-    if pid == os.getpid():
-        return False
+        return None
+    return int(part[1:])
+
+
+def _pid_alive(pid):
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        return True
-    except OSError:
         return False
-    return False
+    except OSError:
+        return True
+    return True
+
+
+def _owner_dead(label):
+    """True when LABEL names an owning test pid (see _test_label) that is no longer running."""
+    pid = _label_owner(label)
+    if pid is None or pid == os.getpid():
+        return False
+    return not _pid_alive(pid)
+
+
+def _classify(label):
+    """Who owns a test label (backlog 48): "own" (this process), "live pid N" (another running process, e.g. a
+    concurrent suite), "dead pid N" (an orphan the next run's sweep removes) or "legacy" (no pid in the label)."""
+    pid = _label_owner(label)
+    if pid is None:
+        return "legacy"
+    if pid == os.getpid():
+        return "own"
+    return ("live pid %d" if _pid_alive(pid) else "dead pid %d") % pid
+
+
+def _loaded_test_labels(prefix="com.synthetics.test."):
+    if sys.platform != "darwin":
+        return []
+    listed = subprocess.run(["/bin/launchctl", "list"], capture_output=True, text=True).stdout
+    labels = [line.split("\t")[-1].strip() for line in listed.splitlines()]
+    return [label for label in labels if label.startswith(prefix)]
 
 
 def _boot_out_orphaned_test_labels(prefix="com.synthetics.test."):
@@ -44,12 +72,8 @@ def _boot_out_orphaned_test_labels(prefix="com.synthetics.test."):
     test pid (_test_label) is dead. A live test, e.g. a concurrent rerun, owns neither kind."""
     if sys.platform != "darwin":
         return []
-    listed = subprocess.run(["/bin/launchctl", "list"], capture_output=True, text=True).stdout
     removed = []
-    for line in listed.splitlines():
-        label = line.split("\t")[-1].strip()
-        if not label.startswith(prefix):
-            continue
+    for label in _loaded_test_labels(prefix):
         target = "gui/%d/%s" % (os.getuid(), label)
         info = subprocess.run(["/bin/launchctl", "print", target], capture_output=True, text=True).stdout
         paths = [l.split("=", 1)[1].strip() for l in info.splitlines() if l.strip().startswith("path =")]
@@ -87,6 +111,13 @@ class TestLabelOwnerTests(unittest.TestCase):
 def tearDownModule():
     # Last line of defence: every test label whose temporary plist is gone is booted out before the run ends.
     _boot_out_orphaned_test_labels()
+    # Backlog 48: a label this process still owns is a real leak. Boot it out, then fail the run so it is seen.
+    # Labels of other live processes (a concurrent suite) are theirs and are left alone.
+    own = [label for label in _loaded_test_labels() if _classify(label) == "own"]
+    for label in own:
+        _ensure_gone(label)
+    if own:
+        raise AssertionError("test launchd labels left loaded by this run (booted out): %s" % ", ".join(own))
 
 
 @unittest.skipUnless(sys.platform == "darwin", "macOS launchd integration")
@@ -205,4 +236,13 @@ class LoadedJobRecoveryTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["labels"]:
+        # End-of-run check (backlog 48): `python -m tests.test_service_recovery labels` lists every loaded test
+        # label with its owner, so a label from a concurrent suite is not mistaken for this run's leak.
+        labels = _loaded_test_labels()
+        for label in labels:
+            print("%s\t%s" % (label, _classify(label)))
+        if not labels:
+            print("no test labels")
+        sys.exit(0)
     unittest.main()
