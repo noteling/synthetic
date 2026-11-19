@@ -84,7 +84,10 @@ class P1QuestionAsk(Base):
         eng = self.s.work_put("eng", status="waiting", wake_at=timestamp(now() + timedelta(days=2)))
         with self.assertRaisesRegex(ValueError, "routine: a question cannot be linked"):
             self.s.question_ask("bob", "decide?", work_ids=[eng["id"], self.rid], key="q2")
+        # Atomic: the whole call is refused, so nothing is queued and the normal work isn't linked either.
         self.assertEqual(self.s.work_get(eng["id"])["waiting_question_ids"], [])
+        self.assertEqual(self.s.question_list(), [])
+        self.assertEqual(self.s.outbox_list(), [])
         self.assert_routine_unchanged()
 
     def test_unlinked_question_is_fine(self):
