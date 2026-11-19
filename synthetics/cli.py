@@ -117,6 +117,48 @@ def _m28_gate(args, home):
                                            "(M19), not runtime request")
 
 
+# G4 (Codex event-09909511, a5fb1572): doctor in a session. Delegations whose homes may cover another home for a
+# doctor read; each must cover the target through homes_cover. adapter.manage is scoped by labels, not homes,
+# so it never covers a home today (no new action is added).
+DOCTOR_DELEGATIONS = ("worker.manage", "adapter.manage", "runtime.request")
+# Doctor flags that read host paths or host state outside the target home: own home only in a session.
+DOCTOR_HOST_FLAGS = (("key_file", "--key-file"), ("collector_plist", "--collector-plist"),
+                     ("compare_legacy", "--compare-legacy"), ("relay_routes", "--relay-routes"),
+                     ("collector_dir", "--collector-dir"), ("label", "--label"))
+
+
+def _doctor_gate(args, home):
+    """G4: the owner is unchanged. A session runs doctor on its own home; on another home H only while it holds
+    an active worker.manage / adapter.manage / runtime.request delegation whose homes cover H (audited
+    authority.used with the delegation ID). Host-path flags stay own-home only. Every refusal is audited."""
+    from . import authority, roster
+    a = authority.actor()
+    if a["owner"] or authority.same_home(home, a["home"]):
+        return
+    target = str(Path(home).expanduser().resolve())
+    row = {"what": "doctor", "target": target, "actor": a["id"], "run": a["run"]}
+
+    def refuse(code, message, **extra):
+        authority.audit(a["home"], "authority.refused", dict(row, code=code, **extra))
+        raise authority.AuthorityError(code, message, what="doctor")
+
+    used = [flag for attr, flag in DOCTOR_HOST_FLAGS if getattr(args, attr, None)]
+    if getattr(args, "relay_channel", "fieldpost") != "fieldpost":
+        used.append("--relay-channel")
+    if used:
+        refuse("own_home_only", "doctor %s in a session reads only its own home (%s), not %s"
+               % (" ".join(used), a["home"], target), flags=used)
+    state = roster.company_state_for_home(a["home"])
+    for action in DOCTOR_DELEGATIONS:
+        d = authority.covering(state, a["id"], action,
+                               lambda sc: "homes" in sc and authority.homes_cover(sc["homes"], home, a["home"]))
+        if d is not None:
+            authority.audit(a["home"], "authority.used", dict(row, action=action, delegation=d["id"]))
+            return
+    refuse("own_home_only", "doctor in a session reads only its own home (%s), not %s, unless a %s delegation "
+           "covers it" % (a["home"], target, " / ".join(DOCTOR_DELEGATIONS)))
+
+
 def _delegated_runtime_request(store, home, args, runtime):
     """M28 item 10: owner, or a session holding runtime.request covering the target home (never its own)."""
     from . import authority
@@ -807,7 +849,8 @@ def main(argv=None):
             print(system_prompt(Path(home).expanduser().resolve()), end="")
             return 0
         if args.command == "doctor":
-            # Read-only: never opens a Store (which would create or migrate state).
+            # Read-only: never opens a Store (which would create or migrate state). G4: fenced in sessions.
+            _doctor_gate(args, home)
             from . import doctor
             report = doctor.diagnose(home, label=args.label, compare=args.compare_legacy, key_files=args.key_file,
                                      collector_plists=args.collector_plist, collector_dirs=args.collector_dir,

@@ -103,7 +103,7 @@ and MCP `routine_rearm`.
 | `synthetics --home H routine restore KIND` | yes | refused `owner_only`; a session clears its own quarantine with `routine_rearm` |
 | `synthetics --home H routine teardown KIND… \| --all [--reason R]` | yes | refused `owner_only` |
 | `synthetics --home H routine list` | yes | own home only; another home is refused `own_home_only` |
-| `synthetics --home H doctor` | yes | not fenced: runs on any home (see "doctor on another home" below) |
+| `synthetics --home H doctor` | yes | own home; another home only with a covering `worker.manage` or `runtime.request` delegation (audited), else `own_home_only`; host-path flags own home only (G4, "doctor on another home" below) |
 | MCP `routine_rearm` | no: it needs a run, and operators use `restore` | yes, own home (the MCP server is bound to the session's run) |
 
 A refused command prints `synthetics: owner_only: routine seed is owner-only: provisioning (RTN,
@@ -179,14 +179,26 @@ Every step below runs in an owner shell (no `SYNTHETICS_SESSION_RUN`); see the t
 5. **Verify.** `synthetics --home H routine list` shows each routine (status, wake_at, last fired, last
    re-armed, failures), its flags and the manager route. `synthetics --home H doctor` reports the flags below,
    and Lookout's Team page has a Routines block.
-   **doctor on another home.** doctor is read-only and has no session fence: a session can run it on any
-   home it can read. It opens that home's `state.sqlite3` read-only and prints a health report: identity ID
-   and name, schema version, worker and launch-agent state, outbox counts (and for stuck messages the newest
-   message ID and the recipient addresses), relay and capture counts, daily-limit self-raises and pending
-   launch ops, roster findings (including the IDs of people that home's private views name, for
-   `view_unresolvable` and `view_stale`), and routine work IDs, kinds, flags and route. It doesn't print
-   message bodies, memory or view text, or event text. Whether it should be fenced is an open
-   decision, not part of this page.
+   **doctor on another home (G4).** The owner shell runs doctor on any home, unchanged. A session runs it on
+   its own home. On another home H it runs only while the session holds an active `worker.manage`,
+   `adapter.manage` or `runtime.request` delegation whose `homes` cover H (`homes_cover`: a registered member
+   of the same company). `adapter.manage` is scoped by `labels`, not `homes`, so today it covers no home. An
+   allowed read writes an `authority.used` row (`what: doctor`, target, action and the covering delegation
+   ID) in the session's home; anything else is refused `own_home_only` with an `authority.refused` row and
+   prints nothing of H. A retracted delegation, or a session whose run has ended, covers nothing. In a
+   session the flags that read host paths or host state outside the target home are own-home only, even
+   when delegated: `--key-file`, `--collector-plist`, `--compare-legacy`, `--relay-routes` / `--relay-channel`,
+   `--collector-dir` and `--label`. So the quarantine notice's doctor hint (`routine_quarantined`) means the
+   owner, the employee on its own home, or a manager holding a delegation that covers that home.
+   What doctor shows (metadata, never message, memory, view or event bodies): identity ID and name, schema
+   version, humans.json `default_human` and senders, runtime settings (model, budget, daily limit,
+   `limit_notify`, `limit_allow`, claude path, timeout), the `usage_limit.json` override as stored, worker and
+   launch-agent state and pending launch ops, outbox and capture counts and ages (activity timing) and for
+   stuck messages the newest message ID and recipients, owed relays (question and asker IDs), the latest
+   failed run ID, daily-limit self-raises (amount, run, delegation, duration), the limit-ceiling entry, roster
+   findings (the count of private views and the person IDs they name, for `view_unresolvable` and
+   `view_stale`), path strings in findings, and routine work IDs, kinds, flags and route. Team-wide health
+   is on Lookout and each home's `shared/status.json`.
 6. **Teardown.** Before `worker remove`, run `synthetics --home H routine teardown --all --reason "..."`. It cancels the routines,
    so nothing fires into a removed home and no `routine_closed` flag is raised. Seeding again later creates
    fresh routines.
