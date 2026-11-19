@@ -659,7 +659,7 @@ def parser():
                          "owner-only; list reads this home")
     rts_ = rtn.add_subparsers(dest="routine_command", required=True)
     rseed = rts_.add_parser("seed", help="idempotent: create missing routine works, never touch existing ones")
-    rseed.add_argument("--kinds", required=True, help="comma-separated: hourly-check, team-review")
+    rseed.add_argument("--kinds", required=True, help="comma-separated: hourly-check, team-review, dream")
     rseed.add_argument("--every", action="append", default=[], metavar="KIND=MIN",
                        help="cadence in minutes (default 60, minimum 5)")
     rseed.add_argument("--dream-at", help="dream time HH:MM UTC (default 01:30)")
