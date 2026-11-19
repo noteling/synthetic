@@ -77,7 +77,8 @@ def fold(entries: list[dict]) -> dict:
                 qs = "secondhand"
             src = {
                 "id": e["id"], "seq": e["seq"], "role": role, "direction": origin.get("direction", "in"),
-                "thread": origin.get("thread"), "auth": copy.deepcopy(origin.get("auth")),
+                "thread": origin.get("thread"), "sender": origin.get("sender"),
+                "auth": copy.deepcopy(origin.get("auth")),
                 "quote_source": qs, "capture": copy.deepcopy(body.get("capture", {})),
                 "part": copy.deepcopy(body.get("part")), "redacted": e["id"] in redacted,
             }
@@ -216,7 +217,12 @@ def _finish(state: dict) -> None:
             if len(threads) == 1 and None not in threads:
                 (thread,) = threads
                 last = max(s["seq"] for s in cited)
+                # Backlog 47: only a later uncovered message from a human the intent already cites counts;
+                # replies by employees or relays in the same thread are noise. Cited sources with no
+                # human sender (files, legacy entries) keep the old rule: any later uncovered source.
+                people = {s["sender"] for s in cited if s["role"] == "human" and s["sender"]}
                 if any(s["thread"] == thread and s["seq"] > last and not state["coverage"].get(sid)
+                       and (not people or (s["role"] == "human" and s["sender"] in people))
                        for sid, s in sources.items()):
                     flags.add("newer-source-exists")
         elif rec["status"] == "disputed":
