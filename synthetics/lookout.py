@@ -174,6 +174,8 @@ def liveness(home, agents, now=None):
         sess = status.get("session") or {}
         written = _parse(status.get("written_at"))
         started = _parse(state.get("started_at"))
+        if written is not None and started is not None and "." not in str(status.get("written_at")):
+            started = started.replace(microsecond=0)  # a whole-second written_at (pre-r2 file): compare at seconds
         stale = (not worker_alive) or (started is not None and written is not None and written < started)
         session.update(paused=sess.get("paused"), written_at=status.get("written_at"))
         if sess.get("state") == "running" and not stale:

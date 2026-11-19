@@ -293,6 +293,27 @@ class LivenessTests(_Root):
         self.status("running", started_at="2026-11-18T11:00:00Z", written="2026-11-18T09:00:00Z")
         self.assertEqual(self.live()["session"]["state"], "stale (worker not running)")  # written before start
 
+    def test_same_second_write_after_start_is_not_stale(self):
+        # F1: worker started at .911455 s; its first export in that second must not read as stale.
+        self.write_runtime(os.getpid(), started="2026-11-18T10:59:44.911455Z")
+        self.status("idle", written="2026-11-18T10:59:44Z")  # pre-r2 whole-second written_at
+        self.assertEqual(self.live()["session"]["state"], "idle")
+        self.status("idle", written="2026-11-18T10:59:44.950000Z")  # r2 microsecond written_at
+        self.assertEqual(self.live()["session"]["state"], "idle")
+        self.status("idle", written="2026-11-18T10:59:44.900000Z")  # written just before the start
+        self.assertEqual(self.live()["session"]["state"], "stale (worker not running)")
+        self.status("idle", written="2026-11-18T10:59:43Z")
+        self.assertEqual(self.live()["session"]["state"], "stale (worker not running)")
+
+    def test_written_at_has_microseconds_and_follows_worker_start(self):
+        sharedstatus.path(self.home).parent.mkdir(exist_ok=True)
+        before = datetime.now(timezone.utc)
+        self.assertTrue(sharedstatus.write(self.store, paused=None))
+        text = json.loads(sharedstatus.path(self.home).read_text())["written_at"]
+        self.assertRegex(text, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{6}Z$")
+        self.write_runtime(os.getpid(), started=before.strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
+        self.assertFalse(lookout.liveness(self.home, {"L": os.getpid()})["session"]["state"].startswith("stale"))
+
     def test_dead_worker_is_stale_and_mismatch_shown(self):
         dead = 2 ** 22 + 12345
         self.write_runtime(dead)

@@ -74,7 +74,7 @@ def build(store, paused=None, now=None):
     stuck = store.outbox_stuck(now)
     return dict(
         v=VERSION, employee=identity["id"], name=identity.get("name"), role=identity.get("role"),
-        written_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"), pid=os.getpid(),
+        written_at=now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"), pid=os.getpid(),
         session=dict(state="running" if active else "idle", run=active["id"] if active else None,
                      started_at=active.get("started_at") if active else None, paused=_pause(paused)),
         works=works, docket=dock, docket_error=dock_error, questions_open=questions, runs=run_rows,

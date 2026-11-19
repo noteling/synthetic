@@ -68,6 +68,8 @@ session {state, run, started_at, paused}, works[], docket, docket_error, questio
    has been running longer than the effective timeout plus 5 minutes; `stale (worker not running)`
    when the worker is gone or status.json was written before the worker started; otherwise `idle`
    or `paused`. A stale file is never shown as running.
+   `written_at` carries microseconds, like `runtime.state.json` `started_at`; a whole-second
+   `written_at` (a file written before P1-r2) is compared with the start time truncated to the second.
 3. **Waiting on.** Each waiting work's waiting_for, wake_at and open question IDs, plus any pause.
 
 Adapters (`com.synthetics.adapter.*`, Fieldpost, Fieldstone, Telegram) show the service state only.
