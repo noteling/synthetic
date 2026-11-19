@@ -121,6 +121,12 @@ Entries older than 7 days, or past the newest 200, are dropped.
   a switched button → 409 before any contract call. This is what makes a retry after a lost
   response safe: in P1 the retry hit the open check after the first send had already closed the
   question, and David was told his answer failed when it had gone through.
+- **A double click** (two sends of one form at once): a send whose open check fails looks at the
+  journal once more. If a concurrent send of the same form and button has claimed it and the store
+  has that form's event (journal or lookup), the question closed because of this very form, so the
+  line goes to `channel inbound` and gets `duplicate` (303) or "different text" (409). Without a
+  found event (not routed, refused or silent lookup) it stays a 409 and nothing is sent. Before
+  this, one click of a double click could read "not open any more" although its answer was recorded.
 - **Answered elsewhere first** (for example on Telegram between the page load and the send): 409,
   nothing recorded, and his text is shown for his own copy.
 - **Not confirmed** (timeout, no response or another refusal): 503 with the same form, the same nonce
