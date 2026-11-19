@@ -284,9 +284,12 @@ class OverviewTests(BoundaryTests):
              "effective": {"timeout": 600, "limit_notify": "david"}}))
         (self.manager / "worker.lock").write_text(str(os.getpid()))
         now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        base = datetime.now(timezone.utc)
+        # Goal i updated i minutes ago: Goals 0-6 at priority 1 (Goal 3 has none), Goal 7 at priority 3.
         works = [{"id": "work-%032x" % i, "title": "Goal %d" % i, "status": "waiting", "priority": 1 if i < 7 else 3,
                   "waiting_for": "", "wake_at": None, "waiting_question_ids": [], "published": None,
-                  "updated_at": now} for i in range(8)]
+                  "updated_at": (base - timedelta(minutes=i)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")} for i in range(8)]
+        works[3]["priority"] = None
         works[0]["waiting_for"] = "Vesper's %s, then review" % self.work["id"][:13]
         works.append({"id": "work-" + "f" * 32, "title": "Routine: hourly-check", "status": "waiting", "priority": 0,
                       "waiting_for": "routine", "updated_at": now,
@@ -349,9 +352,14 @@ class OverviewTests(BoundaryTests):
     def test_goals_are_managers_open_works_capped_without_routines(self):
         overview = self.get("/")[1]
         self.assertIn("Codex's open work, top 6 by priority.", overview)
-        for i in range(6):
+        # Higher priority first (the engine's order), then most recently updated; a missing priority sorts last.
+        shown = [7, 0, 1, 2, 4, 5]
+        for i in shown:
             self.assertIn("Goal %d" % i, overview)
-        self.assertNotIn("Goal 7", overview)  # priority 3: past the cap
+        self.assertNotIn("Goal 6", overview)  # priority 1, least recently updated: past the cap
+        self.assertNotIn("Goal 3", overview)  # no priority: last, past the cap
+        positions = [overview.index("Goal %d<" % i) for i in shown]
+        self.assertEqual(positions, sorted(positions))
         self.assertNotIn("Routine: hourly-check", overview)
         self.assertIn("2 more on <a href='/e/manager#work'>", overview)
         # waiting_for IDs read as titles, the raw ID only in the tooltip
@@ -421,6 +429,25 @@ class OverviewTests(BoundaryTests):
         direction = self.get("/p/synthetics/direction")[1]
         self.assertIn("Standing direction", direction)
         self.assertNotIn("## Lessons", direction)
+
+    def test_home_heading_and_home_line_appear_once(self):
+        for path, name in (("/e/vesper", "Vesper"), ("/e/manager", "Codex")):
+            page = self.get(path)[1]
+            self.assertEqual(page.count("<h3>%s <span class='muted'>" % name), 1, path)
+            self.assertEqual(page.count("<p>Home <code>"), 1, path)
+        team = self.get("/team")[1]
+        for name in ("Vesper", "Codex"):
+            self.assertEqual(team.count("<h3>%s <span class='muted'>" % name), 1)
+
+    def test_team_next_is_highest_priority_ready_work(self):
+        base = datetime.now(timezone.utc)
+        stamp = lambda m: (base - timedelta(minutes=m)).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        ready = lambda title, pri, m: {"id": "work-" + title[-1] * 32, "title": title, "status": "ready",
+                                       "priority": pri, "waiting_for": "", "updated_at": stamp(m)}
+        self.write_manager(works=[ready("Low a", 1, 0), ready("None b", None, 0), ready("High c", 3, 5),
+                                  ready("High d", 3, 1)])
+        overview = self.get("/")[1]
+        self.assertIn("next: High d</li>", overview)  # priority 3 beats 1; the more recent of the two p3s
 
     def test_nav_is_overview_projects_diagnostics(self):
         page = self.get("/p/synthetics/board")[1]

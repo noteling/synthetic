@@ -450,10 +450,6 @@ def _home_block(member, people, authors, now):
     out.append("<p>Home <code>%s</code>; employee <code>%s</code>; projects: %s</p>" % (
         E(home.name), _v(pid), E(", ".join(sorted(authors.get(pid, ()))) or "none (no shared project log yet)")))
     svc, sess = live["service"], live["session"]
-    out.append("<h3>%s <span class='muted'>(%s)</span></h3>" % (E(profile.get("name") or status.get("name") or home.name),
-                                                               E(profile.get("role") or status.get("role") or "")))
-    out.append("<p>Home <code>%s</code>; employee <code>%s</code>; projects: %s</p>" % (
-        E(home.name), _v(pid), E(", ".join(sorted(authors.get(pid, ()))) or "none (no shared project log yet)")))
     svc_text = ("<span class='ok'>loaded</span>" if svc["loaded"] else
                 "<span class='bad'>not loaded</span>" if svc["loaded"] is False else "unknown")
     svc_text += " — label %s, launchd pid %s, worker lock pid %s (%s)" % (
@@ -557,8 +553,9 @@ def _home_block(member, people, authors, now):
         out.append("</table>")
     stuck = status.get("outbox_stuck") or {}
     if stuck.get("count"):
+        flagged = _stuck_problems(stuck)
         out.append("<p id='outbox' class='%s'>Outbox: %d message(s) stuck over 10 minutes; %d of the newest %d have no channel or an unconfirmed delivery, the rest wait on a routed channel.</p>" % (
-                "bad" if _stuck_problems(stuck) else "muted", stuck["count"], len(_stuck_problems(stuck)),
+                "bad" if flagged else "muted", stuck["count"], len(flagged),
                 len([i for i in stuck.get("items") or [] if isinstance(i, dict)])))
         items = [i for i in stuck.get("items") or [] if isinstance(i, dict)]
         if items:  # VIS G8: drill-down; status.json carries no message body
@@ -654,10 +651,18 @@ def diagnostics_page(root, agents=None, now=None):
 
 # ---------------------------------------------------------------- VIS-O overview (audience: David)
 
-GOALS_CAP = 6  # VIS-O D1(a): at most this many of the manager's open works by priority; the rest are one click away
+GOALS_CAP = 6  # VIS-O D1(a): at most this many of the manager's open works, highest priority first; the rest are one click away
 REF = re.compile(r"\b(question|work|event|message|run|memory|reminder)-[0-9a-f]{8,32}\b")
 REF_WORDS = {"event": "(message)", "message": "(message)", "run": "(session)", "memory": "(memory)",
              "reminder": "(reminder)"}
+
+
+def _by_priority(works):
+    """The engine's order (design.md: higher priority first; store.work_list sorts by -priority): higher priority
+    first, a missing or non-integer priority last, then the most recently updated first."""
+    works = sorted(works, key=lambda w: str(w.get("updated_at") or ""), reverse=True)
+    return sorted(works, key=lambda w: (0, -w["priority"]) if isinstance(w.get("priority"), int)
+                  and not isinstance(w.get("priority"), bool) else (1, 0))
 
 
 def _stuck_problems(stuck):
@@ -861,8 +866,7 @@ def overview_page(root, agents=None, now=None):
                    "to report to.</p>")
     else:
         goals = [w for w in manager["status"].get("works") or [] if isinstance(w, dict) and not w.get("routine")]
-        goals.sort(key=lambda w: str(w.get("updated_at") or ""), reverse=True)
-        goals.sort(key=lambda w: w.get("priority") if isinstance(w.get("priority"), int) else 99)
+        goals = _by_priority(goals)
         out.append("<h2>Goals</h2><p class='muted'>%s's open work, top %d by priority.</p>" % (
             E(manager["name"]), GOALS_CAP))
         rows = []
@@ -880,8 +884,7 @@ def overview_page(root, agents=None, now=None):
         works = [w for w in m["status"].get("works") or [] if isinstance(w, dict) and not w.get("routine")]
         waiting = [w for w in works if w.get("status") == "waiting"]
         on_human = len(_asks(m, human, canon))
-        ready = sorted((w for w in works if w.get("status") == "ready"),
-                       key=lambda w: w.get("priority") if isinstance(w.get("priority"), int) else 99)
+        ready = _by_priority(w for w in works if w.get("status") == "ready")
         sess = m["live"]["session"]["state"]
         href = "/e/%s" % quote(m["slug"])
         word = ("<span class='bad'>needs attention</span>" if href in bad_homes else
