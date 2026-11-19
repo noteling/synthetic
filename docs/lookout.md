@@ -22,7 +22,7 @@ pages need no JavaScript, and a Content-Security-Policy forbids scripts.
 | `/p/<project>/thread/<key>` | One conversation, both directions in time order, with sender, recipient, time, auth, channel and which home captured it. |
 | `/p/<project>/work` | Open work (VIS G1): the project's published works that are ready or waiting, grouped by owner name, with status, priority, title, waiting_for, blocked_by, the age of the owner's latest projection, and the count of closed rows (done/cancelled) left to the board. Built from the same backlog rows as the board; unpublished work shows only on the Team page. |
 | `/p/<project>/board` | Board backlog (with blocked_by) and posts. |
-| `/p/<project>/memory` | The M21 project memory view (projectview.render). |
+| `/p/<project>/memory` | The M21 project memory view (projectview.render), then its sources (VIS G5): every source the view counts, newest first, with seq, time, sender, role, auth channel, coverage (considered ×N / not considered), a redacted mark, and a link to the thread that shows it. Two captures of one message link to the same thread. Text is never in the table; it stays on the thread page. |
 
 A project with no `log.jsonl` (for example an empty `noteling` store) renders as empty.
 

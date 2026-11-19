@@ -237,7 +237,8 @@ def messages(entries, texts, canon=None):
                    works=sorted({w for w in (heads.get("work-id"), heads.get("for-work")) if w and w.startswith("work-")}),
                    question=heads.get("question-id") or None, thread=origin.get("thread"),
                    source=origin.get("source"), role=origin.get("role"), auth=(origin.get("auth") or {}).get("channel"),
-                   captured_by=origin.get("home"), text=shown, redacted=text is None and e["id"] in texts)
+                   captured_by=origin.get("home"), text=shown, redacted=text is None and e["id"] in texts,
+                   entries=[e["id"]])
         prior = out.get(mid)
         if prior is None:
             out[mid] = row
@@ -248,6 +249,7 @@ def messages(entries, texts, canon=None):
                 if not richer.get(key) and other.get(key):
                     richer[key] = other[key]
             richer["captured_by"] = ", ".join(sorted({str(prior["captured_by"]), str(row["captured_by"])}))
+            richer["entries"] = prior["entries"] + row["entries"]  # VIS G5: every capture links to this thread
             out[mid] = richer
     return sorted(out.values(), key=lambda m: (m["at"] or "", m["seq"]))
 
@@ -571,7 +573,43 @@ def memory_page(root, project):
         text = texts.get(entry_id)
         return None if text is None else text.encode("utf-8")
     text = projectview.render(entries, project, excerpt)
-    return page("%s: project memory" % project, "<pre>%s</pre>" % E(text), projects(root))
+    return page("%s: project memory" % project, "<pre>%s</pre>\n%s" % (E(text), sources_table(root, project, entries, texts)),
+                projects(root))
+
+
+def sources_table(root, project, entries, texts):
+    """VIS G5: the sources the view counts ("Sources: N"), newest first, each linked to the thread showing it.
+
+    Same set as projectview's count (projectlog.fold over active entries). Shows provenance and coverage only; the
+    text stays on the thread page, where a redacted source reads "(redacted)"."""
+    state = projectlog.fold(entries)
+    canon = canonical(company(root))
+    where = {}
+    for key, msgs in threads(messages(entries, texts, canon)).items():
+        for m in msgs:
+            for entry_id in m["entries"]:
+                where[entry_id] = key
+    origins = {e["id"]: ((e.get("body") or {}).get("origin") or {}) for e in entries if e["kind"] == "source"}
+    rows = sorted(state["sources"].values(), key=lambda s: s["seq"], reverse=True)
+    out = ["<h2>Sources (%d)</h2>" % len(rows)]
+    if not rows:
+        out.append("<p class='muted'>None.</p>")
+        return "\n".join(out)
+    out.append("<table><tr><th>source</th><th>seq</th><th>at</th><th>from</th><th>role</th><th>auth</th>"
+               "<th>coverage</th><th>thread</th></tr>")
+    for s in rows:
+        origin = origins.get(s["id"], {})
+        n = len(state["coverage"].get(s["id"]) or [])
+        key = where.get(s["id"])
+        link = "<a href='/p/%s/thread/%s'>thread</a>" % (quote(project), quote(key, safe="")) if key else "—"
+        out.append("<tr id='%s'><td><code>%s</code>%s</td><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+                   "<td>%s</td><td>%s</td></tr>" % (
+                       E(s["id"]), E(s["id"]), " <span class='muted'>(redacted)</span>" if s["redacted"] else "",
+                       s["seq"], _v(origin.get("occurred_at")), _v(canon(origin.get("sender"))), _v(s["role"]),
+                       _v((s.get("auth") or {}).get("channel")),
+                       "considered ×%d" % n if n else "<span class='bad'>not considered</span>", link))
+    out.append("</table>")
+    return "\n".join(out)
 
 
 # ---------------------------------------------------------------- server
