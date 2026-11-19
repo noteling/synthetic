@@ -42,7 +42,7 @@ class MCPTests(unittest.TestCase):
         self.call("entity_put", {"id": "priya", "name": "Priya", "kind": "person"})
         result = self.call("memory_put", {"subject": "priya", "predicate": "owns", "value": "release coordination", "source": "onboarding event"})
         self.assertFalse(result.get("isError", False), result)
-        memories = json.loads(self.call("memory_search", {"query": "release"})["content"][0]["text"])
+        memories = json.loads(self.call("memory_search", {"query": "release"})["content"][0]["text"])["memories"]
         self.assertEqual(memories[0]["value"], "release coordination")
         rejected = self.call("run_finish", {"run_id": "arbitrary"})
         self.assertTrue(rejected["isError"])
@@ -69,7 +69,7 @@ class MCPTests(unittest.TestCase):
         self.assertEqual(source["sender"], "priya")
         self.assertIn("green sheet", source["body"])
         searched = self.call("event_search", {"query": "green sheet", "thread": "kt"})
-        matches = json.loads(searched["content"][0]["text"])
+        matches = json.loads(searched["content"][0]["text"])["events"]  # F2: {events, capped, truncated_from}
         self.assertEqual([match["id"] for match in matches], [event["id"]])
 
     def test_required_key_and_types_are_checked(self):

@@ -704,17 +704,80 @@ class Store:
         return moment, parts[2]
 
     @staticmethod
-    def _since_page(found, since, limit, name, tag, tie):
+    def _since_page(found, since, limit, name, tag, tie, budget=None):
         """E1 (P2): a since= retrieval in (created_at, tie-break) order with an explicit capped flag. unread_from
         is the created_at of the first item not returned: record it as an omission's `from`. H2: next_cursor
         (after the last item returned) continues the read without repeating or skipping items whose created_at
-        ties."""
+        ties. F2: with budget=(max_bytes, size, cut) the page also stops before the item that would exceed
+        max_bytes (capped, same cursor rule); a first item too big alone is cut to fit and still counts as
+        returned, so next_cursor moves past it. truncated_from = created_at of the first cut item, else null."""
         page = found[:limit]
-        capped = len(found) > limit
+        if budget is not None:
+            page = Store._fit(page, *budget)
+        n = len(page)
+        capped = len(found) > n
         last = page[-1] if capped else None
-        return {name: page, "since": since, "capped": capped,
-                "unread_from": found[limit].get("created_at") if capped else None,
-                "next_cursor": "%s|%s|%s" % (tag, last.get("created_at"), tie(last)) if capped else None}
+        out = {name: page, "since": since, "capped": capped,
+               "unread_from": found[n].get("created_at") if capped else None,
+               "next_cursor": "%s|%s|%s" % (tag, last.get("created_at"), tie(last)) if capped else None}
+        if budget is not None:
+            out["truncated_from"] = next((item.get("created_at") for item in page if item.get("body_truncated")), None)
+        return out
+
+    # F2: compact retrieval. Bytes are counted on json.dumps(..., ensure_ascii=False) in UTF-8, as the MCP
+    # server serializes results; PAGE_ENVELOPE is reserved for the page's own keys (since, cursor, flags).
+    PAGE_ENVELOPE = 512
+    MIN_MAX_BYTES = 1024
+
+    @staticmethod
+    def _json_size(value):
+        return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
+
+    @staticmethod
+    def _check_compact(body_chars, max_bytes):
+        for name, value, low in (("body_chars", body_chars, 0), ("max_bytes", max_bytes, Store.MIN_MAX_BYTES)):
+            if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < low):
+                raise ValueError("%s must be an integer of at least %d." % (name, low))
+
+    @staticmethod
+    def _preview(event, body_chars=None):
+        """F2: an event with body_len and body_truncated; the body cut to body_chars characters when longer.
+        A body_truncated event is a preview, not a read: event_get returns the original body."""
+        body = event.get("body")
+        if not isinstance(body, str):
+            return dict(event, body_len=None, body_truncated=False)
+        cut = body_chars is not None and len(body) > body_chars
+        return dict(event, body=body[:body_chars] if cut else body, body_len=len(body), body_truncated=cut)
+
+    @staticmethod
+    def _cut_to_fit(event, max_bytes):
+        """F2: shorten one event's body until the event fits max_bytes (body_len keeps the original length)."""
+        body = event.get("body")
+        if not isinstance(body, str):
+            return event
+        n = len(body)
+        while True:
+            trial = dict(event, body=body[:n], body_truncated=event.get("body_truncated") or n < len(body))
+            over = Store._json_size(trial) + 2 - max_bytes
+            if over <= 0 or n == 0:
+                return trial
+            n = max(0, n - over)
+
+    @staticmethod
+    def _fit(items, max_bytes, size, cut):
+        """F2: the longest prefix of items whose serialized size fits max_bytes less the page envelope; at least
+        one item, cut to fit (cut may be None: memories are never cut)."""
+        room = max_bytes - Store.PAGE_ENVELOPE
+        kept, used = [], 0
+        for item in items:
+            n = size(item) + 2
+            if used + n > room:
+                if not kept:
+                    kept.append(cut(item, room) if cut else item)
+                break
+            kept.append(item)
+            used += n
+        return kept
 
     MEMORY_STOPWORDS = frozenset(
         "the and for are was were does did how what which who whom why when where with from that this these those "
@@ -731,9 +794,11 @@ class Store:
                 if len(token) >= 3 and token not in cls.MEMORY_STOPWORDS}
 
     def memory_search(self, query="", subject=None, limit=30, include_superseded=False, match="any", since=None,
-                      cursor=None):
+                      cursor=None, max_bytes=None):
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
             raise ValueError("Memory limit must be from 1 to 500.")
+        self._check_compact(None, max_bytes)
+        budget = (max_bytes, self._json_size, None) if max_bytes is not None else None
         if match not in ("all", "any"):
             raise ValueError('Memory match must be "all" or "any".')
         after = self._since_cursor(cursor, "m") if cursor is not None else None
@@ -758,7 +823,7 @@ class Store:
             order = (lambda m: (str(m.get("created_at", "")), m["id"]))
             found = sorted((m for m in out if str(m.get("created_at", "")) >= since
                             and (after is None or order(m) > after)), key=order)
-            return self._since_page(found, since, limit, "memories", "m", lambda m: m["id"])
+            return self._since_page(found, since, limit, "memories", "m", lambda m: m["id"], budget)
         # Fetch by ID: an exact memory ID (or a prefix of 15+ characters) puts
         # that memory ahead of memories that only cite it.
         probe = query.strip().casefold()
@@ -782,6 +847,10 @@ class Store:
                     if score > 0:
                         scored.append((-score, rank, memory))
                 out += [memory for _, _, memory in sorted(scored, key=lambda item: item[:2])]
+        if budget is not None:
+            # F2 C1: query mode under max_bytes returns {memories, capped}; capped = the byte budget cut it.
+            page = self._fit(out[:limit], *budget)
+            return {"memories": page, "capped": len(page) < len(out[:limit])}
         return out[:limit]
 
     MEMORY_INDEX_LIMIT = 300
@@ -2250,15 +2319,33 @@ class Store:
             after = rows[-1]["seq"]
         return found
 
-    def event_get(self, id):
-        """Resolve source references even after an input has been acknowledged."""
-        return self._with_auth(self._get("events", self._resolve(_text(id, "id"), "events")))
+    def event_get(self, id, body_offset=None, body_chars=None):
+        """Resolve source references even after an input has been acknowledged.
 
-    def event_search(self, query="", thread=None, limit=50, since=None, cursor=None):
+        F2: with body_offset and/or body_chars, return that slice of the saved original body with body_len,
+        body_offset and body_next (offset of the next chunk, null at the end), so a large body is read in
+        ID-keyed chunks. Without them the event is returned unchanged."""
+        event = self._with_auth(self._get("events", self._resolve(_text(id, "id"), "events")))
+        if body_offset is None and body_chars is None:
+            return event
+        for name, value in (("body_offset", body_offset), ("body_chars", body_chars)):
+            if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
+                raise ValueError("%s must be a non-negative integer." % name)
+        body = event.get("body") if isinstance(event.get("body"), str) else ""
+        start = min(body_offset or 0, len(body))
+        end = len(body) if body_chars is None else min(len(body), start + body_chars)
+        return dict(event, body=body[start:end], body_len=len(body), body_offset=start,
+                    body_next=end if end < len(body) else None)
+
+    def event_search(self, query="", thread=None, limit=50, since=None, cursor=None, body_chars=None,
+                     max_bytes=None):
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
             raise ValueError("Event search limit must be from 1 to 500.")
         if not isinstance(query, str):
             raise ValueError("Event search query must be text.")
+        self._check_compact(body_chars, max_bytes)
+        compact = body_chars is not None or max_bytes is not None
+        budget = (max_bytes, self._json_size, self._cut_to_fit) if max_bytes is not None else None
         words = query.casefold().split()
         after = self._since_cursor(cursor, "e") if cursor is not None else None
         if since is not None or after:
@@ -2279,6 +2366,12 @@ class Store:
                     found.append(dict(event, _seq=row["seq"]))
                     if len(found) > limit:
                         break
+            if compact:
+                # F2: items are sized with their _seq tie-break still attached (a few bytes over, never under).
+                found = [self._preview(self._with_auth(e), body_chars) for e in found]
+                page = self._since_page(found, since, limit, "events", "e", lambda e: e["_seq"], budget)
+                page["events"] = [{k: v for k, v in e.items() if k != "_seq"} for e in page["events"]]
+                return page
             page = self._since_page(found, since, limit, "events", "e", lambda e: e["_seq"])
             page["events"] = [self._with_auth({k: v for k, v in e.items() if k != "_seq"}) for e in page["events"]]
             return page
@@ -2291,6 +2384,13 @@ class Store:
                 found.append(self._with_auth(event))
                 if len(found) >= limit:
                     break
+        if compact:
+            # F2 C1: query/thread mode under compact options returns {events, capped, truncated_from};
+            # capped = max_bytes cut the result (narrow the query, or page with since=).
+            found = [self._preview(event, body_chars) for event in found]
+            page = self._fit(found, *budget) if budget else found
+            return {"events": page, "capped": len(page) < len(found),
+                    "truncated_from": next((e.get("created_at") for e in page if e.get("body_truncated")), None)}
         return found
 
     def thread_history(self, thread, limit=50, before=None):
