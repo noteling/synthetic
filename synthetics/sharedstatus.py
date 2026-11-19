@@ -11,7 +11,9 @@ Fields (v1; add, never rename):
   session {state running|idle, run, started_at, paused: null|{reason, ...}},
   works [{id, title, status, priority, waiting_for, wake_at, waiting_question_ids, published}]   (not done/cancelled)
   docket (docket.build JSON for the default human, or null with docket_error)
-  questions_open [{id, to, first_line, asked_at, hop}]
+  questions_open [{id, to, first_line, asked_at, hop, hop_via, carries}]   (G3: hop_via = the onward question
+           named by the latest hop notice; carries [{question_id, asker}] = the askers' questions this one relays.
+           IDs only, never a relayed body)
   runs [{id, status, started_at, finished_at, cost, events, failed_tool_count}]   (newest 10)
   outbox_stuck {count, older_than_48h}
   glances [{id, run_id, at, ok, exit, status, counts, find, browser}]   (RW-1, newest 5; already whitelisted by
@@ -64,7 +66,10 @@ def build(store, paused=None, now=None):
     except Exception as exc:  # noqa: BLE001 - e.g. no default_human; the rest of the export still matters
         dock, dock_error = None, type(exc).__name__
     questions = [dict(id=q["id"], to=q.get("to"), first_line=docket.summary(q.get("body")),
-                      asked_at=q.get("created_at"), hop=store.hop_label(q)) for q in store.question_list("open")]
+                      asked_at=q.get("created_at"), hop=store.hop_label(q), hop_via=q.get("hop_via"),
+                      carries=[dict(question_id=link.get("question_id"), asker=link.get("asker"))
+                               for link in q.get("relays") or []])
+                 for q in store.question_list("open")]
     run_rows = []
     for run in runs:
         try:
