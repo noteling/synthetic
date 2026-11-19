@@ -325,6 +325,8 @@ def export_runs(home, run=None, since=None, audit=False):
                            "unparseable": True, "line_sha256": hashlib.sha256(raw).hexdigest()}
                 else:
                     yield export_receipt(home_id, run_id, number, receipt, raw)
+            for number, raw, fact in _receipt_lines(home / "runs" / (run_id + STREAM_SUFFIX)) or []:
+                yield export_stream(home_id, run_id, number, fact, raw)
         if audit:
             query, params = "SELECT seq, at, action, record_id, data FROM audit", ()
             if run is not None:
@@ -344,8 +346,15 @@ def export_runs(home, run=None, since=None, audit=False):
 
 EPOCH = "1970-01-01T00:00:00Z"
 SPILL_BYTES = 32000  # F2's MCP max_bytes default; the client's display threshold is predicted, not observed (C2)
-SPILL_NOTE = ("predicted, not observed: a page over %d bytes is assumed spilled by the client; only the executor "
-              "stream (E4, not built) would show what the session displayed")
+SPILL_NOTE = ("predicted, not observed: a page over %d bytes is assumed spilled by the client; only a run's executor "
+              "stream (E4) shows what the session displayed, and these pages had no stream join")
+# E4: the observed display threshold is host-specific (Claude Code 2.1.326 on Vesper's host showed 40 105 characters
+# whole and spilled 70 240, token-based). The predicted check above stays for runs without a join (Codex C5):
+# over-flagging is the safe direction.
+OBSERVED_NOTE = ("observed: every page was joined by tool_use_id to the executor stream's displayed facts; a page "
+                 "counts as seen only when the client displayed it whole (shape full, same sha256 as returned)")
+MIXED_NOTE = ("mixed: %d page(s) observed through the executor stream, %d predicted (no stream join, over %d bytes "
+              "assumed spilled)")
 SCOPE_NOTE = ("this run's own receipts only: reads made in another session (an earlier catch-up) never support "
               "this dream's checkpoint; a dream re-reads what its checkpoint rests on")
 CHAIN_NOTE = ("the receipt file can be rewritten by a session; its head is anchored in the run record "
@@ -387,7 +396,8 @@ def _rearm_rows(conn, run_id):
 
 
 def verify_dream(home, run_id, spill_bytes=SPILL_BYTES):
-    """E3 verdict for one dream run: consistent, possibly_spilled, overclaimed or no_evidence."""
+    """E3 verdict for one dream run: consistent, spilled (observed, E4), possibly_spilled (predicted),
+    unread_truncated, overclaimed or no_evidence."""
     home = Path(home)
     if not isinstance(run_id, str) or not RUN_ID.fullmatch(run_id):
         raise ValueError("run must be a run ID.")
@@ -406,6 +416,9 @@ def verify_dream(home, run_id, spill_bytes=SPILL_BYTES):
         conn.close()
     path = home / "runs" / (run_id + ".mcp.jsonl")
     out["chain"] = check_chain(path, run.get("receipt_chain"))
+    stream_path = home / "runs" / (run_id + STREAM_SUFFIX)
+    if stream_path.exists():
+        out["stream_chain"] = check_chain(stream_path, run.get("stream_chain"))  # E4: the display facts' own chain
     if routine is None:
         return dict(out, verdict="no_evidence", reason="no routine.rearmed row for a dream by this run")
     coverage = routine.get("coverage") if isinstance(routine.get("coverage"), dict) else {}
@@ -420,14 +433,28 @@ def verify_dream(home, run_id, spill_bytes=SPILL_BYTES):
     if lines is None:
         return dict(out, verdict="no_evidence", reason="no receipt file for this run")
     receipts = [r for _, _, r in lines if r is not None and r.get("success")]
+    displayed = stream_displayed(home, run_id)
+    judged = {"observed": 0, "predicted": 0}
+
+    def judge(receipt, facts):
+        """E4c: (not seen, how). A joined displayed fact decides (observed); otherwise the i17 prediction."""
+        shown = (displayed or {}).get(receipt.get("tool_use_id")) if receipt.get("tool_use_id") else None
+        if shown is not None and shown.get("shape") in ("full", "spilled", "preview", "error"):
+            judged["observed"] += 1
+            return not (shown.get("shape") == "full" and shown.get("sha256") == facts.get("sha256")), "observed"
+        judged["predicted"] += 1
+        return facts.get("bytes", 0) > spill_bytes, "predicted"
+
     chunks = {}
     spilled_gets = []
     for r in receipts:
         facts = r.get("result") or {}
         if r.get("tool") == "event_get" and facts.get("id"):
-            if facts.get("bytes", 0) > spill_bytes:
+            unseen, how = judge(r, facts)
+            if unseen:
                 # G2: a plain event_get of a large body can spill too; it covers nothing.
-                spilled_gets.append({"id": facts["id"], "bytes": facts.get("bytes")})
+                spilled_gets.append(dict({"id": facts["id"], "bytes": facts.get("bytes")},
+                                         **({"spill": "observed"} if how == "observed" else {})))
                 continue
             begin = facts.get("body_offset") or 0
             chunks.setdefault(facts["id"], []).append((begin, begin + (facts.get("returned_chars") or 0)))
@@ -440,9 +467,14 @@ def verify_dream(home, run_id, spill_bytes=SPILL_BYTES):
                  if r is not None and r.get("success") and r.get("tool") == tool
                  and isinstance(r.get("arguments"), dict)
                  and (r["arguments"].get("since") is not None or r["arguments"].get("cursor") is not None)]
-        stream = _chain(pages, start, cutoff, spill_bytes, chunks, breaks, name)
+        stream = _chain(pages, start, cutoff, judge, chunks, breaks, name)
         streams[name] = stream
     out["streams"] = streams
+    out["spill_join"] = dict(judged, stream=displayed is not None)
+    if judged["observed"] and not judged["predicted"]:
+        out["spill_check"] = OBSERVED_NOTE
+    elif judged["observed"]:
+        out["spill_check"] = MIXED_NOTE % (judged["observed"], judged["predicted"], spill_bytes)
     if any(s.get("no_result_facts") for s in streams.values()):
         return dict(out, verdict="no_evidence", reason="since= receipts written before E1 carry no result facts")
     bound = min([s["end"] for s in streams.values()] + [o for o in omissions if o])
@@ -454,8 +486,10 @@ def verify_dream(home, run_id, spill_bytes=SPILL_BYTES):
         return dict(out, verdict="overclaimed", first_unread=bound, breaking=first)
     unrecorded = [b for b in breaks if b["from"] and not any(o and o <= b["from"] for o in omissions)]
     if unrecorded:
-        return dict(out, verdict="possibly_spilled" if any(b["why"] == "possibly_spilled" for b in unrecorded)
-                    else "unread_truncated", unrecorded=unrecorded,
+        whys = {b["why"] for b in unrecorded}
+        verdict = ("spilled" if "spilled" in whys else "possibly_spilled" if "possibly_spilled" in whys
+                   else "unread_truncated")
+        return dict(out, verdict=verdict, unrecorded=unrecorded,
                     reason="a page or body in the read chain was not seen and no omission records it")
     return dict(out, verdict="consistent")
 
@@ -469,7 +503,7 @@ def _covered(spans, length):
     return position >= (length or 0)
 
 
-def _chain(pages, start, cutoff, spill_bytes, chunks, breaks, name):
+def _chain(pages, start, cutoff, judge, chunks, breaks, name):
     """Extend the contiguous chain from `start` through the stream's since=/cursor pages (fixed point)."""
     end = start
     last_cursor = None
@@ -495,15 +529,20 @@ def _chain(pages, start, cutoff, spill_bytes, chunks, breaks, name):
                 stopped = True
                 break
             first = _ts(facts.get("created_first"))
-            if facts.get("bytes", 0) > spill_bytes:
+            unseen, how = judge(receipt, facts)
+            if unseen:
                 # The page wasn't seen. Items before its first one don't exist (oldest first, since inclusive).
                 # B1 (r2): record the break but keep scanning, and keep last_cursor, so a smaller re-read of the
-                # same since/cursor (the dream guidance) can carry the chain past it; see _heal below.
+                # same since/cursor (the dream guidance) can carry the chain past it; the loop after this one
+                # decides which spills a later page healed. E4c: `spilled` when the stream observed it.
                 moved = first is not None and first > end
                 end = max(end, first or end)
-                spills.append({"stream": name, "line": number, "from": first, "why": "possibly_spilled",
-                               "bytes": facts.get("bytes"), "unread_from": facts.get("unread_from"),
-                               "chain_at": end})
+                spill = {"stream": name, "line": number, "from": first,
+                         "why": "spilled" if how == "observed" else "possibly_spilled",
+                         "bytes": facts.get("bytes"), "unread_from": facts.get("unread_from"), "chain_at": end}
+                if how == "observed":
+                    spill["spill"] = "observed"  # a run without a stream join keeps the i17 output unchanged
+                spills.append(spill)
                 if moved:
                     changed = True
                     break
@@ -534,3 +573,205 @@ def _chain(pages, start, cutoff, spill_bytes, chunks, breaks, name):
         else:
             stream.setdefault("healed", []).append(dict(spill, healed=True))
     return stream
+
+
+# ---------------------------------------------------------------------------------------------------------
+# E4: the executor stream. brain.py reads Claude Code's `--output-format stream-json` from a pipe and hands each
+# line to StreamReducer, which writes facts only to runs/<run>.stream.jsonl: what the client displayed for each
+# tool call ({bytes, sha256, shape}), never the text. The raw stream (which holds everything the model saw) is
+# never written to disk (Codex Q1: E4-B). The `result` line is kept apart, before any reduction, so a reducer
+# failure never changes the session result (proposal §4).
+
+STREAM_SUFFIX = ".stream.jsonl"
+STREAM_TYPES = ("system", "assistant", "user", "result")
+SHAPES = ("full", "spilled", "preview", "error", "unknown")
+STREAM_COMMON = frozenset({"kind", "seq", "prev_sha256"})
+STREAM_ALLOWED = {
+    "init": frozenset({"model", "claude_code_version", "tools", "mcp_servers"}),
+    "tool_use": frozenset({"tool_use_id", "name", "input_bytes", "input_sha256"}),
+    "displayed": frozenset({"tool_use_id", "bytes", "sha256", "shape", "reported_chars", "saved_outside_home"}),
+    "turn": frozenset({"text_blocks", "text_bytes"}),
+    "result": frozenset({"subtype", "is_error", "num_turns", "total_cost_usd", "duration_ms"}),
+    "stream_error": frozenset({"stage", "type"}),
+}
+# Never in stream.jsonl (Codex C2); a static test checks none of them is allowed.
+STREAM_FORBIDDEN = ("session_id", "cwd", "original_cwd", "messaging_socket_path", "credential_expires_at",
+                    "memory_paths", "additional_directories", "uuid", "text", "content", "input", "thinking",
+                    "result", "persistedOutputPath", "tool_use_result", "stdout", "stderr")
+TOOL_USE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
+NAME = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
+SPILL_TEXT = re.compile(r"Error: result \(([0-9][0-9,]*) characters\b.*exceeds maximum allowed tokens", re.S)
+PREVIEW_TEXT = "<persisted-output>"
+
+
+def _name(value):
+    return value if isinstance(value, str) and NAME.fullmatch(value) else None
+
+
+def _tool_use_id(value):
+    return value if isinstance(value, str) and TOOL_USE_ID.fullmatch(value) else None
+
+
+def displayed_shape(content, is_error=False):
+    """(shape, displayed text or None, reported_chars) for a stream tool_result's content."""
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list) and all(isinstance(b, dict) and b.get("type") == "text"
+                                           and isinstance(b.get("text"), str) for b in content):
+        text = "".join(b["text"] for b in content)
+    else:
+        return "unknown", None, None
+    head = text[:4096]
+    match = SPILL_TEXT.match(head)
+    if match:
+        return "spilled", text, int(match.group(1).replace(",", ""))
+    if head.startswith(PREVIEW_TEXT):
+        return "preview", text, None
+    if is_error:
+        return "error", text, None
+    return "full", text, None
+
+
+class StreamReducer:
+    """Reduce stream-json lines to facts. feed() never raises; the facts file is best effort."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self.result_line = None   # the raw `result` line, kept for <run>.claude.json exactly as json mode wrote it
+        self.passthrough = []     # stdout lines that are not stream events (an older CLI or a test double)
+        self.prev = None
+        self.seq = 0
+        self.handle = None
+        self.errors = 0
+        try:
+            descriptor = os.open(str(self.path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            self.handle = os.fdopen(descriptor, "w", encoding="utf-8")
+            os.fchmod(self.handle.fileno(), 0o600)
+        except Exception:  # noqa: BLE001 - no stream facts then; verify falls back to predicted
+            self.handle = None
+
+    def feed(self, line):
+        try:
+            data = json.loads(line)
+        except ValueError:
+            data = None
+        if not isinstance(data, dict) or not isinstance(data.get("type"), str):
+            self.passthrough.append(line)
+            return
+        if data["type"] == "result":
+            self.result_line = line if line.endswith("\n") else line + "\n"
+        try:
+            for fact in self.facts(data):
+                self.write(fact)
+        except Exception as exc:  # noqa: BLE001 - a reducer failure never changes the session (proposal §4)
+            self.errors += 1
+            stage = data["type"] if data["type"] in STREAM_TYPES else "other"
+            try:
+                self.write({"kind": "stream_error", "stage": stage, "type": type(exc).__name__})
+            except Exception:  # noqa: BLE001
+                pass
+
+    def facts(self, data):
+        kind = data["type"]
+        if kind == "system" and data.get("subtype") == "init":
+            servers = [{"name": _name(s.get("name")), "status": _name(s.get("status"))}
+                       for s in data.get("mcp_servers") or [] if isinstance(s, dict)]
+            yield {"kind": "init", "model": _name(data.get("model")),
+                   "claude_code_version": _name(data.get("claude_code_version")),
+                   "tools": [t for t in (_name(t) for t in data.get("tools") or []) if t],
+                   "mcp_servers": servers}
+        elif kind == "assistant":
+            blocks = (data.get("message") or {}).get("content") or []
+            texts = [b.get("text") for b in blocks if isinstance(b, dict) and b.get("type") == "text"
+                     and isinstance(b.get("text"), str)]
+            for block in blocks:
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    raw = json.dumps(block.get("input"), ensure_ascii=False, sort_keys=True)
+                    yield dict({"kind": "tool_use", "tool_use_id": _tool_use_id(block.get("id")),
+                                "name": _name(block.get("name"))},
+                               **{"input_" + k: v for k, v in text_facts(raw).items()})
+            if texts:
+                yield {"kind": "turn", "text_blocks": len(texts),
+                       "text_bytes": sum(len(t.encode("utf-8")) for t in texts)}
+        elif kind == "user":
+            blocks = (data.get("message") or {}).get("content") or []
+            for block in blocks if isinstance(blocks, list) else []:
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                shape, text, reported = displayed_shape(block.get("content"), bool(block.get("is_error")))
+                fact = {"kind": "displayed", "tool_use_id": _tool_use_id(block.get("tool_use_id")), "shape": shape}
+                if text is not None:
+                    fact.update(text_facts(text))
+                    if shape in ("spilled", "preview"):
+                        fact["saved_outside_home"] = "saved to" in text[:4096].lower()
+                if reported is not None:
+                    fact["reported_chars"] = reported
+                yield fact
+        elif kind == "result":
+            fact = {"kind": "result"}
+            for key in ("subtype", "is_error", "num_turns", "total_cost_usd", "duration_ms"):
+                value = data.get(key)
+                if key == "subtype":
+                    value = _name(value)
+                elif key == "is_error":
+                    value = value if isinstance(value, bool) else None
+                elif isinstance(value, bool) or not isinstance(value, (int, float)):
+                    value = None
+                fact[key] = value
+            yield fact
+
+    def write(self, fact):
+        if self.handle is None:
+            return
+        allowed = STREAM_ALLOWED[fact["kind"]] | STREAM_COMMON
+        fact = {k: v for k, v in fact.items() if k in allowed}  # belt and braces for C2
+        self.seq += 1
+        fact["seq"] = self.seq
+        fact["prev_sha256"] = self.prev
+        line = json.dumps(fact, ensure_ascii=False, sort_keys=True)
+        self.handle.write(line + "\n")
+        self.handle.flush()
+        self.prev = sha256_text(line)
+
+    def output_text(self):
+        """What <run>.claude.json gets: the result line, else the non-stream stdout as json mode wrote it."""
+        return self.result_line if self.result_line is not None else "".join(self.passthrough)
+
+    def close(self):
+        if self.handle is not None:
+            try:
+                self.handle.flush()
+                os.fsync(self.handle.fileno())
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                self.handle.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self.handle = None
+
+
+def stream_displayed(home, run_id):
+    """{tool_use_id: displayed fact} from runs/<run>.stream.jsonl, or None when the run has no stream."""
+    lines = _receipt_lines(Path(home) / "runs" / (run_id + STREAM_SUFFIX))
+    if lines is None:
+        return None
+    out = {}
+    for _, _, record in lines:
+        if record and record.get("kind") == "displayed" and record.get("tool_use_id"):
+            out[record["tool_use_id"]] = record
+    return out
+
+
+def export_stream(home_id, run_id, seq, fact, raw):
+    """E4 export: one `kind: stream` line per stream.jsonl line, through the STREAM_ALLOWED allow-list (C2).
+    tool_use_id is exported as is (opaque); any field not listed for its kind becomes {bytes, sha256}."""
+    out = {"kind": "stream", "home_id": home_id, "run_id": run_id, "seq": seq,
+           "line_sha256": hashlib.sha256(raw).hexdigest()}
+    if not isinstance(fact, dict) or fact.get("kind") not in STREAM_ALLOWED:
+        return dict(out, unparseable=True)
+    allowed = STREAM_ALLOWED[fact["kind"]]
+    out.update(stream_kind=fact["kind"], prev_sha256=fact.get("prev_sha256"))
+    out["facts"] = {k: (v if k in allowed else text_facts(canonical(v)))
+                    for k, v in fact.items() if k not in STREAM_COMMON}
+    return out

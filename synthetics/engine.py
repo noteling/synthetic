@@ -122,6 +122,7 @@ class Engine:
         self.failure_pause = None  # latest failed run id when serve started in a failure streak
         self._last_pause = None
         self.runtime = runtime  # M19 runtime.Controller, or None for a fixed argv configuration
+        self.retention = {"keep_days": 30.0, "max_mb": 200.0}  # E4 runs/ retention (runtime.json runs_keep_days/_max_mb)
 
     def apply_runtime(self, effective):
         """Use the effective persisted settings for brain, limits and polling."""
@@ -129,6 +130,10 @@ class Engine:
         self.brain.model = effective["model"]
         self.brain.timeout = float(effective["timeout"])
         self.brain.budget = float(effective["budget"])
+        from . import runtime as runtime_settings
+        self.brain.stream_output = bool(runtime_settings.setting(effective, "stream_output"))  # E4 C1 switch
+        self.retention = {"keep_days": float(runtime_settings.setting(effective, "runs_keep_days")),
+                          "max_mb": float(runtime_settings.setting(effective, "runs_max_mb"))}
         self.daily_limit = float(effective["daily_limit"]) or None
         self.limit_notify = effective["limit_notify"] or None
         self.limit_allow = frozenset(effective["limit_allow"] or ())
@@ -301,6 +306,27 @@ class Engine:
                 completed.append(result)
             return completed
 
+    PRUNE_KEY = "runs_pruned_day"
+
+    def prune_runs_if_due(self):
+        """E4 retention: at an idle point (no session running), at most once per UTC day. Never raises."""
+        try:
+            today = utc_day()
+            with Store(self.home) as store:
+                row = store.db.execute("SELECT v FROM capture_meta WHERE k=?", (self.PRUNE_KEY,)).fetchone()
+                if row is not None and row["v"] == today:
+                    return None
+                result = store.runs_prune(**self.retention)
+                with store._tx():
+                    store.db.execute("INSERT INTO capture_meta(k,v) VALUES (?,?) ON CONFLICT(k) DO UPDATE SET "
+                                     "v=excluded.v", (self.PRUNE_KEY, today))
+            if result.get("runs"):
+                self.on_update({"type": "runs_pruned", "runs": result["runs"], "bytes": result["bytes"]})
+            return result
+        except Exception as error:  # noqa: BLE001 - housekeeping never stops the worker
+            self.on_update({"type": "runs_prune_failed", "error": type(error).__name__})
+            return None
+
     def serve(self, poll_seconds=3.0, retry_seconds=60.0, stop=None, on_stop=None):
         """Wait locally between events; failed sessions back off instead of hot-looping.
 
@@ -330,6 +356,7 @@ class Engine:
             self.on_update({"type": "listening", "home": str(self.home), "recovered": recovered})
             failures = 0
             while not stop.is_set():
+                self.prune_runs_if_due()
                 if self.runtime is not None:
                     # Idle point: no session is running and the last one's inputs are settled.
                     with Store(self.home) as store:

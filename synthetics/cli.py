@@ -725,6 +725,11 @@ def parser():
     rver.add_argument("run")
     rver.add_argument("--spill-bytes", type=int, default=None,
                       help="predicted client display threshold in bytes (default 32000, F2 max_bytes)")
+    rprune = sub.add_parser("prune-runs", help="E4 (docs/ledgerline.md): delete old runs/ files (never pinned, "
+                                               "running or the newest 50); a session: its own home only, audited")
+    rprune.add_argument("--dry-run", action="store_true", help="list what would go; delete and audit nothing")
+    rprune.add_argument("--keep-days", type=float, default=None, help="default runtime.json runs_keep_days or 30")
+    rprune.add_argument("--max-mb", type=float, default=None, help="default runtime.json runs_max_mb or 200")
     exp = sub.add_parser("export", help="Ledgerline (i17 E2): read-only JSON-lines export, allow-listed, no bodies")
     exps = exp.add_subparsers(dest="export_command", required=True)
     expr = exps.add_parser("runs", help="runs, their MCP receipts (E1 facts) and, with --audit, audit rows")
@@ -971,6 +976,31 @@ def main(argv=None):
                 lookout.serve(root, port=args.port, ready=ready)
             except KeyboardInterrupt:
                 pass
+            return 0
+        if args.command == "prune-runs":
+            # E4 retention (Codex Q2): housekeeping of the home's own diagnostic files, no approval gate. A session
+            # prunes only its own home (doctor's fence, narrowed to own home); a refusal is audited.
+            from . import authority, runtime as runtime_settings
+            a = authority.actor()
+            if not a["owner"] and not authority.same_home(home, a["home"]):
+                authority.audit(a["home"], "authority.refused", {"what": "prune-runs", "target": str(home),
+                                                                 "actor": a["id"], "run": a["run"],
+                                                                 "code": "own_home_only"})
+                raise authority.AuthorityError("own_home_only", "prune-runs in a session prunes only its own home "
+                                               "(%s), not %s" % (a["home"], home), what="prune-runs")
+            try:
+                config = json.loads((home / runtime_settings.CONFIG_FILE).read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                config = {}
+            keep = args.keep_days if args.keep_days is not None else float(runtime_settings.setting(config, "runs_keep_days"))
+            size = args.max_mb if args.max_mb is not None else float(runtime_settings.setting(config, "runs_max_mb"))
+            with Store(home) as store:
+                store.identity()
+                output(store.runs_prune(keep_days=keep, max_mb=size, dry_run=args.dry_run))
+            if not a["owner"]:
+                authority.audit(a["home"], "authority.used", {"what": "prune-runs", "target": str(home),
+                                                              "actor": a["id"], "run": a["run"],
+                                                              "dry_run": bool(args.dry_run)})
             return 0
         if args.command == "export" or (args.command == "routine" and args.routine_command == "verify"):
             # i17 Ledgerline: read-only (sqlro, never a Store), fenced exactly like doctor (C5).

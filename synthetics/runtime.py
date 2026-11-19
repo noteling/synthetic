@@ -21,6 +21,35 @@ CONFIG_FILE = "runtime.json"
 LAST_GOOD_FILE = "runtime.last-good.json"
 FIELDS = ("claude", "model", "budget", "timeout", "poll", "retry", "daily_limit", "limit_notify", "limit_allow")
 METADATA = ("version", "written_by", "request_id", "written_at")
+# E4 (Ledgerline): optional settings. A config without them stays valid and keeps its digest; readers use
+# setting(). stream_output false restores the pre-E4 `--output-format json` session path exactly (Codex C1).
+OPTIONAL = {"stream_output": True, "runs_keep_days": 30.0, "runs_max_mb": 200.0}
+OPTIONAL_BOUNDS = {"runs_keep_days": (1.0, 3650.0), "runs_max_mb": (1.0, 100000.0)}
+
+
+def setting(config, name):
+    """An optional setting's value in ``config``, or its default."""
+    value = (config or {}).get(name) if isinstance(config, dict) else None
+    return OPTIONAL[name] if value is None else value
+
+
+def _optional(name, value):
+    if name == "stream_output":
+        if not isinstance(value, bool):
+            raise ValueError("stream_output must be true or false.")
+        return value
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        raise ValueError("%s must be a finite number." % name)
+    low, high = OPTIONAL_BOUNDS[name]
+    if value < low or value > high:
+        raise ValueError("%s must be at least %s and at most %s." % (name, low, high))
+    return float(value)
+
+
+def _present(config):
+    """The settings of ``config``: every FIELDS entry plus the optional ones it names."""
+    names = list(FIELDS) + [name for name in OPTIONAL if name in config]
+    return {name: config[name] for name in names}
 MODEL_PATTERN = re.compile(r"claude-[a-z0-9.-]{1,57}\Z")
 RECIPIENT_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}\Z")
 BOUNDS = {"budget": (0.0, 100.0, False), "timeout": (60.0, 3600.0, True), "poll": (0.5, 60.0, True),
@@ -46,7 +75,7 @@ def validate(config, allowed_models=None, allowed_claude=None):
     """
     if not isinstance(config, dict):
         raise ValueError("Runtime config must be a JSON object.")
-    unknown = set(config) - set(FIELDS) - set(METADATA)
+    unknown = set(config) - set(FIELDS) - set(OPTIONAL) - set(METADATA)
     if unknown:
         raise ValueError("Unsupported runtime fields: %s." % ", ".join(sorted(unknown)))
     missing = [name for name in FIELDS if name not in config]
@@ -82,19 +111,22 @@ def validate(config, allowed_models=None, allowed_claude=None):
             or any(not isinstance(item, str) or not RECIPIENT_PATTERN.fullmatch(item) for item in allow)):
         raise ValueError("limit_allow must be a list of at most %d sender IDs." % MAX_ALLOW)
     result["limit_allow"] = sorted(set(allow))
+    for name in OPTIONAL:
+        if name in config:
+            result[name] = _optional(name, config[name])
     return result
 
 
 def digest(config):
     """Stable sha256 over the settings only (metadata excluded)."""
-    settings = {name: config[name] for name in FIELDS}
+    settings = _present(config)
     return hashlib.sha256(json.dumps(settings, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def write_atomic(path, config, **metadata):
     """Write a private JSON file with tmp + fsync + replace. Returns the settings digest."""
     path = Path(path)
-    value = {name: config[name] for name in FIELDS}
+    value = _present(config)
     value.update(version=SCHEMA, **{k: v for k, v in metadata.items() if k in METADATA and v is not None})
     data = json.dumps(value, sort_keys=True, indent=2).encode() + b"\n"
     descriptor, temporary = tempfile.mkstemp(prefix="." + path.name + ".", suffix=".tmp", dir=str(path.parent))
@@ -192,9 +224,10 @@ def parse_settings(settings):
         return {}
     if not isinstance(settings, dict):
         raise ValueError("settings must be an object.")
-    unknown = set(settings) - set(FIELDS)
+    unknown = set(settings) - set(FIELDS) - set(OPTIONAL)
     if unknown:
-        raise ValueError("Unsupported runtime settings: %s. Allowed: %s." % (", ".join(sorted(unknown)), ", ".join(FIELDS)))
+        raise ValueError("Unsupported runtime settings: %s. Allowed: %s." % (", ".join(sorted(unknown)),
+                                                                               ", ".join(FIELDS + tuple(OPTIONAL))))
     result = {}
     for name, value in settings.items():
         if name in NUMERIC:
@@ -222,6 +255,16 @@ def parse_assignments(pairs):
             settings[name] = [item.strip() for item in value.split(",") if item.strip()]
         elif name == "limit_notify":
             settings[name] = None if value.strip().lower() in ("", "none", "null") else value.strip()
+        elif name == "stream_output":
+            flag = value.strip().lower()
+            if flag not in ("true", "false"):
+                raise ValueError("stream_output must be true or false.")
+            settings[name] = flag == "true"
+        elif name in OPTIONAL:
+            try:
+                settings[name] = float(value)
+            except ValueError:
+                raise ValueError("%s must be a number." % name)
         else:
             settings[name] = value
     return parse_settings(settings)
@@ -249,7 +292,7 @@ def check_self_service(settings, effective, baseline):
 
 
 def merge(effective, settings):
-    merged = {name: effective[name] for name in FIELDS}
+    merged = _present(effective)
     merged.update(settings)
     return merged
 
@@ -495,7 +538,7 @@ class Controller:
             good, source = validate(dict(self.baseline)), "baseline"
         revert = dict(id="runtime-revert-%s" % record["id"][len("runtime-"):], status="requested", origin="revert",
                       requested_by="worker", run_id=None, reason="revert after failed probation of %s" % record["id"],
-                      settings={name: good[name] for name in FIELDS}, proposed=good, proposed_sha=digest(good),
+                      settings=_present(good), proposed=good, proposed_sha=digest(good),
                       revert=True, created_at=_now())
         # Revert the file at once: even if the restart cannot run, the next start loads good settings.
         write_atomic(self.home / CONFIG_FILE, good, written_by="revert", request_id=revert["id"], written_at=_now())
