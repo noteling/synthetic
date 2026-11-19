@@ -430,6 +430,22 @@ class OverviewTests(BoundaryTests):
         self.assertIn("Standing direction", direction)
         self.assertNotIn("## Lessons", direction)
 
+    def test_board_open_work_and_view_put_higher_priority_first(self):
+        # rowan/priority-order (Vesper #61 n1): the engine's order, higher priority first, a missing one last;
+        # equal priorities keep log order (older projection first). Priority 0 is a real priority, not "missing".
+        for title, pri in (("Low one", 1), ("No pri", None), ("High three", 3), ("Zero pri", 0), ("Also three", 3)):
+            body = {"work_id": "work-" + title[0].lower() * 31 + title[-1], "title": title, "status": "ready"}
+            if pri is not None:  # a missing priority is an absent key (the log refuses null)
+                body["priority"] = pri
+            self.project.append([{"kind": "backlog", "body": body}], author=VESPER, run="run-p")
+        want = ["High three", "Also three", "Low one", "Zero pri", "No pri"]
+        order = lambda page: sorted(want, key=page.index)
+        view = self.project.view()
+        for where, page in (("board", self.get("/p/synthetics/board")[1]), ("open work", self.get("/p/synthetics/work")[1]),
+                            ("project view", view[view.index("## Board backlog"):])):
+            with self.subTest(where):
+                self.assertEqual(order(page), want)
+
     def test_home_heading_and_home_line_appear_once(self):
         for path, name in (("/e/vesper", "Vesper"), ("/e/manager", "Codex")):
             page = self.get(path)[1]

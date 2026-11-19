@@ -14,6 +14,14 @@ EXCERPT = 256  # bytes of a cited source shown under an intent (r6 §3.3 quote p
 TEXT = 600     # bytes of a lesson statement / applies_when / uncertainty / claim shown
 
 
+def priority_rank(value) -> tuple:
+    """Sort key for a work priority in the engine's order (design.md; store.work_list sorts by -priority): higher
+    priority first, a missing or non-integer priority last."""
+    if isinstance(value, int) and not isinstance(value, bool):
+        return (0, -value)
+    return (1, 0)
+
+
 def _cut(text, limit: int) -> str:
     data = " ".join(str(text or "").split()).encode("utf-8")
     if len(data) <= limit:
@@ -174,7 +182,7 @@ def render(entries: list[dict], project: str, source_bytes: Callable[[str], byte
     w("## Board backlog (open)")
     w("")
     rows = [r for r in state["backlog"].values() if r.get("status") not in ("done", "cancelled")]
-    rows.sort(key=lambda r: (r.get("priority") if isinstance(r.get("priority"), int) else 99, r["seq"]))
+    rows.sort(key=lambda r: (priority_rank(r.get("priority")), r["seq"]))
     for r in rows:
         line = f"- {_md(_cut(r.get('title'), 160))} ({r['owner']}, {r.get('status')})"
         if r.get("blocked_by"):
