@@ -323,6 +323,23 @@ def diagnose(home, label=None, compare=None, key_files=(), launchd=_launchd_pid,
         if override:
             report["limit_override"] = override
 
+        # RTN P1 routines: discipline flags (David's revisit trigger) and the manager route (E2)
+        from . import routines
+        works = [w for w in _all(db, "works") if routines.is_routine(w)]
+        if works:
+            running = any(r.get("status") == "running" for r in runs)
+            flagged = routines.flags(works, now, running)
+            report["routines"] = {"open": sum(1 for w in works if w.get("status") in ("ready", "waiting")),
+                                  "flags": [f["code"] for f in flagged]}
+            for flag in flagged:
+                detail = flag.get("detail") or ("%(total)d all time, %(last_7_days)d in the last 7 days" % flag)
+                add(flag["severity"], flag["code"], "%s %s: %s" % (flag["kind"], flag["work_id"], detail))
+            route = routines.route(routines.configured(home), None, (identities[0] if identities else {}).get("id"),
+                                   (cfg or {}).get("default_human"))
+            report["routines"]["route"] = route
+            if not route["resolved"] or route.get("reason"):
+                add("warning", "routine_no_manager", route.get("reason"))
+
         if compare:
             try:
                 legacy = load_legacy(compare)

@@ -143,6 +143,14 @@ fairness guarantee yet.
   opts out; `recipient_work_id` is never used. The default never refuses a send: unpublished work tags nothing,
   and when P does not exist or the sender cannot write P the message goes untagged and the tool result's
   `project_default` (not stored) says `applied: false` with `reason` `unknown-project` or `no-write-grant`.
+- Routines (RTN P1, `docs/routines.md`): a routine is an ordinary work record with a store-written `routine` tag
+  (`hourly-check`, `team-review`; `dream` in P2), seeded idempotently by the owner-only `routine seed`. The clock
+  fires it like any waiting work; every snapshot's `routines_due` lists routines fired, quarantined or due within
+  15 min with a ready-made `rearm_wake_at` (anchor + k·every, no drift) and the kind's guidance
+  (`prompts/routines.md`). The only proof of review is MCP `routine_rearm`, which stores the review and re-arms in
+  one transaction; `work_put` cannot change a routine's status or wake_at, and recent activity never suppresses a
+  due routine. A captured routine still ready at run end (finished, failed or interrupted) is quarantined: out of
+  `runnable_work`, a permanent failure entry, flagged in doctor and on Lookout. No scheduler.
 - Lookout (VIS P1, `docs/lookout.md`): `synthetics web` serves a read-only page on 127.0.0.1 from shared records
   only: project and company `log.jsonl`, launchd, `runtime.state.json`, the pid in `worker.lock`, and one engine-written
   export per home, `<home>/shared/status.json` (session state, work titles and waiting_for, Docket, run id/status/cost;

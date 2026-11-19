@@ -20,6 +20,9 @@ Fields (v1; add, never rename):
            (VIS G8: the newest Store.STUCK_ITEMS stuck items, as in the employee's snapshot; never a body)
   glances [{id, run_id, at, ok, exit, status, counts, find, browser}]   (RW-1, newest 5; already whitelisted by
            glance.py: counts and find summary only, never page text, hit labels or frames)
+  works[].routine {kind, every_minutes, last_fired_at, last_rearmed_at, quarantined, failures}   (RTN P1, routine
+           works only; never the review text)
+  routine_flags [{code, severity, work_id, kind, detail?, total?, last_7_days?}]   (RTN P1, routines.flags)
 """
 
 from __future__ import annotations
@@ -29,7 +32,7 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import docket, glance
+from . import docket, glance, routines
 
 VERSION = 1
 RUNS = 10
@@ -50,6 +53,16 @@ def _pause(value):
     return {k: value[k] for k in PAUSE_KEYS if k in value}
 
 
+def _routine(work):
+    """RTN P1: routine works carry their tag summary (never the review text)."""
+    r = work.get("routine")
+    if not isinstance(r, dict):
+        return {}
+    return {"routine": dict(kind=r.get("kind"), every_minutes=r.get("every_minutes"),
+                            last_fired_at=r.get("last_fired_at"), last_rearmed_at=r.get("last_rearmed_at"),
+                            quarantined=bool(r.get("quarantine")), failures=len(r.get("failures") or []))}
+
+
 def build(store, paused=None, now=None):
     now = now or datetime.now(timezone.utc)
     identity = store.identity()
@@ -63,7 +76,8 @@ def build(store, paused=None, now=None):
                           priority=work.get("priority"), waiting_for=work.get("waiting_for") or "",
                           wake_at=work.get("wake_at"),
                           waiting_question_ids=list(work.get("waiting_question_ids") or []),
-                          published=work.get("publish") or None, updated_at=work.get("updated_at")))
+                          published=work.get("publish") or None, updated_at=work.get("updated_at"),
+                          **_routine(work)))
     try:
         dock, dock_error = docket.build(store, now=now), None
     except Exception as exc:  # noqa: BLE001 - e.g. no default_human; the rest of the export still matters
@@ -95,7 +109,7 @@ def build(store, paused=None, now=None):
         works=works, docket=dock, docket_error=dock_error, questions_open=questions, runs=run_rows,
         outbox_stuck=dict(count=stuck.get("count", 0), older_than_48h=stuck.get("older_than_48h", 0),
                           items=[{k: item.get(k) for k in STUCK_KEYS} for item in stuck.get("items") or []]),
-        glances=glances)
+        glances=glances, routine_flags=routines.flags(store.work_list(), now, active is not None))
 
 
 def read(home):

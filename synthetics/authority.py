@@ -71,6 +71,10 @@ OWNER_ONLY = {
     "work --override": "evidence integrity: it closes work without citable evidence",
     "history import": "fabricated provenance: it writes events with chosen senders into a home's record",
     "init": "defines who is human in a new home (humans.json)",
+    "routine seed": "provisioning (RTN, docs/routines.md); a session re-arms its own routine with routine_rearm",
+    "routine cadence": "provisioning (RTN, docs/routines.md); a session re-arms its own routine with routine_rearm",
+    "routine restore": "provisioning (RTN, docs/routines.md); a session clears its own quarantine with routine_rearm",
+    "routine teardown": "provisioning (RTN, docs/routines.md); a session cannot close a routine",
     "limit raise": "a --date other than today: not yet implemented under delegation (D7). Above the effective "
                    "limit.ceiling or 0 without allow_disable is the team policy refusal exceeds_ceiling (D13, D18-r2)",
     "adapter install": "without adapter.install and a --review listed in `policy adapter.reviews`, or with an "

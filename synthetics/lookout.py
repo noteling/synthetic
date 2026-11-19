@@ -462,6 +462,28 @@ def team_page(root, agents=None, now=None):
                                       _v(w.get("waiting_for")), _v(w.get("published")), _rel(w.get("updated_at"), now),
                                       _v(w.get("id"))))
             out.append("</table>")
+        rtn = [w for w in works if isinstance(w.get("routine"), dict)]
+        rflags = [f for f in status.get("routine_flags") or [] if isinstance(f, dict)]
+        if rtn or rflags:  # RTN P1: routines and their discipline flags (David's revisit trigger)
+            out.append("<p><b>Routines</b></p>")
+            if rtn:
+                out.append("<table><tr><th>kind</th><th>every</th><th>status</th><th>next</th><th>last fired</th>"
+                           "<th>last re-armed</th><th>failures</th></tr>")
+                for w in rtn:
+                    r = w["routine"]
+                    state = "<span class='bad'>quarantined</span>" if r.get("quarantined") else _v(w.get("status"))
+                    out.append("<tr><td>%s</td><td>%s min</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
+                               % (_v(r.get("kind")), _v(r.get("every_minutes")), state, _rel(w.get("wake_at"), now),
+                                  _rel(r.get("last_fired_at"), now), _rel(r.get("last_rearmed_at"), now),
+                                  _v(r.get("failures"))))
+                out.append("</table>")
+            if rflags:
+                out.append("<ul>" + "".join(
+                    "<li class='%s'>%s %s: %s</li>" % ("bad" if f.get("severity") == "error" else "muted",
+                                                      _v(f.get("code")), _v(f.get("kind")),
+                                                      _v(f.get("detail") or "%s all time, %s in 7 days"
+                                                         % (f.get("total"), f.get("last_7_days"))))
+                    for f in rflags) + "</ul>")
         dock = status.get("docket")
         if dock:
             out.append("<p><b>Waiting on %s</b> (%d open)</p>" % (E(_name(people, dock.get("person"))), dock.get("count", 0)))

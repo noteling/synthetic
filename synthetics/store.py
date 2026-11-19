@@ -876,6 +876,14 @@ class Store:
                 return self._get("works", previous)
             now = timestamp()
             old = self._get("works", id) if id is not None else None
+            if old and isinstance(old.get("routine"), dict):
+                # RTN P1: a routine's status and wake_at change only through routine_rearm (the proof of review)
+                # or the `routine` CLI (restore/teardown); its tag is never writable here.
+                changed = [name for name in ("status", "wake_at") if name in supplied and supplied[name] != old.get(name)]
+                if changed:
+                    raise ValueError("%s is a %s routine: %s cannot change through work_put. Re-arm it with routine_rearm "
+                                     "(after doing its review); close or restore it with `synthetics routine teardown|restore`."
+                                     % (old["id"], old["routine"].get("kind"), " and ".join(changed)))
             record = old.copy() if old else dict(id="work-" + uuid.uuid4().hex, title="", description="", status="ready",
                         waiting_for="", waiting_question_id=None, waiting_question_ids=[], wake_at=None, priority=0, note="", created_at=now)
             record.update(supplied)
@@ -1025,7 +1033,8 @@ class Store:
         return sorted(items, key=lambda item: (-item["priority"], item["updated_at"], item["id"]))
 
     def runnable_work(self):
-        return self.work_list("ready")
+        # RTN P1 (D1): a quarantined routine never starts a session; only routine_rearm or `routine restore` clears it.
+        return [work for work in self.work_list("ready") if not (work.get("routine") or {}).get("quarantine")]
 
     def _send(self, to, body, work_id, key, question, thread=None, in_reply_to=None, recipient_work_id=None,
               project=None, work_ids=None, relays=None):
@@ -2086,6 +2095,20 @@ class Store:
         rows = self.db.execute("SELECT data FROM events WHERE processed_run IS NULL ORDER BY seq LIMIT ?", (limit,))
         return [json.loads(row["data"]) for row in rows]
 
+    def admission_held(self, event):
+        """RTN F1: a work_due input for a routine that is quarantined or no longer ready never starts a session.
+        It stays pending (processed_run NULL) as evidence; only routine_rearm consumes it."""
+        if event.get("kind") != "work_due" or not event.get("work_id"):
+            return False
+        work = self._find("works", event["work_id"])
+        if not work or not isinstance(work.get("routine"), dict):
+            return False
+        return bool(work["routine"].get("quarantine")) or work["status"] != "ready"
+
+    def event_admissible(self, limit=50):
+        """Pending inputs that may start or join a session (event_pending minus admission_held)."""
+        return self.event_pending_select(lambda e: not self.admission_held(e), limit=limit)
+
     def event_pending_count(self):
         """How many inputs are pending in total (event_pending returns at most its limit)."""
         return self.db.execute("SELECT COUNT(*) AS n FROM events WHERE processed_run IS NULL").fetchone()["n"]
@@ -2272,10 +2295,273 @@ class Store:
                     continue
                 self._event(dict(sender="clock", body="Scheduled work is due: " + work["title"], kind="work_due", source="clock",
                                  external_id=work["id"] + ":" + work["wake_at"], work_id=work["id"], thread=None, reply_to=None))
+                if isinstance(work.get("routine"), dict):
+                    # RTN P1: diagnostics only (never the dream window, D2). anchor_at stays the reviewed cycle.
+                    work["routine"] = dict(work["routine"], previous_fired_at=work["routine"].get("last_fired_at"),
+                                           last_fired_at=now)
                 work.update(status="ready", waiting_for="", waiting_question_id=None, waiting_question_ids=[], wake_at=None, updated_at=now)
                 self._save("works", work, "work.awakened")
                 count += 1
         return count
+
+    # -- RTN P1 routines (docs/routines.md) -----------------------------------------------------------
+    # A routine is a work record with work["routine"]. Only these methods and due_events write that field.
+
+    def _routines(self, kind=None):
+        return [w for w in self._all("works") if isinstance(w.get("routine"), dict)
+                and (kind is None or w["routine"].get("kind") == kind)]
+
+    def _routine_open(self, kind):
+        found = [w for w in self._routines(kind) if w["status"] in ("ready", "waiting")]
+        if not found:
+            raise ValueError("No open %s routine in this home (seed it with `synthetics routine seed`)." % kind)
+        return found[-1]
+
+    def _routine_save(self, work, routine, now, action, **fields):
+        work.update(fields, routine=routine, updated_at=now)
+        if work.get("publish") or work.get("published"):
+            self.db.execute("INSERT INTO capture_meta(k,v) VALUES ('publish_dirty','1') "
+                            "ON CONFLICT(k) DO UPDATE SET v='1'")
+        return self._save("works", work, action)
+
+    @staticmethod
+    def _routine_waiting(routine, wake):
+        return dict(status="waiting", wake_at=wake, waiting_question_id=None, waiting_question_ids=[],
+                    waiting_for="routine %s: next review at %s" % (routine["kind"], wake))
+
+    def _operator_only(self, what):
+        if self.run_id is not None:
+            raise ValueError("%s is a CLI action (owner-only, docs/routines.md); inside a session re-arm with "
+                             "routine_rearm." % what)
+
+    def routine_route(self):
+        """E2: where this home's routine reports go (runtime limit_notify + roster), or why nobody resolves."""
+        from . import routines
+        config = routines.configured(self.home)
+        from . import roster
+        try:
+            # F4: the OFFICIAL company people/alias fold, never this home's private self/views fold.
+            state = roster.company_state_for_home(self.home)
+        except Exception:  # noqa: BLE001 - no roster means no canonicalisation, not no manager
+            state = None
+        try:
+            default = capture.humans(self).get("default_human")
+        except (OSError, ValueError):
+            default = None
+        return routines.route(config, state, self.identity()["id"], default)
+
+    def routine_seed(self, kinds, every=None, dream_at=None, now=None, first=None):
+        """Idempotent: a kind counts as existing if any non-cancelled routine work carries it (done included,
+        never touched; restore it instead). Returns created, existing and the manager route (E2)."""
+        from . import routines
+        self._operator_only("routine seed")
+        every = dict(every or {})
+        kinds = list(dict.fromkeys(kinds or []))
+        if not kinds:
+            raise ValueError("Name at least one routine kind (%s)." % ", ".join(routines.KINDS))
+        for kind in list(kinds) + list(every):
+            routines.check_every(kind, every.get(kind, routines.DEFAULT_EVERY.get(kind, 60)))
+        moment = routines.parse(timestamp(now))
+        first = {kind: routines.parse_first(value, moment, every.get(kind, routines.DEFAULT_EVERY.get(kind, 60)), kind)
+                 for kind, value in (first or {}).items()}
+        created, existing = [], []
+        with self._tx():
+            stamp = timestamp(moment)
+            for kind in kinds:
+                found = [w for w in self._routines(kind) if w["status"] != "cancelled"]
+                if found:
+                    existing.append({"kind": kind, "work_id": found[-1]["id"], "status": found[-1]["status"],
+                                     **({"first_ignored": True} if kind in first else {})})
+                    continue
+                minutes = every.get(kind, routines.DEFAULT_EVERY[kind])
+                regular = routines.first_wake(kind, minutes, moment, dream_at or routines.DEFAULT_DREAM_AT)
+                wake, anchor = timestamp(regular), timestamp(regular)
+                if kind in first:
+                    # G1: an explicit first wake sets wake_at only; the anchor is the grid point before the regular
+                    # first wake, so the first routine_rearm lands back on the regular grid (dream: next --dream-at).
+                    wake = timestamp(first[kind])
+                    anchor = timestamp(regular - routines.timedelta(minutes=minutes))
+                routine = dict(v=1, kind=kind, every_minutes=minutes, anchor_at=anchor, seeded_at=stamp,
+                               last_fired_at=None, previous_fired_at=None, last_rearmed_at=None, rearmed_by_run=None,
+                               last_review=None, quarantine=None, failures=[], covered_through=None, coverage=None)
+                work = dict(id="work-" + uuid.uuid4().hex, title="Routine: %s" % kind,
+                            description="RTN routine (docs/routines.md). Guidance: prompts/routines.md ## %s. Fires "
+                                        "every %d min; re-arm only with routine_rearm after the review." % (kind, minutes),
+                            priority=0, note="", created_at=stamp)
+                self._routine_save(work, routine, stamp, "routine.seeded", **self._routine_waiting(routine, wake))
+                created.append({"kind": kind, "work_id": work["id"], "wake_at": wake, "every_minutes": minutes})
+        return {"created": created, "existing": existing, "route": self.routine_route()}
+
+    def routine_cadence(self, kind, minutes):
+        from . import routines
+        self._operator_only("routine cadence")
+        routines.check_every(kind, minutes)
+        with self._tx():
+            work = self._routine_open(kind)
+            routine = dict(work["routine"], every_minutes=minutes)
+            return self._routine_save(work, routine, timestamp(), "routine.cadence")
+
+    def routine_restore(self, kind, now=None):
+        """Clear quarantine (failures stay) or reopen a closed routine, waiting at the next anchor target."""
+        from . import routines
+        self._operator_only("routine restore")
+        if kind not in routines.KINDS:
+            raise ValueError("Unknown routine kind %r." % kind)
+        moment = routines.parse(timestamp(now))
+        with self._tx():
+            found = [w for w in self._routines(kind) if not w["routine"].get("torn_down_at")]
+            if not found:
+                raise ValueError("No %s routine to restore (a torn-down routine is seeded again)." % kind)
+            work = found[-1]
+            stamp = timestamp(moment)
+            wake = timestamp(routines.rearm_target(work["routine"], moment))
+            routine = dict(work["routine"], anchor_at=wake, quarantine=None, restored_at=stamp)
+            return self._routine_save(work, routine, stamp, "routine.restored", **self._routine_waiting(routine, wake))
+
+    def routine_teardown(self, kinds=None, reason="routine teardown"):
+        """Cancel open routines (all when kinds is None) with a reason; no routine_closed flag afterwards."""
+        self._operator_only("routine teardown")
+        reason = _text(reason, "reason")
+        done = []
+        with self._tx():
+            stamp = timestamp()
+            for work in self._routines():
+                if work["status"] not in ("ready", "waiting") or (kinds and work["routine"]["kind"] not in kinds):
+                    continue
+                routine = dict(work["routine"], torn_down_at=stamp)
+                self._routine_save(work, routine, stamp, "routine.torn_down", status="cancelled", wake_at=None,
+                                   waiting_for="", waiting_question_id=None, waiting_question_ids=[],
+                                   cancellation=dict(reason=reason, recorded_at=stamp, recorded_by_run=None))
+                done.append({"kind": routine["kind"], "work_id": work["id"]})
+        return {"torn_down": done}
+
+    def routine_list(self, now=None):
+        from . import routines
+        moment = routines.parse(timestamp(now))
+        running = any(r["status"] == "running" for r in self._all("runs"))
+        works = self._routines()
+        rows = [dict(work_id=w["id"], kind=w["routine"]["kind"], status=w["status"], wake_at=w.get("wake_at"),
+                     every_minutes=w["routine"].get("every_minutes"), last_fired_at=w["routine"].get("last_fired_at"),
+                     last_rearmed_at=w["routine"].get("last_rearmed_at"), rearmed_by_run=w["routine"].get("rearmed_by_run"),
+                     quarantined=bool(w["routine"].get("quarantine")), failures=len(w["routine"].get("failures") or []),
+                     covered_through=w["routine"].get("covered_through")) for w in works]
+        return {"routines": rows, "flags": routines.flags(works, moment, running), "route": self.routine_route()}
+
+    def routine_rearm(self, work_id, review, cycle=None, covered_through=None, omissions=None):
+        """The only proof of a routine review (C2): stores the review and re-arms at the next anchor target in one
+        transaction. Accepted only while routines_due lists the routine (fired, quarantined or due within 15 min).
+        Dream: covered_through T needs previous covered_through <= T <= this run's start (the evidence cutoff, E1)
+        and T <= the earliest omission `from`; omitted T leaves the checkpoint where it is (D2)."""
+        from . import routines
+        if self.run_id is None:
+            raise ValueError("routine_rearm is a session tool (its run is the proof of review); operators use "
+                             "`synthetics routine restore`.")
+        work_id = self._resolve(work_id, "works")
+        review = _text(review, "review")
+        if len(review) > routines.REVIEW_MAX:
+            raise ValueError("review is at most %d characters: goals, blockers and next steps checked, or "
+                             "\"no change\" and why." % routines.REVIEW_MAX)
+        omitted = routines.check_omissions(omissions)
+        with self._tx():
+            work = self._get("works", work_id)
+            routine = work.get("routine")
+            if not isinstance(routine, dict):
+                raise ValueError("%s is not a routine; use work_put." % work_id)
+            if work["status"] in ("done", "cancelled"):
+                raise ValueError("%s routine is %s; the operator restores it with `synthetics routine restore %s`."
+                                 % (routine["kind"], work["status"], routine["kind"]))
+            stamp = timestamp()
+            moment = routines.parse(stamp)
+            # Addendum (a): compare-and-set on the cycle routines_due showed (anchor_at). A repeat or stale call
+            # names a cycle that an earlier re-arm already closed and is refused, never applied twice.
+            if not isinstance(cycle, str) or not cycle.strip():
+                raise ValueError("cycle is required: pass routines_due[].cycle for this routine.")
+            if timestamp(cycle) != routine.get("anchor_at"):
+                last = routine.get("last_review") or {}
+                raise ValueError("stale re-arm: cycle %s was already closed (re-armed by run %s at %s); nothing to "
+                                 "do for it." % (timestamp(cycle), last.get("run") or routine.get("rearmed_by_run"),
+                                                 routine.get("last_rearmed_at")))
+            state = routines.due_state(work, moment)
+            if state is None:
+                raise ValueError("%s routine is not due (next fire %s). routine_rearm is accepted only while "
+                                 "routines_due lists it: fired, quarantined, or due within %d min."
+                                 % (routine["kind"], work.get("wake_at"), routines.FOLD_IN_MINUTES))
+            run = self._get("runs", self.run_id)
+            routine = dict(routine)
+            if covered_through is not None or omitted:
+                if routine["kind"] != "dream":
+                    raise ValueError("covered_through and omissions belong to the dream routine only.")
+                cutoff = run["started_at"]
+                through = routine.get("covered_through")
+                if covered_through is not None:
+                    through = timestamp(covered_through)
+                    previous = routine.get("covered_through")
+                    if through > cutoff:
+                        raise ValueError("covered_through %s is after this run's evidence cutoff %s (its start); "
+                                         "a dream covers only material that existed when it began." % (through, cutoff))
+                    if previous and through < previous:
+                        raise ValueError("covered_through %s is before the previous checkpoint %s; it never moves "
+                                         "back." % (through, previous))
+                    if any("from" not in o for o in omitted) and through != previous:
+                        raise ValueError("an omission has no known earliest unread time, so covered_through cannot "
+                                         "advance past the previous checkpoint %s (F3)." % previous)
+                    earliest = min((o["from"] for o in omitted if "from" in o), default=None)
+                    if earliest is not None and through > timestamp(earliest):
+                        raise ValueError("covered_through %s passes unread material from %s (an omission); "
+                                         "advance it at most to %s." % (through, timestamp(earliest), timestamp(earliest)))
+                    routine["covered_through"] = through
+                routine["coverage"] = dict(run=self.run_id, at=stamp, cutoff=cutoff, through=through,
+                                           advanced=covered_through is not None, omissions=omitted)
+            wake = timestamp(routines.rearm_target(routine, moment))
+            routine.update(anchor_at=wake, last_rearmed_at=stamp, rearmed_by_run=self.run_id, quarantine=None,
+                           last_review=dict(run=self.run_id, at=stamp, state=state, text=review))
+            self.db.execute("UPDATE events SET processed_run=? WHERE processed_run IS NULL AND id IN (SELECT id FROM "
+                            "events WHERE json_extract(data,'$.kind')='work_due' AND json_extract(data,'$.work_id')=?)",
+                            (self.run_id, work_id))
+            return self._routine_save(work, routine, stamp, "routine.rearmed", **self._routine_waiting(routine, wake))
+
+    def _quarantine_left_ready(self, run, how):
+        """D1: inside the run-end transaction, a routine this run captured (its work_due event) that is still
+        ready is quarantined: no wake, out of runnable_work, a failure entry that is never removed."""
+        captured = {e.get("work_id") for e in run.get("events") or [] if e.get("kind") == "work_due" and e.get("work_id")}
+        stamp = timestamp()
+        for work_id in sorted(captured):
+            work = self._find("works", work_id)
+            if not work or not isinstance(work.get("routine"), dict) or work["status"] != "ready":
+                continue
+            reason = "left ready when the run %s" % how
+            entry = dict(run=run["id"], at=stamp, reason=reason)
+            routine = dict(work["routine"], quarantine=entry,
+                           failures=list(work["routine"].get("failures") or []) + [entry])
+            self._routine_save(work, routine, stamp, "routine.quarantined")
+
+    def routines_due(self, run=None):
+        """Every snapshot (A2-C2): routines fired, quarantined or due within 15 min, each with its ready-made
+        re-arm target and guidance. Absorbing one means doing its review and calling routine_rearm."""
+        from . import routines
+        moment = routines.parse(timestamp())
+        out, route = [], None
+        for work in self._routines():
+            state = routines.due_state(work, moment)
+            if state is None:
+                continue
+            r = work["routine"]
+            if route is None:
+                route = self.routine_route()
+            item = dict(work_id=work["id"], kind=r["kind"], state=state, cycle=r.get("anchor_at"),
+                        every_minutes=r.get("every_minutes"),
+                        rearm_wake_at=timestamp(routines.rearm_target(r, moment)), wake_at=work.get("wake_at"),
+                        last_fired_at=r.get("last_fired_at"), previous_fired_at=r.get("previous_fired_at"),
+                        report_to=route.get("report_to"), guidance=routines.guidance(r["kind"]))
+            if not route.get("resolved") or route.get("reason"):
+                item["route_problem"] = route.get("reason")
+            if state == "quarantined":
+                item.update(quarantine=r["quarantine"], failures=len(r.get("failures") or []))
+            if r["kind"] == "dream":
+                item.update(covered_through=r.get("covered_through"),
+                            evidence_cutoff=(run or {}).get("started_at") or timestamp(moment))
+            out.append(item)
+        return out
 
     # -- M19 runtime requests ------------------------------------------------
     # The model only records a request; the engine carries it out at an idle point.
@@ -2436,7 +2722,7 @@ class Store:
                                  % (held.get("op"), held.get("expires_at")))
             now = timestamp()
             if event_ids is None:
-                events = self.event_pending()
+                events = self.event_admissible()
             else:
                 # Exactly the named events that are still pending, in seq order, wherever they sit in the queue
                 # (issue #6: not only those inside the default 50-event window).
@@ -2448,6 +2734,7 @@ class Store:
                         "SELECT seq, data FROM events WHERE processed_run IS NULL AND id IN (%s)"
                         % ",".join("?" * len(chunk)), chunk).fetchall())
                 events = [json.loads(row["data"]) for row in sorted(events, key=lambda row: row["seq"])]
+                events = [e for e in events if not self.admission_held(e)]
             history_sequence = self.db.execute("SELECT COALESCE(MAX(seq),0) AS seq FROM audit").fetchone()["seq"]
             record = dict(id="run-" + uuid.uuid4().hex, status="running", started_at=now, created_at=now,
                           event_ids=[e["id"] for e in events], events=events, history_sequence=history_sequence,
@@ -2465,6 +2752,7 @@ class Store:
             run.update(status="finished", summary=summary, cost=cost, finished_at=timestamp())
             for event_id in run["event_ids"]:
                 self.db.execute("UPDATE events SET processed_run=? WHERE id=? AND processed_run IS NULL", (run_id, event_id))
+            self._quarantine_left_ready(run, "finished")
             return self._save("runs", run, "run.finished")
 
     def run_fail(self, run_id, error, cost=None):
@@ -2476,6 +2764,7 @@ class Store:
             if run["status"] != "running":
                 raise ValueError("Only an active run can fail.")
             run.update(status="failed", error=str(error), cost=cost, finished_at=timestamp())
+            self._quarantine_left_ready(run, "failed")
             return self._save("runs", run, "run.failed")
 
     def run_cost_backfill(self):
@@ -2538,6 +2827,7 @@ class Store:
                 if run["status"] == "running":
                     run.update(status="interrupted", error="Worker stopped before completing this run; inspect existing effects before retrying.",
                                finished_at=timestamp())
+                    self._quarantine_left_ready(run, "interrupted")
                     self._save("runs", run, "run.interrupted")
                     count += 1
         return count
@@ -2621,4 +2911,5 @@ class Store:
                     runtime=self.runtime_view(), outbox_stuck=self.outbox_stuck(), relay_owed=self.relay_owed(),
                     project_bindings=capture.binding_lines(self), project_capture=capture.capture_status(self), publish_failing=board.publish_failing(self),
                     project_uncovered=capture.uncovered_counts(self, capture.home_id(self)),
+                    routines_due=self.routines_due(run),
                     **self._board_section(run_id))

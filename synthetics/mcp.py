@@ -131,6 +131,15 @@ TOOLS = [
     tool("docket", "Read-only: your own open questions to one person (default: this home's default human), oldest first, with asked-age, delivery ack and age, and the works each blocks. text is a paste-ready block. Only your home's data.", {
         "person": text_property("Person ID, name or alias; default the home's default human."),
     }),
+    tool("routine_rearm", "Prove a routine's review and re-arm it (RTN, docs/routines.md). Call it only after actually doing the review its guidance in routines_due asks for: goals, blockers and next steps checked, or \"no change\" and why. One call stores the review and sets the routine waiting at its next anchor-based wake (routines_due shows rearm_wake_at). Accepted only while routines_due lists the routine (fired, quarantined, or due within 15 min). work_put cannot change a routine's status or wake_at. A routine still ready when your session ends is quarantined and counted as a discipline failure.", {
+        "work_id": text_property("The routine work ID from routines_due."),
+        "cycle": text_property("routines_due[].cycle for this routine, unchanged. A re-arm is compare-and-set on it: a repeat or stale call (the cycle was already closed) is refused, never applied twice."),
+        "review": text_property("What you reviewed and concluded (at most 2048 characters)."),
+        "covered_through": text_property("Dream only: the timestamp your review actually covered up to. At most this session's evidence_cutoff (its start) and never past an omission's from; omit it to leave the checkpoint unchanged."),
+        "omissions": {"type": "array", "description": "Dream only: what you did not read (a truncated, capped or since= retrieval that did not reach the cutoff). Each {reason, from?}; from = the timestamp of the earliest unread material.",
+                      "items": {"type": "object", "properties": {"reason": {"type": "string"}, "from": {"type": "string"}},
+                                "required": ["reason"]}},
+    }, ["work_id", "review", "cycle"]),
     tool("reminder_set", "Arrange a future wake-up for something you owe. Time must have an explicit timezone. Reminders survive restarts.", {
         "at": text_property(), "reason": text_property(), "work_id": text_property(), "key": KEY,
     }, ["at", "reason", "key"]),
@@ -146,7 +155,7 @@ from . import glance  # noqa: E402  (RW-1 Glance)
 
 TOOLS.extend(glance.TOOLS)
 METHODS = {entry["name"]: entry for entry in TOOLS}
-MUTATIONS = {"entity_put", "memory_put", "work_put", "question_ask", "question_resolve", "question_close", "question_relays", "message_send", "reminder_set",
+MUTATIONS = {"entity_put", "memory_put", "work_put", "question_ask", "question_resolve", "question_close", "question_relays", "message_send", "reminder_set", "routine_rearm",
              "runtime_restart"} | projecttools.MUTATIONS | rostertools.MUTATIONS | glance.MUTATIONS
 
 
@@ -204,7 +213,7 @@ def offered(home):
 
 
 # VIS C1: tools whose success rewrites <home>/shared/status.json.
-STATUS_TOOLS = frozenset({"work_put", "question_ask", "question_close", "question_resolve", "question_relays",
+STATUS_TOOLS = frozenset({"work_put", "routine_rearm", "question_ask", "question_close", "question_resolve", "question_relays",
                           "screen_glance"})  # RW-1: Lookout's Recent glances
 
 
