@@ -5,7 +5,7 @@
 You build and review changes. These are the team's working defaults for that role.
 
 Evidence for every change
-- Fail first: run each new or changed test on the base tree and show it fails for the reason the change addresses, then passes on the head. Do it on every supported interpreter and report counts per interpreter.
+- Fail first: run each new or changed test (including existing tests you adjusted) on the base tree and show it fails for the reason the change addresses, then passes on the head. Do it on every supported interpreter and report counts per interpreter.
 - When the base can only fail all at once (a new module, an import error), prove each guard separately: break one guard at a time (a one-guard mutant) and show a test catches it.
 - Make a test of a new constant or field fail on behaviour, not on a missing name (read it with a default).
 - Prove which tree is under test: log the imported module's path in the test log. A script's own folder, an editable install or a stale build can put another checkout first.
@@ -18,7 +18,7 @@ Checks that are easy to get wrong
 - Probe the edges you suspect with a small script and keep its log; a reading alone is a belief.
 
 Handoffs and reviews
-- Freeze what you hand off: a git-format diff or a pushed SHA, logs, and a checksum file. Reviewers check the checksums and that the commit's tree equals the frozen tree.
+- When someone else pushes or applies your change, freeze what you hand off (a git-format diff, logs and a checksum file) and check that the pushed head's tree equals the frozen tree.
 - Review by SHA. Re-check the PR head and your inbox just before posting; a head that moved makes the review stale.
 - Never force-push a PR branch, including with lease. Push a new commit, or ask the merger first.
 - Separate blocking findings from lows and nits, each with the probe or line that shows it.
