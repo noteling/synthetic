@@ -2135,17 +2135,43 @@ class Store:
                     out.append(view)
             return out
 
-    def channel_event_status(self, credential, event_id):
+    EVENT_LOOKUP_HIDDEN = "No event with that source and external_id was accepted through channel %s."
+
+    def channel_event_status(self, credential, event_id=None, source=None, external_id=None):
+        """Accepted vs processed for an event this channel delivered, by event ID or (#25 P2 D2(b)) by the
+        channel's own source + external_id. IDs and state only: question_id is the event's reply_to (the
+        question it answered), in_reply_to its generic reply metadata; never a body or sender (D2 condition).
+        A lookup is audited (channel.event_lookup, IDs only) and refused the same way whether the event is
+        missing or came through another channel."""
         if self.run_id is not None:
             raise ChannelError("in_session", "Channel commands are adapter/operator operations, not model tools.")
         channel = self._channel_by_key(credential)
+        by_lookup = event_id is None
+        if by_lookup:
+            if not (isinstance(source, str) and source.strip() and isinstance(external_id, str)
+                    and external_id.strip()):
+                raise ChannelError("bad_line", "give --event, or both --source and --external-id")
+            found = self.db.execute("SELECT record_id FROM idempotency WHERE namespace=? AND key=?",
+                                    ("feed:" + source, external_id)).fetchone()
+            event_id = found["record_id"] if found else None
+        elif source is not None or external_id is not None:
+            raise ChannelError("bad_line", "give --event, or both --source and --external-id, not both")
         row = self.db.execute("SELECT data, processed_run FROM events WHERE id=?",
-                              (_text(event_id, "event"),)).fetchone()
+                              (_text(event_id, "event") if event_id is not None else "",)).fetchone()
         event = json.loads(row["data"]) if row else None
-        if event is None or (event.get("auth") or {}).get("channel") != channel["id"]:
+        visible = event is not None and (event.get("auth") or {}).get("channel") == channel["id"]
+        if by_lookup:
+            with self._tx():
+                self._audit("channel.event_lookup", event["id"] if visible else "(not found)",
+                            dict(channel=channel["id"], source=source, external_id=external_id,
+                                 result="returned" if visible else "refused"))
+            if not visible:
+                raise ChannelError("not_routed", self.EVENT_LOOKUP_HIDDEN % channel["id"])
+        elif not visible:
             raise ChannelError("not_routed", "Event %s was not accepted through channel %s." % (event_id, channel["id"]))
         return dict(v=1, event_id=event["id"], state="processed" if row["processed_run"] else "accepted",
-                    run_id=row["processed_run"])
+                    run_id=row["processed_run"], question_id=event.get("reply_to"),
+                    in_reply_to=event.get("in_reply_to"))
 
     QUESTION_FULL_ID = re.compile(r"^question-[0-9a-f]{32}$")
     QUESTION_HIDDEN = "No open question for the human of this home with that ID is visible to this channel."

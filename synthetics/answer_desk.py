@@ -13,6 +13,11 @@ Shape (P0 sha 65915708, approved by Codex 2026-11-19 with D1=(b), D2, D3 and C1-
     also checks Origin, Sec-Fetch-Site and a per-form HMAC token.
   - Status (C2): submitted / employee read it / outcome, each from a record (inbound result, event-status,
     status.json), never from the HTTP response alone.
+  - P2 (P2.md sha 114e1ac1, approved by Codex with D1-D3): a "context, keep the question open" button (a plain
+    inbound with in_reply_to = the question, no question_id); a desk journal (answer-desk/submissions.json, IDs
+    and states only) so the same form sent again after a lost response reaches the idempotent inbound instead of
+    the open check; failures re-render the form with the human's own text; `event-status` gives the question ID
+    and finds an unconfirmed submit by its external_id.
 The desk never logs, caches or writes a question body, an answer, the key, a cookie or a code.
 """
 
@@ -52,6 +57,11 @@ QID = re.compile(r"^question-[0-9a-f]{32}$")
 EID = re.compile(r"^event-[0-9a-f]{32}$")
 NONCE = re.compile(r"^[0-9a-f]{32}$")
 SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+KINDS = ("answer", "context")
+JOURNAL_DAYS = 7
+JOURNAL_MAX = 200
+CONTRACT_TIMEOUT = 60
+FINAL_CODES = ("conflict", "invalid_state")  # the store's settled refusals; anything else may be sent again
 PACKAGE_ROOT = str(Path(__file__).resolve().parents[1])
 CSP = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"
 E = html.escape
@@ -198,6 +208,65 @@ def csrf(cookie, qid, nonce):
     return hmac.new(cookie.encode("ascii"), ("%s|%s" % (qid, nonce)).encode("ascii"), hashlib.sha256).hexdigest()
 
 
+# ---------------------------------------------------------------- the desk journal (P2 §3): IDs and states only
+
+JOURNAL_FIELDS = ("home", "question_id", "nonce", "kind", "sender", "thread", "work_ids", "state", "event_id",
+                  "error_code", "at")
+
+
+def _journal_path(root):
+    return state_dir(root) / "submissions.json"
+
+
+def _journal_read(root, now):
+    value = _read_private(_journal_path(root)) or {}
+    entries = [e for e in value.get("entries") or [] if isinstance(e, dict)]
+    fresh = [e for e in entries if isinstance(e.get("at"), (int, float)) and e["at"] > now - JOURNAL_DAYS * 86400]
+    return fresh[-JOURNAL_MAX:]
+
+
+def journal(root, now=None):
+    """All recent desk submissions (newest last). Never a body, cookie, code or token: only JOURNAL_FIELDS."""
+    with _locked(root):
+        return _journal_read(root, time.time() if now is None else now)
+
+
+def journal_find(root, home, qid, nonce):
+    for entry in reversed(journal(root)):
+        if (entry.get("home"), entry.get("question_id"), entry.get("nonce")) == (home, qid, nonce):
+            return entry
+    return None
+
+
+def journal_claim(root, home, qid, nonce, kind, sender, thread, work_ids=(), now=None):
+    """Record a first send as pending, or return the entry a concurrent send of the same form already made."""
+    now = time.time() if now is None else now
+    with _locked(root):
+        entries = _journal_read(root, now)
+        for entry in entries:
+            if (entry.get("home"), entry.get("question_id"), entry.get("nonce")) == (home, qid, nonce):
+                return entry
+        entry = dict(home=home, question_id=qid, nonce=nonce, kind=kind, sender=sender, thread=thread,
+                     work_ids=list(work_ids or []), state="pending", event_id=None, error_code=None, at=now)
+        entries.append(entry)
+        _write_private(_journal_path(root), dict(entries=entries[-JOURNAL_MAX:]))
+        return entry
+
+
+def journal_settle(root, home, qid, nonce, state, event_id=None, error_code=None, now=None):
+    now = time.time() if now is None else now
+    with _locked(root):
+        entries = _journal_read(root, now)
+        for entry in entries:
+            if (entry.get("home"), entry.get("question_id"), entry.get("nonce")) == (home, qid, nonce):
+                entry.update(state=state, event_id=event_id or entry.get("event_id"), error_code=error_code)
+        _write_private(_journal_path(root), dict(entries=entries))
+
+
+def external_id(qid, nonce):
+    return "desk:%s:%s" % (qid, nonce)
+
+
 # ---------------------------------------------------------------- the channel contract (never the Store)
 
 
@@ -212,9 +281,12 @@ def contract(home, key_file, command, *args, lines=None):
     env = dict(os.environ)  # keeps SYNTHETICS_SESSION_RUN if set, so the contract refuses (fail closed)
     env["PYTHONPATH"] = PACKAGE_ROOT + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     stdin = "".join(json.dumps(item) + "\n" for item in lines) if lines is not None else None
-    out = subprocess.run([sys.executable, "-m", "synthetics", "--home", str(home), "channel", command,
-                          "--key-file", str(key_file)] + list(args),
-                         input=stdin, capture_output=True, text=True, env=env, timeout=60)
+    try:
+        out = subprocess.run([sys.executable, "-m", "synthetics", "--home", str(home), "channel", command,
+                              "--key-file", str(key_file)] + list(args),
+                             input=stdin, capture_output=True, text=True, env=env, timeout=CONTRACT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return dict(result="rejected", error=dict(code="no_response", message="the contract call timed out"))
     rows = []
     for text in out.stdout.splitlines():
         try:
@@ -222,7 +294,7 @@ def contract(home, key_file, command, *args, lines=None):
         except ValueError:
             continue
     if not rows:
-        return dict(result="rejected", error=dict(code="bad_line", message="no contract response"))
+        return dict(result="rejected", error=dict(code="no_response", message="no contract response"))
     return rows[0]
 
 
@@ -255,11 +327,50 @@ def asks(root):
     return out
 
 
-def index_page(root):
+def _when(at):
+    return time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(at)) if isinstance(at, (int, float)) else "?"
+
+
+def lookup(home, key_file, qid, nonce):
+    """D2(b): this form's event ID if the store has it, None if not, "no_response" if the contract is silent."""
+    row = contract(home, key_file, "event-status", "--source", SOURCE, "--external-id", external_id(qid, nonce))
+    if not isinstance(row, dict):
+        return None
+    if (row.get("error") or {}).get("code") == "no_response":
+        return "no_response"
+    return row["event_id"] if not row.get("error") and EID.match(str(row.get("event_id") or "")) else None
+
+
+def reconcile_pending(root, key_file):
+    """P2 §3: a submit left `pending` (the desk was killed, or the response was lost) is settled from a record:
+    `event-status --source --external-id` finds the event only if this channel fed it (D2(b))."""
+    for entry in journal(root):
+        if entry.get("state") != "pending":
+            continue
+        home = home_of(root, entry.get("home") or "")
+        if not home:
+            continue
+        found = lookup(home, key_file, entry["question_id"], entry["nonce"])
+        if found and found != "no_response":
+            journal_settle(root, entry["home"], entry["question_id"], entry["nonce"], "accepted", event_id=found)
+
+
+def index_page(root, key_file=None):
+    if key_file is not None:
+        reconcile_pending(root, key_file)
     rows = ["<li><a href='/q/%s/%s'>%s</a> — %s</li>" % (quote(slug), quote(item["question_id"]), E(name),
                                                           E(str(item.get("summary") or "")))
             for slug, name, item in asks(root)]
-    return page("Open questions", "<ul>%s</ul>" % "".join(rows) if rows else "<p>No open questions.</p>")
+    body = "<ul>%s</ul>" % "".join(rows) if rows else "<p>No open questions.</p>"
+    pending = [e for e in journal(root) if e.get("state") == "pending"]
+    if pending:
+        body += ("<h2>Unconfirmed submits</h2><p class='muted'>The desk sent these but has no record that they "
+                 "arrived. If a question is no longer listed above, it was probably taken; open it to send the "
+                 "same form again safely.</p><ul>%s</ul>") % "".join(
+            "<li>%s · %s for %s in %s</li>" % (E(_when(e.get("at"))), E(str(e.get("kind"))),
+                                               E(str(e.get("question_id"))), E(str(e.get("home"))))
+            for e in pending)
+    return page("Open questions", body)
 
 
 def pair_page(message=""):
@@ -269,16 +380,65 @@ def pair_page(message=""):
                     "<p class='muted'>%s</p>" % E(message) if message else ""))
 
 
-def question_page(slug, question, cookie):
-    nonce = secrets.token_hex(16)
-    works = ", ".join(question.get("work_ids") or []) or "none"
+BUTTONS = {
+    "answer": ("Send as the answer", "This closes the question."),
+    "context": ("Send as context, keep the question open",
+                "The question stays open. The employee reads it and decides whether it answers the question."),
+}
+
+
+def answer_form(slug, qid, cookie, nonce=None, text="", kinds=KINDS):
+    """The form. A re-rendered form (after a failure) keeps its nonce, so sending it again can't count twice."""
+    nonce = nonce or secrets.token_hex(16)
+    buttons = "".join("<p><button name='kind' value='%s'>%s</button> <span class='muted'>%s</span></p>"
+                      % (kind, E(BUTTONS[kind][0]), E(BUTTONS[kind][1])) for kind in kinds)
+    return ("<form method='post' action='/a/%s/%s'><input type='hidden' name='nonce' value='%s'>"
+            "<input type='hidden' name='csrf' value='%s'><textarea name='answer' rows='8' maxlength='%d'>%s"
+            "</textarea>%s</form>") % (quote(slug), quote(qid), nonce, csrf(cookie, qid, nonce), MAX_BODY,
+                                       E(text), buttons)
+
+
+def context_rows(root, slug, question):
+    """P2 §1: only what status.json already exports (Lookout shows it) plus the desk's own journal. Never thread
+    messages, other questions' bodies, work notes or memories."""
+    qid = question["question_id"]
+    status = sharedstatus.read(Path(root) / slug) or {}
+    rows = []
+    if status.get("name"):
+        rows.append("Asked by %s%s" % (status["name"], " (%s)" % status["role"] if status.get("role") else ""))
+    item = next((i for i in ((status.get("docket") or {}).get("items") or [])
+                 if isinstance(i, dict) and i.get("question_id") == qid), None)
+    if item:
+        routes = ", ".join(str(r) for r in item.get("routes") or [])
+        delivery = "Delivery: %s" % (item.get("ack") or "unknown")
+        if item.get("delivered_at"):  # review L1: ack says "delivered", the channel names are in routes
+            delivery += " elsewhere too%s; only the first answer counts" % (" (routes: %s)" % routes if routes
+                                                                            else "")
+        rows.append(delivery)
+    works = {w.get("id"): w for w in status.get("works") or [] if isinstance(w, dict)}
+    for wid in question.get("work_ids") or []:
+        work = works.get(wid) or {}
+        rows.append("Blocks %s: %s (%s%s)" % (wid, work.get("title") or "?", work.get("status") or "no longer open",
+                                             ", priority %s" % work["priority"] if work.get("priority") is not None
+                                             else ""))
+    open_q = next((q for q in status.get("questions_open") or [] if isinstance(q, dict) and q.get("id") == qid),
+                  None)
+    for link in (open_q or {}).get("carries") or []:
+        rows.append("Carries %s from %s" % (link.get("question_id"), link.get("asker")))
+    for entry in journal(root):
+        if entry.get("home") == slug and entry.get("question_id") == qid:
+            rows.append("Sent here earlier: %s · %s · %s%s" % (
+                _when(entry.get("at")), entry.get("kind"), entry.get("state"),
+                " · %s" % entry["event_id"] if entry.get("event_id") else ""))
+    return rows
+
+
+def question_page(root, slug, question, cookie):
+    rows = "".join("<li>%s</li>" % E(text) for text in context_rows(root, slug, question))
     return page("Answer %s" % slug, (
-        "<p class='muted'>Asked %s · blocks: %s</p><pre>%s</pre>"
-        "<form method='post' action='/a/%s/%s'><input type='hidden' name='nonce' value='%s'>"
-        "<input type='hidden' name='csrf' value='%s'><textarea name='answer' rows='8' maxlength='%d'></textarea>"
-        "<p><button>Send this answer</button></p></form>") % (
-            E(str(question.get("created_at") or "")), E(works), E(question.get("body") or ""), quote(slug),
-            quote(question["question_id"]), nonce, csrf(cookie, question["question_id"], nonce), MAX_BODY))
+        "<p class='muted'>Asked %s</p><ul class='muted'>%s</ul><pre>%s</pre>%s") % (
+            E(str(question.get("created_at") or "")), rows, E(question.get("body") or ""),
+            answer_form(slug, question["question_id"], cookie)))
 
 
 def outcome(root, slug, qid, event_status):
@@ -286,28 +446,61 @@ def outcome(root, slug, qid, event_status):
     status.json no longer lists the question as open. An HTTP 200 alone never makes either true."""
     read = isinstance(event_status, dict) and event_status.get("state") == "processed"
     status = sharedstatus.read(Path(root) / slug)
-    if not isinstance(status, dict):  # unreadable or missing status.json is no evidence (review F2)
+    if not isinstance(status, dict) or not qid:  # unreadable or missing status.json is no evidence (review F2)
         return read, False
     still_open = any(isinstance(q, dict) and q.get("id") == qid for q in status.get("questions_open") or [])
     answered = read and not still_open
     return read, answered
 
 
-def status_page(root, slug, qid, event_id, event_status):
+def event_kind(event_status):
+    """From the event record (D2(a)), never from the URL: (kind, question ID)."""
+    if not isinstance(event_status, dict) or event_status.get("error"):
+        return None, None
+    if QID.match(str(event_status.get("question_id") or "")):
+        return "answer", event_status["question_id"]
+    if QID.match(str(event_status.get("in_reply_to") or "")):
+        return "context", event_status["in_reply_to"]
+    return None, None
+
+
+def status_page(root, slug, event_id, event_status):
+    kind, qid = event_kind(event_status)
     read, answered = outcome(root, slug, qid, event_status)
     submitted = isinstance(event_status, dict) and event_status.get("event_id") == event_id
+    status = sharedstatus.read(Path(root) / slug)
+    if not submitted:
+        sent = "no record of this event for the desk"
+    elif kind == "answer":
+        sent = "event %s accepted as the answer to %s; the question closed in the same step" % (event_id, qid)
+    elif kind == "context":
+        sent = "event %s accepted as context for %s; the question stays open" % (event_id, qid)
+    else:
+        sent = "event %s accepted through the desk" % event_id
+    if kind == "context":
+        still_open = isinstance(status, dict) and any(
+            isinstance(q, dict) and q.get("id") == qid for q in status.get("questions_open") or [])
+        result_ok = read and isinstance(status, dict)
+        result = ("still open: the employee may close it with your message or ask again" if still_open else
+                  "no longer open in %s's status" % slug) if result_ok else "can't tell yet"
+    else:
+        result_ok = answered
+        result = "the question is no longer open in %s's status" % slug if answered else "still open"
+        if answered:
+            entry = next((e for e in journal(root) if e.get("event_id") == event_id), None)
+            works = {w.get("id"): w for w in (status or {}).get("works") or [] if isinstance(w, dict)}
+            for wid in (entry or {}).get("work_ids") or []:
+                result += "; %s is %s" % (wid, (works.get(wid) or {}).get("status") or "no longer open")
     steps = [
-        ("Submitted", submitted, "event %s accepted through the desk" % event_id if submitted else
-         "no record of this event for the desk"),
+        ("Submitted", submitted, sent),
         ("Employee read it", read, "in run %s" % event_status.get("run_id") if read else
          "not yet: the employee's session has not finished reading it"),
-        ("Outcome", answered, "the question is no longer open in %s's status" % slug if answered else
-         "still open"),
+        ("Outcome", result_ok, result),
     ]
     rows = "".join("<li>%s %s — <span class='muted'>%s</span></li>" % ("✓" if ok else "…", E(name), E(text))
                    for name, ok, text in steps)
-    return page("Answer status", "<ol>%s</ol><p><a href='/s/%s/%s?q=%s'>Refresh</a> · <a href='/'>All questions</a>"
-                "</p>" % (rows, quote(slug), quote(event_id), quote(qid)))
+    return page("Answer status", "<ol>%s</ol><p><a href='/s/%s/%s'>Refresh</a> · <a href='/'>All questions</a>"
+                "</p>" % (rows, quote(slug), quote(event_id)))
 
 
 # ---------------------------------------------------------------- HTTP
@@ -384,27 +577,27 @@ def make_handler(root, key_file):
 
         def _get(self, head_only=False):
             self._check_host()
-            parts, query = self._parts()
+            parts, _query = self._parts()
             if parts == ["pair"]:
                 return self._send(200, pair_page(), head_only=head_only)
             if not valid_session(root, self._cookie()):
                 return self._redirect("/pair")
             cookie = self._cookie()
             if not parts:
-                return self._send(200, index_page(root), head_only=head_only)
+                return self._send(200, index_page(root, key_file), head_only=head_only)
             if len(parts) == 3 and parts[0] == "q" and QID.match(parts[2]):
                 home = home_of(root, parts[1])
                 row = contract(home, key_file, "question", "--id", parts[2]) if home else None
                 if not row or row.get("error"):
                     raise Refused(404, "No open question for you with that ID.")
-                return self._send(200, question_page(parts[1], row, cookie), head_only=head_only)
+                return self._send(200, question_page(root, parts[1], row, cookie), head_only=head_only)
             if len(parts) == 3 and parts[0] == "s" and EID.match(parts[2]):
                 home = home_of(root, parts[1])
-                qid = (query.get("q") or [""])[-1]
-                if not home or not QID.match(qid):
+                if not home:
                     raise Refused(404, "No such page.")
+                # The question comes from the event record (D2(a)); a ?q= from older links is ignored (P1 L1).
                 row = contract(home, key_file, "event-status", "--event", parts[2])
-                return self._send(200, status_page(root, parts[1], qid, parts[2], row), head_only=head_only)
+                return self._send(200, status_page(root, parts[1], parts[2], row), head_only=head_only)
             raise Refused(404, "No such page.")
 
         def _post(self):
@@ -424,21 +617,71 @@ def make_handler(root, key_file):
             nonce = fields.get("nonce") or ""
             if not NONCE.match(nonce) or not hmac.compare_digest(csrf(cookie, qid, nonce), fields.get("csrf") or ""):
                 raise Refused(403, "Bad form token.")
+            kind = fields.get("kind") or "answer"
+            if kind not in KINDS:
+                raise Refused(400, "Unknown button.")
             answer = (fields.get("answer") or "").strip()
             if not answer or len(answer.encode("utf-8")) > MAX_BODY:
                 raise Refused(400, "The answer must be 1 to %d bytes." % MAX_BODY)
             home = home_of(root, slug)
-            question = contract(home, key_file, "question", "--id", qid) if home else None
-            if not question or question.get("error"):
+            if not home:
                 raise Refused(409, "That question is not open for you any more.")
-            # C1: the sender is the question's recipient as the contract returned it (the home's default_human).
-            row = contract(home, key_file, "inbound", lines=[dict(
-                v=1, kind="message", external_id="desk:%s:%s" % (qid, nonce), sender=question["to"], body=answer,
-                source=SOURCE, question_id=qid, thread=question.get("thread"))])
-            if row.get("result") not in ("accepted", "duplicate"):
-                code = (row.get("error") or {}).get("code") or "rejected"
-                raise Refused(409, "Not accepted (%s)." % code)
-            return self._redirect("/s/%s/%s?q=%s" % (quote(slug), quote(row["event_id"]), quote(qid)))
+            entry = journal_find(root, slug, qid, nonce)
+            if entry is not None and entry.get("kind") != kind:
+                raise Refused(409, "This form was already sent as %s; open the question again for a new form."
+                              % entry.get("kind"))
+            if entry is not None and not entry.get("event_id"):
+                # Vesper's P2 review F1: resend without the open check only when the store has this form's
+                # event (D2(b) lookup). Otherwise the earlier send never arrived and this is a first send.
+                found = lookup(home, key_file, qid, nonce)
+                if found == "no_response":
+                    return self._send(503, page("Not confirmed", (
+                        "<p>The desk could not check whether this form arrived (no response). Your text is "
+                        "kept below.</p>%s") % answer_form(slug, qid, cookie, nonce=nonce, text=answer,
+                                                          kinds=(kind,))))
+                if found is None:
+                    entry = None
+            if entry is None:
+                # First send of this form: the question must be open for the human now (D1(b)).
+                question = contract(home, key_file, "question", "--id", qid)
+                if (question.get("error") or {}).get("code") == "no_response":
+                    return self._send(503, page("Not confirmed", (
+                        "<p>The desk could not check the question (no response). Nothing was sent. Your text is "
+                        "kept below.</p>%s") % answer_form(slug, qid, cookie, nonce=nonce, text=answer,
+                                                          kinds=(kind,))))
+                if not question or question.get("error"):
+                    raise Refused(409, "That question is not open for you any more.")
+                # C1: the sender is the question's recipient as the contract returned it (the home's
+                # default_human). The journal keeps it so the same form sent again is the same line (P2 §3).
+                entry = journal_claim(root, slug, qid, nonce, kind, question["to"], question.get("thread"),
+                                      question.get("work_ids"))
+            line = dict(v=1, kind="message", external_id=external_id(qid, nonce), sender=entry["sender"],
+                        body=answer, source=SOURCE, thread=entry.get("thread"))
+            if kind == "answer":
+                line["question_id"] = qid
+            else:  # D1/D3: context never answers; it names the question only as generic reply metadata
+                line["in_reply_to"] = qid
+            row = contract(home, key_file, "inbound", lines=[line])
+            if row.get("result") in ("accepted", "duplicate") and EID.match(str(row.get("event_id") or "")):
+                journal_settle(root, slug, qid, nonce, "accepted", event_id=row["event_id"])
+                return self._redirect("/s/%s/%s" % (quote(slug), quote(row["event_id"])))
+            code = (row.get("error") or {}).get("code") or "rejected"
+            if code in FINAL_CODES:
+                if code == "invalid_state" and entry.get("state") == "pending":
+                    journal_settle(root, slug, qid, nonce, "refused", error_code=code)
+                text = ("This form was already sent with different text; the first text is the one on record."
+                        if code == "conflict" else
+                        "The question was answered elsewhere first (for example on Telegram), so this was not "
+                        "recorded.")
+                return self._send(409, page("Not recorded", "<p>%s</p><p class='muted'>Your text, for your own "
+                                            "copy:</p><pre>%s</pre><p><a href='/'>All questions</a></p>"
+                                            % (E(text), E(answer))))
+            # Not confirmed (timeout, no response, a transient refusal): the same form again is safe, since the
+            # store counts one external_id once. Re-render it with the human's own text (P2 §3 step 4).
+            return self._send(503, page("Not confirmed", (
+                "<p>Not confirmed (%s). Your text is kept below. Send again: the same form can't be counted "
+                "twice.</p>%s") % (E(code), answer_form(slug, qid, cookie, nonce=nonce, text=answer,
+                                                         kinds=(kind,)))))
 
         def _guard(self, fn, *args):
             try:

@@ -264,7 +264,7 @@ class AnswerTests(DeskBase):
                                           cookie=cookie)
         self.assertEqual(status, 303)
         location = headers["Location"]
-        event_id = re.match(r"^/s/rowan/(event-[0-9a-f]{32})\?q=", location).group(1)
+        event_id = re.match(r"^/s/rowan/(event-[0-9a-f]{32})$", location).group(1)
         self.assertEqual(self.stored(), ("answered", "ready", 1))
         with Store(self.home) as store:
             event = store._get("events", event_id)
@@ -277,7 +277,8 @@ class AnswerTests(DeskBase):
         # Resubmitting the same form is idempotent: same event, no second answer.
         status, headers2, _ = self.request("POST", "/a/rowan/%s" % self.question["id"],
                                            {"nonce": nonce, "csrf": token, "answer": ANSWER}, cookie=cookie)
-        self.assertEqual(status, 409)  # the question is no longer open, so the desk refuses before inbound
+        # P2: the same form again reaches the idempotent inbound (it was 409 in P1, before inbound).
+        self.assertEqual((status, headers2["Location"]), (303, location))
         self.assertEqual(self.stored()[2], 1)
 
     def test_status_is_from_records_not_http(self):
@@ -287,7 +288,7 @@ class AnswerTests(DeskBase):
         status, headers, _ = self.request("POST", "/a/rowan/%s" % self.question["id"],
                                           {"nonce": nonce, "csrf": token, "answer": ANSWER}, cookie=cookie)
         location = headers["Location"]
-        event_id = location.split("/")[3].split("?")[0]
+        event_id = location.split("/")[3]
         status, _, text = self.request("GET", location, cookie=cookie)
         self.assertEqual(status, 200)
         self.assertIn("✓ Submitted", text)
