@@ -40,7 +40,7 @@ class ClaudeBrainTests(unittest.TestCase):
             "assert args[args.index('--model') + 1] == 'sonnet'\n"
             "print(json.dumps({'type': 'result', 'result': 'Saved the next step.', 'total_cost_usd': 0.02, 'is_error': False}))\n"
         )
-        result = ClaudeBrain(self.home, executable=executable, model="sonnet").run({"identity": {"name": "Morgan"}, "run": {"id": "run-123"}})
+        result = ClaudeBrain(self.home, executable=executable, model="sonnet").run({"identity": {"name": "Morgan"}, "run": {"id": "run-123", "profile": None}})
         self.assertEqual(result.summary, "Saved the next step.")
         self.assertEqual(result.cost, 0.02)
         output = self.home / "runs" / "run-123.claude.json"
@@ -149,7 +149,7 @@ class ClaudeBrainTests(unittest.TestCase):
 
     def test_untrusted_run_id_cannot_escape_log_folder(self):
         executable = self.executable("print('{\"result\": \"ok\"}')\n")
-        ClaudeBrain(self.home, executable=executable).run({"run": {"id": "../../escaped"}})
+        ClaudeBrain(self.home, executable=executable).run({"run": {"id": "../../escaped", "profile": None}})
         self.assertEqual(len(list((self.home / "runs").glob("*.claude.json"))), 1)
         self.assertFalse((self.home.parent / "escaped.claude.json").exists())
 

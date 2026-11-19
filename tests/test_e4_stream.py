@@ -189,7 +189,7 @@ class Brain(unittest.TestCase):
     def outcome(self, executable, stream, run_id, timeout=60):
         brain = ClaudeBrain(self.home, executable=executable, timeout=timeout, stream_output=stream)
         try:
-            result = brain.run({"run": {"id": run_id}})
+            result = brain.run({"run": {"id": run_id, "profile": None}})
             return ("ok", result.summary, result.cost, result.raw)
         except BrainError as error:
             return ("error", str(error).replace(run_id, "RUN"), error.cost)
@@ -234,7 +234,7 @@ class Brain(unittest.TestCase):
         # The json path writes stdout byte for byte to claude.json, as b09f5a5 did.
         executable = self.fake(self.CASES["success"])
         brain = ClaudeBrain(self.home, executable=executable, stream_output=False)
-        brain.run({"run": {"id": "run-old"}})
+        brain.run({"run": {"id": "run-old", "profile": None}})
         self.assertEqual((self.home / "runs" / "run-old.claude.json").read_text(),
                          json.dumps(self.CASES["success"]) + "\n")
         self.assertEqual(sorted(p.name for p in (self.home / "runs").iterdir()),
@@ -242,7 +242,7 @@ class Brain(unittest.TestCase):
 
     def test_stream_claude_json_is_the_result_line_only(self):
         executable = self.fake(self.CASES["success"])
-        ClaudeBrain(self.home, executable=executable).run({"run": {"id": "run-new"}})
+        ClaudeBrain(self.home, executable=executable).run({"run": {"id": "run-new", "profile": None}})
         self.assertEqual((self.home / "runs" / "run-new.claude.json").read_text(),
                          json.dumps(self.CASES["success"]) + "\n")
         for path in (self.home / "runs").iterdir():
@@ -253,7 +253,7 @@ class Brain(unittest.TestCase):
         # Test 4: a session cut by the timeout leaves the facts it produced, an intact chain, and no raw stream.
         executable = self.fake(self.CASES["success"], sleep=30, lines=stream_lines()[:5])
         with self.assertRaisesRegex(BrainError, "exceeded"):
-            ClaudeBrain(self.home, executable=executable, timeout=3).run({"run": {"id": "run-t"}})
+            ClaudeBrain(self.home, executable=executable, timeout=3).run({"run": {"id": "run-t", "profile": None}})
         folder = self.home / "runs"
         self.assertEqual(sorted(p.name for p in folder.iterdir()),
                          ["run-t.claude.json", "run-t.stderr.txt", "run-t.stream.jsonl"])

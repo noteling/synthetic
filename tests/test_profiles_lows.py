@@ -58,7 +58,7 @@ class L3ReadOnce(Base):
     def test_set_after_run_begin_does_not_reach_the_prompt(self):
         with Store(self.home) as s:
             run = s.run_begin()
-        self.assertNotIn("profile", run)
+        self.assertIsNone(run["profile"])
         self.set_profile("developer")  # owner sets it between run_begin and the prompt build
         self.assertNotIn("Role defaults", self.prompt_of_run({"run": run}))
 
@@ -133,8 +133,10 @@ class L2MeetingRun(Base):
         self.assertIn("profile developer v", system)
         self.assertIn("live meeting", system)
 
-    def test_guard_meeting_run_without_profile_has_no_field(self):
-        self.assertNotIn("profile", self.meeting_run())
+    def test_meeting_run_without_profile_records_none(self):
+        run = self.meeting_run()
+        self.assertIn("profile", run)
+        self.assertIsNone(run["profile"])
 
 
 class L1HonestLimit(unittest.TestCase):

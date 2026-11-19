@@ -69,7 +69,7 @@ class EscapedHolder(unittest.TestCase):
         with mock.patch.dict(os.environ, {"E4R2_PIDFILE": str(self.pidfile)}), \
                 mock.patch.object(ClaudeBrain, "READER_JOIN", self.JOIN, create=True):
             started = time.monotonic()
-            result = brain.run({"run": {"id": "run-hold"}})
+            result = brain.run({"run": {"id": "run-hold", "profile": None}})
             took = time.monotonic() - started
         self.assertLess(took, self.JOIN + 5, "stream mode waited %.1f s for an escaped pipe holder" % took)
         self.assertEqual(result.summary, "Saved.")
