@@ -127,6 +127,7 @@ def grade(case_root, timeout=15, settle_seconds=1, duplicate_wait=1):
         raise ValueError("Case fixture is incomplete")
 
     report = {"schema_version": 1, "started_at": datetime.now(timezone.utc).isoformat(),
+              "timeout_seconds": timeout, "duplicate_wait_seconds": duplicate_wait,
               "claimed_status": None, "behavioral_pass": False,
               "new_document_received": False, "changed_document_received": False,
               "unchanged_delivery_stable": False, "claimed_complete_but_failed": False,
