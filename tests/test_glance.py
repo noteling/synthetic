@@ -4,6 +4,7 @@ import json
 import os
 import plistlib
 import stat
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -211,6 +212,19 @@ class GlanceToolTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     glance.arguments(**arguments)
 
+    def test_unprintable_characters_in_find_are_refused_before_reading(self):
+        # Review L3: control (incl. DEL), format, line- and paragraph-separator characters never name a control.
+        glance.reader = Fake(report())
+        for find in ("Add\x7f", "Add\u2028cart", "Add\u2029cart", "Add\u200bcart", "\u202eAdd", "Add\x85cart"):
+            with self.subTest(find=ascii(find)):
+                with self.assertRaises(ValueError):
+                    self.server.call("screen_glance", {"find": find})
+        self.assertEqual(glance.reader.calls, [])
+        self.assertEqual(glance.recent(self.store), [])
+        for find in ("Añadir al carrito", "Add to cart \u2013 Bananas", "カートに入れる", "Save\u00a0draft"):
+            with self.subTest(passes=find):
+                glance.check(find=find)
+
     def test_ordinary_names_roles_and_bundles_pass(self):
         result, fake = self.glance(report(find={"name": "Save - draft", "match": "none", "count": 0,
                                                 "unique": False, "hits": []}, exit_code=1, ok=False),
@@ -269,6 +283,7 @@ class LaunchReaderTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        self.default_lock = glance.LOCK
         self.addCleanup(setattr, glance, "LOCK", glance.LOCK)
         glance.LOCK = str(self.root / "glance.lock")
         self.app = self.root / "Noteling.app"
@@ -338,6 +353,44 @@ class LaunchReaderTest(unittest.TestCase):
             self.assertFalse(self.log.exists())   # never launched while another glance held the lock
         self.assertEqual(read(["--read-page", "--json"])["exit"], 0)   # released: the next glance runs
         self.assertEqual(read(["--read-page", "--json"])["exit"], 0)   # and its own lock was released too
+
+    def test_the_lock_lives_in_the_users_own_temp_folder_whatever_tmpdir_says(self):
+        # Review L1: per-user temp folder, not world-writable /tmp. Every home must agree on it, so it can't
+        # depend on $TMPDIR (a worker without it would otherwise fall back to /tmp and take a different lock).
+        self.assertIsNone(self.default_lock)
+        glance.LOCK = None
+        first = glance.LaunchReader(str(self.app)).lock
+        saved = os.environ.pop("TMPDIR", None)
+        try:
+            tempfile.tempdir = None
+            second = glance.LaunchReader(str(self.app)).lock
+        finally:
+            if saved is not None:
+                os.environ["TMPDIR"] = saved
+            tempfile.tempdir = None
+        self.assertEqual(first, second)
+        self.assertEqual(os.path.basename(first), "synthetics-glance.lock")
+        if os.path.exists("/usr/bin/getconf") and sys.platform == "darwin":
+            self.assertNotEqual(os.path.realpath(os.path.dirname(first)), os.path.realpath("/tmp"))
+            self.assertFalse(os.stat(os.path.dirname(first)).st_mode & stat.S_IWOTH)
+
+    def test_a_symlink_at_the_lock_path_is_refused_not_followed(self):
+        # Review L1: O_NOFOLLOW, so a planted link can't make a glance create or lock someone else's file.
+        target = self.root / "elsewhere"
+        os.symlink(str(target), glance.LOCK)
+        line = json.dumps(report())
+        read = glance.LaunchReader(str(self.app), opener=self.opener("echo '%s' > \"$OUT\"" % line))
+        with self.assertRaises(glance.GlanceError) as caught:
+            read(["--read-page", "--json"])
+        self.assertEqual(caught.exception.reason, "lock_failed")
+        self.assertFalse(target.exists())
+        self.assertFalse(self.log.exists())   # never launched
+
+    def test_the_lock_file_is_private_to_the_user(self):
+        self.addCleanup(os.umask, os.umask(0o022))   # a permissive umask must not widen it
+        line = json.dumps(report())
+        glance.LaunchReader(str(self.app), opener=self.opener("echo '%s' > \"$OUT\"" % line))(["--read-page", "--json"])
+        self.assertEqual(os.stat(glance.LOCK).st_mode & 0o777, 0o600)
 
     def test_a_hang_times_out_kills_only_the_new_instance_and_removes_temp_files(self):
         binary = str(self.app / "Contents" / "MacOS" / "Noteling")

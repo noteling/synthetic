@@ -31,16 +31,19 @@ Synthetics starts a second, background Noteling instance through LaunchServices:
 - `--full` and `--contains` are never passed. There is no fallback to them.
 - The employee's values are checked before anything launches, because Noteling picks its mode by looking for a
   flag anywhere in its arguments (`CommandLine.arguments.contains`), and modes like `--ask` are tested before
-  `--find`. So `find` may not start with `-` or contain line breaks, `role` is letters only, and `app` must look
-  like a bundle ID (`com.google.Chrome`). A refused value is a tool error: no launch, no record.
-- One glance runs at a time on the Mac: each takes the host-wide lock `/tmp/synthetics-glance.lock` and waits up
-  to 15 s for it (`busy` otherwise). This matters because a timeout kills the instances that appeared since the
+  `--find`. So `find` may not start with `-` or contain line breaks or other Unicode control, format or separator
+  characters, `role` is letters only, and `app` must look like a bundle ID (`com.google.Chrome`). A refused value is a tool error: no launch, no record.
+- One glance runs at a time on the Mac: each takes the lock `synthetics-glance.lock` in the user's own temp
+  folder (`getconf DARWIN_USER_TEMP_DIR`, so every home and worker finds the same one whether or not `$TMPDIR` is
+  set; not world-writable `/tmp`) and waits up to 15 s for it (`busy` otherwise). The lock is opened with `O_NOFOLLOW`, so a symlink planted there is refused
+  (`lock_failed`), not followed. This matters because a timeout kills the instances that appeared since the
   glance began; without the lock, two homes glancing at once could kill each other's instance.
 - Noteling ≥ 0.10.5 is needed (`--read-page --json` and `--find`, noteling #131/#132). It is browsers only.
 - OUT and ERR live in a fresh 0700 temp folder that is removed on every exit path.
 - The read is capped at 15 s. On timeout, `open` is killed, and so is the Noteling instance it started (found as
   this app's executable run with `--json` that wasn't there before the launch). There are no retries: one glance
-  launches at most one instance.
+  launches at most one instance. The lock wait and the read each have their own 15 s cap, so the worst case for
+  one call is about 30 s (a glance that waited its full turn, then a read that timed out).
 
 ## What the employee gets back
 
@@ -77,6 +80,7 @@ reports counts and doesn't fail.
 | `noteling_too_old` | Noteling too old (need ≥ 0.10.5). This covers an Info.plist version below 0.10.5 and output that has no JSON report (0.10.2 silently ignores `--json`; its human line is never parsed). |
 | `no_answer` | Noteling exited without answering (it crashed or was stopped). A later glance may work. |
 | `busy` | Another glance is still running on this Mac. Try again shortly. |
+| `lock_failed` | The glance lock couldn't be opened safely (for example, a symlink sits at its path), so nothing was read. Tell your manager. |
 | `timeout` | Noteling didn't answer within 15 s. |
 | `launch_failed` | Noteling couldn't be launched. |
 | `not_found` (exit 1) | The page was read, but no control by that name is on it. |

@@ -33,6 +33,7 @@ import shutil
 import subprocess
 import tempfile
 import time
+import unicodedata
 import uuid
 from pathlib import Path
 
@@ -43,7 +44,14 @@ RECENT = 5
 OPT_IN = "glance.json"
 TOO_OLD = "Noteling too old (need ≥ 0.10.5)."
 NO_ANSWER = "Noteling exited without answering (it crashed or was stopped). A later glance may work."
-LOCK = "/tmp/synthetics-glance.lock"   # host-wide: every home on this Mac glances one at a time (review F2)
+# Host-wide for this user: every home on this Mac runs as the same user, so all glances take turns (review F2).
+# The lock lives in the user's own Darwin temp folder, not world-writable /tmp, so another local user can't hold
+# or plant it (review L1). None: found on first use with user_temp_dir(); tests set a path.
+LOCK = None
+LOCK_NAME = "synthetics-glance.lock"
+# Unicode control (incl. DEL), format, line- and paragraph-separator categories: never part of a control's
+# name as a person says it (review L3).
+UNPRINTABLE = {"Cc", "Cf", "Zl", "Zp"}
 ROLE = re.compile(r"[A-Za-z]{1,40}\Z")
 BUNDLE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*(\.[A-Za-z0-9][A-Za-z0-9-]*)+\Z")
 
@@ -108,6 +116,21 @@ def host(site):
     return text or None
 
 
+def user_temp_dir():
+    """This user's own temp folder, the same in every home and worker whatever its environment.
+
+    `getconf DARWIN_USER_TEMP_DIR` asks the system, so it doesn't depend on $TMPDIR: a worker started without
+    $TMPDIR would otherwise fall back to /tmp and take a different lock than one started with it. Off macOS, or
+    if getconf fails, tempfile.gettempdir()."""
+    try:
+        out = subprocess.run(["/usr/bin/getconf", "DARWIN_USER_TEMP_DIR"], stdin=subprocess.DEVNULL,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=5,
+                             check=False).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    return out if out and os.path.isdir(out) else tempfile.gettempdir()
+
+
 def processes():
     """(pid, command line) of every process, for finding a glance instance left behind by a timeout."""
     out = subprocess.run(["ps", "-axo", "pid=,args="], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -131,12 +154,19 @@ class LaunchReader:
     def __init__(self, app=DEFAULT_APP, timeout=TIMEOUT, opener="open", processes=processes, kill=os.kill,
                  lock=None):
         self.app, self.timeout, self.opener = app, timeout, opener
-        self.processes, self.kill, self.lock = processes, kill, lock or LOCK
+        self.processes, self.kill = processes, kill
+        self.lock = lock or LOCK or os.path.join(user_temp_dir(), LOCK_NAME)
 
     def _hold(self):
         """The host-wide glance lock, waited for up to the timeout. A timeout kills the instances that appeared
         since this glance began, so two glances must not overlap or one could kill the other's instance."""
-        handle = open(self.lock, "a")
+        # O_NOFOLLOW: a symlink planted at the lock path is refused rather than followed (review L1).
+        try:
+            fd = os.open(self.lock, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        except OSError:
+            raise GlanceError("lock_failed", "The glance lock %s couldn't be opened safely, so nothing was read. "
+                              "Tell your manager." % self.lock)
+        handle = os.fdopen(fd, "w")
         deadline = time.monotonic() + self.timeout
         while True:
             try:
@@ -232,8 +262,8 @@ def check(find=None, role=None, app=None):
             raise ValueError("find must name a control, e.g. \"Add to cart\".")
         if find.lstrip().startswith("-"):
             raise ValueError("find can't start with \"-\"; name the control as a person would say it.")
-        if any(ord(c) < 32 for c in find):
-            raise ValueError("find can't contain line breaks or control characters.")
+        if any(unicodedata.category(c) in UNPRINTABLE for c in find):
+            raise ValueError("find can't contain line breaks, control characters or invisible format characters.")
     if role is not None:
         if find is None:
             raise ValueError("role narrows find; give find too.")
