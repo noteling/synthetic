@@ -1054,6 +1054,10 @@ class Store:
             if not isinstance(relays, list) or not relays:
                 raise ValueError("relays must be a non-empty list of question IDs from received messages.")
             payload["relays"] = list(dict.fromkeys(_text(item, "relays item") for item in relays))
+        # VIS G3 delta (backlog 52): project="" opts out of the default tag taken from the sender's own work.
+        opt_out = isinstance(project, str) and not project.strip()
+        if opt_out:
+            project = None
         if project is not None:
             # M21 phase 2 (D3.1 item 2): one project tag, carried to the recipient as structured data. The sender
             # must hold a write grant on it; its own body is captured into P as direction "out".
@@ -1094,13 +1098,23 @@ class Store:
             if question and any(item["status"] in ("done", "cancelled") for item in works):
                 raise ValueError("Cannot block finished work with a question.")
             links = [self._relay_source(item) for item in payload.get("relays") or []]
+            # VIS G3 delta: with no explicit project (and no "" opt-out), a message linked to the sender's own
+            # work published to P is tagged P, by "work". Never refuses the send: when P is gone or the sender
+            # cannot write P, the message goes untagged and the result says why (not stored).
+            default = (self._work_project_default(work) if project is None and not opt_out and work is not None
+                       else None)
+            tag_by = "sender"
+            extra = {}
+            if default is not None and default["applied"]:
+                project, tag_by = default["project"], "work"
+                extra = {"project": project, "project_by": "work"}
             now = timestamp()
             question_id = "question-" + uuid.uuid4().hex if question else None
-            message = dict(payload, id="message-" + uuid.uuid4().hex, sender=self.identity()["id"],
+            message = dict(payload, **extra, id="message-" + uuid.uuid4().hex, sender=self.identity()["id"],
                            kind=namespace, question_id=question_id, created_at=now)
             self._save("messages", message, "outbox.queued")
             if question:
-                result = dict(payload, id=question_id, message_id=message["id"], created_at=now,
+                result = dict(payload, **extra, id=question_id, message_id=message["id"], created_at=now,
                               status="open", answer_event_id=None)
                 if links:
                     result["relays"] = links
@@ -1122,7 +1136,7 @@ class Store:
                 result = message
             self._key(namespace, key, payload, result["id"])
             # M21 A4/B3: our own message on a bound thread is captured as direction "out".
-            tag = {"project": project, "by": "sender"} if project is not None else None
+            tag = {"project": project, "by": tag_by} if project is not None else None
             captured = (capture.enqueue(self, dict(message, source="outbox"), "out", tag)
                         if thread is not None or tag is not None else [])
         if captured:
@@ -1130,7 +1144,22 @@ class Store:
                 capture.capture_drain(self)
             except Exception:  # noqa: BLE001 - the message is queued; pending rows retry and stay visible
                 pass
+        if default is not None:
+            result = dict(result, project_default=default)
         return result
+
+    def _work_project_default(self, work):
+        """VIS G3 delta: the project a message linked to my own `work` defaults to. None when the work is not
+        published; otherwise {work_id, project, applied, reason?} with reason unknown-project or no-write-grant."""
+        project = work.get("publish") or None
+        if not project:
+            return None
+        note = {"work_id": work["id"], "project": project, "applied": False}
+        if not capture.is_project_name(project) or not capture.project_path(self, project).exists():
+            return dict(note, reason="unknown-project")
+        if not capture.sender_may_write(self, project, self.identity()["id"]):
+            return dict(note, reason="no-write-grant")
+        return dict(note, applied=True)
 
     def question_ask(self, to, body, work_id=None, key=None, thread=None, in_reply_to=None, recipient_work_id=None,
                      project=None, work_ids=None, relays=None):
