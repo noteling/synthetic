@@ -24,12 +24,15 @@ returns Noteling's report or raises GlanceError. Tests replace it with a fake.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import plistlib
+import re
 import shutil
 import subprocess
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -39,7 +42,13 @@ TIMEOUT = 15.0
 RECENT = 5
 OPT_IN = "glance.json"
 TOO_OLD = "Noteling too old (need ≥ 0.10.5)."
+NO_ANSWER = "Noteling exited without answering (it crashed or was stopped). A later glance may work."
+LOCK = "/tmp/synthetics-glance.lock"   # host-wide: every home on this Mac glances one at a time (review F2)
+ROLE = re.compile(r"[A-Za-z]{1,40}\Z")
+BUNDLE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*(\.[A-Za-z0-9][A-Za-z0-9-]*)+\Z")
 
+PAGE_FIELDS = ("app", "bundle", "site", "documents", "tabs", "sheetOpen", "kinds", "withPageID", "elements",
+               "onScreen", "loading", "truncated", "ms")
 COUNT_FIELDS = ("documents", "tabs", "sheetOpen", "withPageID", "elements", "onScreen", "loading", "truncated", "ms")
 EXITS = {0: "ok", 1: "not_found", 2: "usage", 3: "no_browser", 4: "no_permission", 5: "partial"}
 SENTENCES = {
@@ -119,9 +128,25 @@ class LaunchReader:
     -g in the background (no focus change), -W wait for it to exit. `open` itself always exits 0, so the answer is
     the JSON in OUT."""
 
-    def __init__(self, app=DEFAULT_APP, timeout=TIMEOUT, opener="open", processes=processes, kill=os.kill):
+    def __init__(self, app=DEFAULT_APP, timeout=TIMEOUT, opener="open", processes=processes, kill=os.kill,
+                 lock=None):
         self.app, self.timeout, self.opener = app, timeout, opener
-        self.processes, self.kill = processes, kill
+        self.processes, self.kill, self.lock = processes, kill, lock or LOCK
+
+    def _hold(self):
+        """The host-wide glance lock, waited for up to the timeout. A timeout kills the instances that appeared
+        since this glance began, so two glances must not overlap or one could kill the other's instance."""
+        handle = open(self.lock, "a")
+        deadline = time.monotonic() + self.timeout
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return handle
+            except OSError:
+                if time.monotonic() >= deadline:
+                    handle.close()
+                    raise GlanceError("busy", "Another glance is still running on this Mac. Try again shortly.")
+                time.sleep(0.1)
 
     def instances(self):
         """PIDs of glance instances of this app: its executable run with --json (the running app has no args)."""
@@ -135,6 +160,13 @@ class LaunchReader:
         version = app_version(self.app)
         if version is None or version < MIN_VERSION:
             raise GlanceError("noteling_too_old", TOO_OLD)
+        held = self._hold()
+        try:
+            return self._launch(args)
+        finally:
+            held.close()   # closing releases the flock
+
+    def _launch(self, args):
         before = self.instances()
         folder = tempfile.mkdtemp(prefix="glance-")
         os.chmod(folder, 0o700)
@@ -168,7 +200,9 @@ def parse(text):
     """Noteling's report: the last line of output that is a JSON object with an integer ``exit``.
 
     C4: an older Noteling silently ignores --json and prints a human line; that shape (no JSON report) means too
-    old. The human line is never parsed."""
+    old. The human line is never parsed. No output at all means the instance crashed or was stopped (review F3)."""
+    if not (text or "").strip():
+        raise GlanceError("no_answer", NO_ANSWER)
     for line in reversed((text or "").splitlines()):
         line = line.strip()
         if not line.startswith("{"):
@@ -185,8 +219,33 @@ def parse(text):
 reader = None  # None: LaunchReader(DEFAULT_APP). Tests set a fake.
 
 
+def check(find=None, role=None, app=None):
+    """Refuse values that could become Noteling flags (review F1). Noteling picks its mode with
+    CommandLine.arguments.contains(...), and --ask, --record-clicks and others are tested before --find, so a value
+    such as "--ask" or "--full" would change what Noteling does. find may be any name that doesn't start with "-";
+    role is letters only; app is a bundle-ID shape."""
+    for name, value in (("find", find), ("role", role), ("app", app)):
+        if value is not None and not isinstance(value, str):
+            raise ValueError("%s must be text." % name)
+    if find is not None:
+        if not find.strip():
+            raise ValueError("find must name a control, e.g. \"Add to cart\".")
+        if find.lstrip().startswith("-"):
+            raise ValueError("find can't start with \"-\"; name the control as a person would say it.")
+        if any(ord(c) < 32 for c in find):
+            raise ValueError("find can't contain line breaks or control characters.")
+    if role is not None:
+        if find is None:
+            raise ValueError("role narrows find; give find too.")
+        if not ROLE.match(role):
+            raise ValueError("role is a single word of letters, e.g. button or link.")
+    if app is not None and not BUNDLE.match(app):
+        raise ValueError("app is a browser bundle ID such as com.google.Chrome.")
+
+
 def arguments(find=None, role=None, app=None):
     """Noteling's command line for a glance. Never --full or --contains (v1 is counts and find only)."""
+    check(find=find, role=role, app=app)
     args = ["--read-page", "--json"]
     if find is not None:
         args = ["--find", find] + (["--role", role] if role is not None else []) + ["--json"]
@@ -234,7 +293,7 @@ def answer(report):
     code = report.get("exit")
     result = dict(ok=report.get("ok") is True and code == 0, exit=code, status=EXITS.get(code, "unknown"))
     if isinstance(report.get("page"), dict):
-        page = {k: v for k, v in report["page"].items() if k != "contains"}
+        page = {k: v for k, v in report["page"].items() if k in PAGE_FIELDS}
         result["page"] = page
     if isinstance(report.get("find"), dict):
         result["find"] = report["find"]
@@ -248,10 +307,7 @@ def answer(report):
 def screen_glance(store, find=None, role=None, app=None):
     if not enabled(store.home):
         raise ValueError("Unknown tool: screen_glance")
-    if find is not None and not find.strip():
-        raise ValueError("find must name a control, e.g. \"Add to cart\".")
-    if role is not None and find is None:
-        raise ValueError("role narrows find; give find too.")
+    check(find=find, role=role, app=app)
     read = reader or LaunchReader()
     try:
         report = read(arguments(find=find, role=role, app=app))

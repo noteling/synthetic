@@ -192,6 +192,41 @@ class GlanceToolTest(unittest.TestCase):
                     self.server.call("screen_glance", arguments)
         self.assertEqual(glance.reader.calls, [])
 
+    def test_values_that_could_be_noteling_flags_are_refused_before_reading(self):
+        # Review F1: Noteling picks its mode with CommandLine.arguments.contains(...), and --ask is tested before
+        # --find, so a value like "--ask" or "--full" would change what Noteling does.
+        glance.reader = Fake(report())
+        for arguments in ({"find": "--read-page", "app": "--full"}, {"find": "--full"}, {"find": "--ask"},
+                          {"find": " -x"}, {"find": "Add\n--full"}, {"find": 5},
+                          {"find": "Add to cart", "role": "--full"}, {"find": "Add", "role": "push button"},
+                          {"find": "Add", "role": "-button"}, {"app": "--full"}, {"app": "-com.google.Chrome"},
+                          {"app": "Chrome"}, {"app": "com.google.Chrome --full"}):
+            with self.subTest(arguments=arguments):
+                with self.assertRaises(ValueError):
+                    self.server.call("screen_glance", arguments)
+        self.assertEqual(glance.reader.calls, [])
+        self.assertEqual(glance.recent(self.store), [])
+        for arguments in ({"find": "--full"}, {"app": "--full"}, {"find": "a", "role": "--full"}):
+            with self.subTest(direct=arguments):
+                with self.assertRaises(ValueError):
+                    glance.arguments(**arguments)
+
+    def test_ordinary_names_roles_and_bundles_pass(self):
+        result, fake = self.glance(report(find={"name": "Save - draft", "match": "none", "count": 0,
+                                                "unique": False, "hits": []}, exit_code=1, ok=False),
+                                   find="Save - draft", role="button", app="com.google.Chrome")
+        self.assertEqual(fake.calls, [["--find", "Save - draft", "--role", "button", "--json",
+                                       "--app", "com.google.Chrome"]])
+        self.assertEqual(result["status"], "not_found")
+
+    def test_the_result_keeps_only_known_page_fields(self):
+        page = dict(PAGE, contains=2, words="Quokka77 page text")
+        value = report(text="Quokka77 page text")
+        value["page"] = page
+        result, _ = self.glance(value)
+        self.assertNotIn("Quokka77", json.dumps(result))
+        self.assertEqual(set(result["page"]), set(glance.PAGE_FIELDS))
+
     def test_recent_is_newest_first_and_bounded(self):
         for _ in range(7):
             self.glance(report())
@@ -213,7 +248,7 @@ class ParseTest(unittest.TestCase):
 
     def test_old_noteling_prose_means_too_old(self):
         # C4: 0.10.2 ignores --json and prints a human line; that shape is "too old", the line is never parsed.
-        for text in ("No browser window found, or Accessibility permission is missing.\n", "", "{\"exit\": true}"):
+        for text in ("No browser window found, or Accessibility permission is missing.\n", "{\"exit\": true}"):
             with self.subTest(text=text):
                 with self.assertRaises(glance.GlanceError) as caught:
                     glance.parse(text)
@@ -221,10 +256,21 @@ class ParseTest(unittest.TestCase):
                 self.assertEqual(str(caught.exception), "Noteling too old (need ≥ 0.10.5).")
 
 
+    def test_no_output_means_no_answer_not_too_old(self):
+        # Review F3: a crashed or killed instance writes nothing; that isn't an old Noteling.
+        for text in ("", "  \n", None):
+            with self.subTest(text=text):
+                with self.assertRaises(glance.GlanceError) as caught:
+                    glance.parse(text)
+                self.assertEqual(caught.exception.reason, "no_answer")
+
+
 class LaunchReaderTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        self.addCleanup(setattr, glance, "LOCK", glance.LOCK)
+        glance.LOCK = str(self.root / "glance.lock")
         self.app = self.root / "Noteling.app"
         (self.app / "Contents").mkdir(parents=True)
         self.version("0.10.5")
@@ -273,6 +319,25 @@ class LaunchReaderTest(unittest.TestCase):
         with self.assertRaises(glance.GlanceError) as caught:
             glance.LaunchReader(str(self.app), opener=opener)(["--read-page", "--json"])
         self.assertEqual(caught.exception.reason, "noteling_too_old")
+
+    def test_an_instance_that_writes_nothing_is_no_answer(self):
+        with self.assertRaises(glance.GlanceError) as caught:
+            glance.LaunchReader(str(self.app), opener=self.opener("exit 0"))(["--read-page", "--json"])
+        self.assertEqual(caught.exception.reason, "no_answer")
+
+    def test_glances_take_a_host_wide_lock_and_wait_for_it(self):
+        # Review F2: a timeout kills instances that appeared since the glance began, so two glances never overlap.
+        import fcntl
+        line = json.dumps(report())
+        read = glance.LaunchReader(str(self.app), timeout=0.3, opener=self.opener("echo '%s' > \"$OUT\"" % line))
+        with open(glance.LOCK, "a") as other:
+            fcntl.flock(other, fcntl.LOCK_EX)
+            with self.assertRaises(glance.GlanceError) as caught:
+                read(["--read-page", "--json"])
+            self.assertEqual(caught.exception.reason, "busy")
+            self.assertFalse(self.log.exists())   # never launched while another glance held the lock
+        self.assertEqual(read(["--read-page", "--json"])["exit"], 0)   # released: the next glance runs
+        self.assertEqual(read(["--read-page", "--json"])["exit"], 0)   # and its own lock was released too
 
     def test_a_hang_times_out_kills_only_the_new_instance_and_removes_temp_files(self):
         binary = str(self.app / "Contents" / "MacOS" / "Noteling")
