@@ -3157,10 +3157,14 @@ class Store:
             run["stream_chain"] = head
 
     RUNS_TERMINAL = ("finished", "failed", "interrupted")
+    RUN_CITE = re.compile(r"(?<![0-9A-Za-z_-])run-([0-9a-f]{8,32})(?![0-9a-f])")
 
     def runs_pins(self):
-        """E4 retention: {run_id: reason} for runs whose files are never pruned."""
+        """E4 retention: {run_id: reason} for runs whose files are never pruned: routine fields, work evidence
+        (a ref, or `run-<hex>` in a ref or note) and any memory's `source` (active or superseded; full IDs and
+        8+ hex prefixes). Runs named only in other prose (work notes, messages, views, files) are not pinned."""
         pins = {}
+        cited = set()
         for work in self._all("works"):
             routine = work.get("routine") if isinstance(work.get("routine"), dict) else {}
             for reason, value in (("routine coverage.run", (routine.get("coverage") or {}).get("run")),
@@ -3172,7 +3176,21 @@ class Store:
                 ref = item.get("ref") if isinstance(item, dict) else None
                 if isinstance(ref, str) and ref.startswith("run-"):
                     pins.setdefault(ref, "work evidence")
-        for run in self._all("runs"):
+                if isinstance(item, dict):  # E4-r1 G1: a run named inside an evidence ref or note
+                    for text in (item.get("ref"), item.get("note")):
+                        cited.update(("work evidence", m) for m in self.RUN_CITE.findall(str(text or "")))
+        for memory in self._all("memories"):  # E4-r1 G1 (Rowan, Codex event-9c211ffd): memory sources cite runs
+            cited.update(("memory source", m) for m in self.RUN_CITE.findall(str(memory.get("source") or "")))
+        heads = {}
+        for reason, prefix in sorted(cited):
+            heads.setdefault(prefix[:8], []).append((prefix, reason))
+        runs = self._all("runs")
+        for run in runs:
+            run_id = str(run.get("id") or "")
+            for prefix, reason in heads.get(run_id[4:12], ()):  # a short prefix (8+ hex) pins every run it names
+                if run_id[4:].startswith(prefix):
+                    pins.setdefault(run_id, reason)
+        for run in runs:
             if run.get("status") == "failed" and _known_cost(run.get("cost")) is None:
                 pins.setdefault(run.get("id"), "failed run without known cost (claude.json backfill)")
         return pins

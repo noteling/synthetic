@@ -106,7 +106,12 @@ delegation covering it (`adapter.manage` is scoped by labels, so today it covers
 - E4's `displayed` facts are what the client reported in its stream, not what the model attended to; a session
   can rewrite `stream.jsonl` like its receipts (the `stream_chain` anchor makes that visible). The join needs the
   client to pass `claudecode/toolUseId`; a client that stops sending it leaves receipts unjoined, and verify
-  falls back to the prediction.
+  falls back to the prediction. A receipt whose `tool_use_id` has no matching `displayed` line (a run that timed
+  out mid-stream, a reducer failure on that line) is judged by the prediction too: a missing join never upgrades a
+  page (E4-r1 G4).
+- Opening Claude Code's saved spill file with the client's own Read tool leaves only a Read `tool_use` (its input
+  sha) in the stream, no MCP receipt: E4 does not heal a spill that way, and verify still doesn't count it as a
+  read (G3). Re-read with a smaller `max_bytes` or `event_get` chunks.
 
 ## E4: the executor stream and runs/ retention (Codex event-8b40b227, C1-C6)
 
@@ -146,12 +151,18 @@ Proposal `reviews/E4/proposal.md` (Vesper's workspace), approved with Q1 E4-B (n
 (`runtime.json` `runs_keep_days`, `runs_max_mb`, both optional). Only regular files named `<run-id>.<suffix>`
 directly in `runs/` for a known run that is `finished`, `failed` or `interrupted`, oldest first; never a symlink,
 a directory, a file of an unknown run or anything outside `runs/`. Never pruned: a running run, the newest 50, a
-run named by a routine's `coverage.run`, `rearmed_by_run` or `last_review.run`, a run cited as work evidence, a
-failed run whose cost is unknown (cost backfill reads its `claude.json`). The run rows and their
+run named by a routine's `coverage.run`, `rearmed_by_run` or `last_review.run`, a run cited as work evidence (a
+`ref`, or `run-<hex>` inside an evidence ref or note), a run cited in any memory's `source` (active or superseded;
+a full ID or a prefix of 8+ hex pins every run it names; E4-r1 G1), a failed run whose cost is unknown (cost
+backfill reads its `claude.json`). **Limit:** a run named only in other prose (a work note, a message, a private
+view, a self note, a review file) is not pinned; cite it as evidence or in a memory's `source` to keep it. The run rows and their
 `receipt_chain` anchors stay, so a pruned run verifies `no_receipts` with the anchor visible; cost comes from the
 row. The worker prunes at an idle point at most once per UTC day; `synthetics --home H prune-runs [--dry-run]
 [--keep-days N] [--max-mb N]` runs it by hand: the owner on any home, a session on its own home only (refused
 `own_home_only` otherwise, audited `authority.refused`; an allowed session prune is audited `authority.used`).
+A session prunes by exactly the configured rules (E4-r1 G2): `--keep-days` and `--max-mb` are owner-only
+(`owner_only`, audited), and `runs_keep_days` / `runs_max_mb` are owner config in `runtime.json`, not
+self-service (`runtime_restart` refuses them).
 No approval step. A prune that removes something writes audit `runs.pruned {runs, files, bytes, oldest, newest,
 kept_pinned, size_before, size_after, ...}`. Doctor reports info `runs_size` when `runs/` is over 80% of its
 bound.

@@ -104,7 +104,7 @@ plist on another home that the delegation covers (never the session's own home, 
 | `synthetics --home H routine teardown KIND… \| --all [--reason R]` | yes | refused `owner_only` |
 | `synthetics --home H routine list` | yes | own home only; another home is refused `own_home_only` |
 | `synthetics --home H routine verify RUN [--spill-bytes N]` (i17, [ledgerline.md](ledgerline.md)) | yes | fenced exactly like doctor: own home, or another home with a covering delegation (audited); else `own_home_only` |
-| `synthetics --home H prune-runs [--dry-run]` (E4 runs/ retention, [ledgerline.md](ledgerline.md)) | yes | own home only (audited); another home is refused `own_home_only` |
+| `synthetics --home H prune-runs [--dry-run]` (E4 runs/ retention, [ledgerline.md](ledgerline.md)) | yes | own home only (audited), configured rules only (`--keep-days`/`--max-mb` refused `owner_only`); another home is refused `own_home_only` |
 | `synthetics --home H doctor` | yes | own home; another home only with a covering `worker.manage` or `runtime.request` delegation (audited), else `own_home_only`; host-path flags own home only (G4, "doctor on another home" below) |
 | MCP `routine_rearm` | no: it needs a run, and operators use `restore` | yes, own home (the MCP server is bound to the session's run) |
 

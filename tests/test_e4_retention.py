@@ -81,6 +81,35 @@ class Retention(HomeCase):
         self.assertEqual(result["runs"], 3)  # 57 runs: the oldest 7 are candidates, 4 of them pinned
         self.assertEqual([r for r in runs if not self.files(r)], runs[4:7])
 
+    def test_r1_g1_memory_sources_and_evidence_notes_pin(self):
+        # E4-r1 G1 (Rowan; Codex event-9c211ffd): a run cited in a memory's source (full ID or 8+ hex prefix,
+        # active or superseded) or inside a work evidence ref/note is pinned; a run named only in a work note is not.
+        runs = self.make_runs(57)  # the oldest 7 are prune candidates
+        with self.store._tx():
+            self.store._save("memories", {"id": "memory-" + "1" * 32, "subject": "s", "predicate": "p", "value": "v",
+                                          "source": "event-abc; " + runs[0]}, "memory.created")
+            self.store._save("memories", {"id": "memory-" + "2" * 32, "subject": "s", "predicate": "p", "value": "v",
+                                          "superseded_by": "memory-" + "1" * 32,
+                                          "source": "pages shown in full (%s)" % runs[1][:12]}, "memory.created")
+            self.store._save("memories", {"id": "memory-" + "3" * 32, "subject": "s", "predicate": "p", "value": "v",
+                                          "source": "run-0000000 and xrun-%s and run-%s" % (runs[4][4:], "f" * 8)},
+                             "memory.created")
+            self.store._save("works", {"id": "work-" + "a" * 32, "title": "t", "status": "done",
+                                       "note": "prose only: " + runs[3],
+                                       "evidence": [{"ref": "event-" + "b" * 32, "level": "observed",
+                                                     "note": "seen in %s" % runs[2][:16]}]}, "work.created")
+        pins = self.store.runs_pins()
+        self.assertEqual(pins.get(runs[0]), "memory source")
+        self.assertEqual(pins.get(runs[1]), "memory source")
+        self.assertEqual(pins.get(runs[2]), "work evidence")
+        self.assertNotIn(runs[3], pins)  # a work note is prose: not pinned (documented limit)
+        self.assertNotIn(runs[4], pins)  # "xrun-<id>" is not a run citation; 7 hex is too short
+        result = self.store.runs_prune(now=LATER)
+        self.assertEqual(result["kept_pinned"], 3)
+        for run_id in runs[:3]:
+            self.assertEqual(len(self.files(run_id)), 4, run_id)
+        self.assertEqual([r for r in runs if not self.files(r)], runs[3:7])
+
     def test_running_run_kept(self):
         finished = self.make_runs(2)
         running = self.store.run_begin()
@@ -158,6 +187,30 @@ class Retention(HomeCase):
             "SELECT data FROM audit WHERE action='authority.refused'")]
         self.assertTrue(any(r.get("what") == "prune-runs" and r.get("code") == "own_home_only" for r in refused))
         self.store.run_finish(run["id"], "ok")
+
+    def test_r1_g2_session_gets_no_retention_override(self):
+        # E4-r1 G2 (Codex event-9c211ffd): a session prunes by the configured rules only.
+        self.make_runs(51)
+        run = self.store.run_begin()
+        env = {"SYNTHETICS_SESSION_RUN": run["id"], "SYNTHETICS_HOME": str(self.home)}
+        from synthetics.cli import main
+        import contextlib, io
+        for flags in (["--keep-days", "1"], ["--max-mb", "0.001"], ["--keep-days", "30", "--max-mb", "200"]):
+            with self.subTest(flags), mock.patch.dict(os.environ, env), contextlib.redirect_stdout(io.StringIO()), \
+                    contextlib.redirect_stderr(io.StringIO()):
+                self.assertNotEqual(main(["--home", str(self.home), "prune-runs"] + flags), 0)
+        refused = [json.loads(r["data"]) for r in self.store.db.execute(
+            "SELECT data FROM audit WHERE action='authority.refused'")]
+        self.assertEqual(sum(1 for r in refused if r.get("what") == "prune-runs" and r.get("code") == "owner_only"), 3)
+        self.assertEqual(self.audit_rows(), [])
+        self.assertEqual(sum(len(self.files(r["id"])) for r in self.store._all("runs")), 51 * 4)
+        self.store.run_finish(run["id"], "ok")
+        code, out, _ = run_cli("--home", str(self.home), "prune-runs", "--dry-run", "--keep-days", "1")
+        self.assertEqual(code, 0)  # the owner may override
+        from synthetics import runtime
+        for name in ("runs_keep_days", "runs_max_mb", "stream_output"):
+            with self.subTest(name), self.assertRaises(ValueError):  # runtime_restart can't change them either
+                runtime.check_self_service({name: 1}, {"budget": 1, "daily_limit": 0}, {"budget": 1})
 
 
 class WorkerIdle(HomeCase):

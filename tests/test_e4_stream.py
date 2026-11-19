@@ -371,6 +371,28 @@ class VerifyObserved(HomeCase):
         self.assertIn("predicted, not observed", verdict["spill_check"])
         self.assertNotIn("spill", verdict["unrecorded"][0])
 
+    def test_r1_g4_missing_join_never_upgrades_a_page(self):
+        # E4-r1 G4 (Rowan): a receipt with tool_use_id but no matching displayed line (a timeout mid-stream, or the
+        # reducer failing on that line) is judged by the prediction, never as displayed in full.
+        memories = ("memory_search", "T2", {"since": EPOCH},
+                    {"bytes": 25000, "sha256": "M" * 64, "created_first": "2026-11-15T20:57:36Z",
+                     "created_last": "2026-11-19T12:00:00Z", "capped": False})
+
+        def events(use_id, size):
+            return ("event_search", use_id, {"since": EPOCH},
+                    {"bytes": size, "sha256": "A" * 64, "created_first": self.FIRST,
+                     "created_last": "2026-11-16T01:00:00Z", "capped": True, "next_cursor": "c1"})
+        cases = (("no displayed line, 96 KB", events("T-missing", 96054), ("T-other", "full", "A" * 64)),
+                 ("no displayed line, 40 KB", events("T-missing", 40105), ("T-other", "full", "A" * 64)),
+                 ("shape unknown (reducer failure)", events("T1", 40105), ("T1", "unknown", "A" * 64)))
+        for name, page, shown in cases:
+            with self.subTest(name):
+                verdict = self.dream([page, memories], [shown, ("T2", "full", "M" * 64)], self.FIRST)
+                self.assertEqual(verdict["verdict"], "possibly_spilled", verdict)
+                self.assertNotIn("spill", verdict["unrecorded"][0])  # predicted, not observed
+                self.assertEqual(verdict["spill_join"]["observed"], 1)  # only the memory page joined
+                self.assertEqual(verdict["spill_join"]["predicted"], 1)
+
 
 class ExportStream(HomeCase):
     """Test 6: `kind: stream` export lines are allow-listed only; the home's bytes are unchanged."""

@@ -728,8 +728,8 @@ def parser():
     rprune = sub.add_parser("prune-runs", help="E4 (docs/ledgerline.md): delete old runs/ files (never pinned, "
                                                "running or the newest 50); a session: its own home only, audited")
     rprune.add_argument("--dry-run", action="store_true", help="list what would go; delete and audit nothing")
-    rprune.add_argument("--keep-days", type=float, default=None, help="default runtime.json runs_keep_days or 30")
-    rprune.add_argument("--max-mb", type=float, default=None, help="default runtime.json runs_max_mb or 200")
+    rprune.add_argument("--keep-days", type=float, default=None, help="owner only; default runtime.json runs_keep_days or 30")
+    rprune.add_argument("--max-mb", type=float, default=None, help="owner only; default runtime.json runs_max_mb or 200")
     exp = sub.add_parser("export", help="Ledgerline (i17 E2): read-only JSON-lines export, allow-listed, no bodies")
     exps = exp.add_subparsers(dest="export_command", required=True)
     expr = exps.add_parser("runs", help="runs, their MCP receipts (E1 facts) and, with --audit, audit rows")
@@ -988,6 +988,14 @@ def main(argv=None):
                                                                  "code": "own_home_only"})
                 raise authority.AuthorityError("own_home_only", "prune-runs in a session prunes only its own home "
                                                "(%s), not %s" % (a["home"], home), what="prune-runs")
+            if not a["owner"] and (args.keep_days is not None or args.max_mb is not None):
+                # E4-r1 G2 (Codex event-9c211ffd): a session prunes by the configured rules only; runs_keep_days and
+                # runs_max_mb change only through runtime.json (owner config), which runtime_restart can't set.
+                authority.audit(a["home"], "authority.refused", {"what": "prune-runs", "target": str(home),
+                                                                 "actor": a["id"], "run": a["run"],
+                                                                 "code": "owner_only"})
+                raise authority.AuthorityError("owner_only", "prune-runs --keep-days/--max-mb are owner-only: a session "
+                                               "prunes by runtime.json runs_keep_days/runs_max_mb", what="prune-runs")
             try:
                 config = json.loads((home / runtime_settings.CONFIG_FILE).read_text(encoding="utf-8"))
             except (OSError, ValueError):
