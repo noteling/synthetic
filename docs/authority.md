@@ -34,7 +34,9 @@ public in every profile (`roster_get`, people files) and retractable.
   child → parent; a retracted root invalidates its children. The owner retracts anything; a delegate
   retracts only children it wrote (`not_author`). Only the owner retracts a `retract` or `retire` entry
   (`owner_only`: undoing a revocation or a retirement); a session's retract of a `person` entry follows the role
-  rules (`own_role`, `unauthenticated_role`) and may not remove a profile (`owner_only`) (issue #2).
+  rules (`own_role`, `unauthenticated_role`) and may not remove a profile (`owner_only`) (issue #2). Only the
+  owner writes a `retire` entry (`owner_only`, i2b); sessions holding the company write grant keep `person`,
+  `alias` and `unalias`.
 
 ### Catalogue (no owner-only or credential item, nothing about private views — static test)
 

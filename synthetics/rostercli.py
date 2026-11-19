@@ -1,7 +1,8 @@
 """M26 Roster CLI: `synthetics roster company …`, `roster render`, `roster show`, `roster seed`.
 
 Company writes (put/alias/unalias/retire) are operator commands. Inside an employee session
-(SYNTHETICS_SESSION_RUN set) they are allowed only for an employee holding the company write grant: the
+(SYNTHETICS_SESSION_RUN set) put/alias/unalias are allowed only for an employee holding the company write grant
+(retire stays owner-only: the company store refuses it with owner_only): the
 write is authored by that employee, fenced on the session's run and audited in the employee's home, as
 `project bind` is. grant/revoke/import/redact, `roster show` and `roster seed --apply` are operator-only and
 refuse inside a session. No command writes another home's private log except `seed --apply`, which the

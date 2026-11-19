@@ -322,6 +322,9 @@ class CompanyStore(ProjectStore):
                 if fold_alias(body["alias"]) not in state["aliases"]:
                     raise ProjectError("unknown_alias", f"{where}: {body['alias']!r} is not an alias")
             elif kind == "retire":
+                if not operator:
+                    # Issue #2 ruling (i2b): retiring a person ends their home's standing; that is the owner's call.
+                    raise ProjectError("owner_only", f"{where}: only the owner may retire a person")
                 if body.get("id") not in state["people"]:
                     raise ProjectError("unknown_person", f"{where}: {body.get('id')!r}")
                 _text(body, "reason", DESCRIPTION_MAX, where, required=True)
