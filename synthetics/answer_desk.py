@@ -61,6 +61,9 @@ KINDS = ("answer", "context")
 JOURNAL_DAYS = 7
 JOURNAL_MAX = 200
 CONTRACT_TIMEOUT = 60
+# Vesper's #71 L1: a `pending` entry still missing this long after its claim can't be in flight any more (the
+# inbound call is bounded by CONTRACT_TIMEOUT), so it settles `lost` and `/` stops looking it up on every view.
+LOST_AFTER = 2 * CONTRACT_TIMEOUT
 FINAL_CODES = ("conflict", "invalid_state")  # the store's settled refusals; anything else may be sent again
 PACKAGE_ROOT = str(Path(__file__).resolve().parents[1])
 CSP = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'"
@@ -245,6 +248,9 @@ def journal_claim(root, home, qid, nonce, kind, sender, thread, work_ids=(), now
         entries = _journal_read(root, now)
         for entry in entries:
             if (entry.get("home"), entry.get("question_id"), entry.get("nonce")) == (home, qid, nonce):
+                if entry.get("state") == "lost":  # sent again after it settled lost: in flight once more
+                    entry.update(state="pending", at=now)
+                    _write_private(_journal_path(root), dict(entries=entries))
                 return entry
         entry = dict(home=home, question_id=qid, nonce=nonce, kind=kind, sender=sender, thread=thread,
                      work_ids=list(work_ids or []), state="pending", event_id=None, error_code=None, at=now)
@@ -341,10 +347,13 @@ def lookup(home, key_file, qid, nonce):
     return row["event_id"] if not row.get("error") and EID.match(str(row.get("event_id") or "")) else None
 
 
-def reconcile_pending(root, key_file):
+def reconcile_pending(root, key_file, now=None):
     """P2 §3: a submit left `pending` (the desk was killed, or the response was lost) is settled from a record:
-    `event-status --source --external-id` finds the event only if this channel fed it (D2(b))."""
-    for entry in journal(root):
+    `event-status --source --external-id` finds the event only if this channel fed it (D2(b)). Vesper's #71
+    L1: one still missing LOST_AFTER after its claim settles `lost`, so it costs one lookup (and one audit row)
+    at most once more, not one per view for 7 days. A same-form resend of a lost entry still looks it up first."""
+    now = time.time() if now is None else now
+    for entry in journal(root, now):
         if entry.get("state") != "pending":
             continue
         home = home_of(root, entry.get("home") or "")
@@ -353,6 +362,8 @@ def reconcile_pending(root, key_file):
         found = lookup(home, key_file, entry["question_id"], entry["nonce"])
         if found and found != "no_response":
             journal_settle(root, entry["home"], entry["question_id"], entry["nonce"], "accepted", event_id=found)
+        elif found is None and entry.get("at", now) <= now - LOST_AFTER:
+            journal_settle(root, entry["home"], entry["question_id"], entry["nonce"], "lost")
 
 
 def index_page(root, key_file=None):
@@ -370,6 +381,13 @@ def index_page(root, key_file=None):
             "<li>%s · %s for %s in %s</li>" % (E(_when(e.get("at"))), E(str(e.get("kind"))),
                                                E(str(e.get("question_id"))), E(str(e.get("home"))))
             for e in pending)
+    lost = [e for e in journal(root) if e.get("state") == "lost"]
+    if lost:
+        body += ("<h2>Not received</h2><p class='muted'>The desk sent these but the store has no record of them. "
+                 "If the question is still listed above, answer it again.</p><ul>%s</ul>") % "".join(
+            "<li>%s · %s for %s in %s</li>" % (E(_when(e.get("at"))), E(str(e.get("kind"))),
+                                               E(str(e.get("question_id"))), E(str(e.get("home"))))
+            for e in lost)
     return page("Open questions", body)
 
 

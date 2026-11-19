@@ -105,7 +105,7 @@ Both lines use `external_id` `desk:<question>:<form nonce>`, `sender` = the ques
 ### Retry and the desk journal (P2 §3)
 
 `answer-desk/submissions.json` (0600, written under the desk lock) records each form sent: home,
-question ID, nonce, kind, sender, thread, linked work IDs, state (`pending`, `accepted`, `refused`),
+question ID, nonce, kind, sender, thread, linked work IDs, state (`pending`, `accepted`, `refused`, `lost`),
 event ID, error code and time. It never holds the text, the cookie, the code or the form token.
 Entries older than 7 days, or past the newest 200, are dropped.
 
@@ -128,7 +128,12 @@ Entries older than 7 days, or past the newest 200, are dropped.
 - **Worker restart**: nothing to do. The event stays `accepted` until a session that read it finishes.
 - **Desk killed mid-send**: the entry stays `pending`, and `/` lists it as an unconfirmed submit. On
   each load of `/` the desk asks `channel event-status --source lookout:desk --external-id …`
-  (contract §3, own events only); when the event exists the entry becomes `accepted`.
+  (contract §3, own events only); when the event exists the entry becomes `accepted`. An entry
+  still missing 2 × the contract timeout (120 s) after it was written can't be in flight any more,
+  so it becomes `lost` and is listed under "Not received". After that it is never looked up on a
+  view of `/` again, so it costs no more subprocesses or audit rows. Sending the same form again
+  still looks it up first: if a late inbound did land, the resend finds it; if not, the resend is a
+  first send (open check included) and the entry is `pending` again.
 
 The desk writes nothing to any store directly; its only write is `channel inbound`.
 

@@ -2137,6 +2137,7 @@ class Store:
             return out
 
     EVENT_LOOKUP_HIDDEN = "No event with that source and external_id was accepted through channel %s."
+    EVENT_LOOKUP_MAX = 256  # Vesper's #71 n1: --source/--external-id are bounded before they reach the audit row
 
     def channel_event_status(self, credential, event_id=None, source=None, external_id=None):
         """Accepted vs processed for an event this channel delivered, by event ID or (#25 P2 D2(b)) by the
@@ -2152,6 +2153,9 @@ class Store:
             if not (isinstance(source, str) and source.strip() and isinstance(external_id, str)
                     and external_id.strip()):
                 raise ChannelError("bad_line", "give --event, or both --source and --external-id")
+            if len(source) > self.EVENT_LOOKUP_MAX or len(external_id) > self.EVENT_LOOKUP_MAX:
+                raise ChannelError("bad_line", "--source and --external-id are at most %d characters each"
+                                   % self.EVENT_LOOKUP_MAX)
             found = self.db.execute("SELECT record_id FROM idempotency WHERE namespace=? AND key=?",
                                     ("feed:" + source, external_id)).fetchone()
             event_id = found["record_id"] if found else None

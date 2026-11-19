@@ -176,7 +176,9 @@ response can learn whether the line arrived. It answers only for this channel's
 own events: a missing event and another channel's event get the same
 `not_routed` refusal. Every lookup is audited as `channel.event_lookup` with the
 channel, source, external ID and result, never a body. Give either `--event` or
-both `--source` and `--external-id`; anything else is `bad_line`.
+both `--source` and `--external-id`; anything else is `bad_line`. `--source` and
+`--external-id` are at most 256 characters each; a longer one is `bad_line` and is
+not audited, like the other malformed calls.
 Parse the line as JSON; don't grep for `"state":"processed"`, which has no space
 and never matches. The same applies to every contract response line. **processed** means the employee session that captured
 the event has *finished*, not merely started. An event this channel did not
