@@ -19,6 +19,9 @@ ADDRESS = "https://shopper@www.example-shop.test:8443/ip/Velvet-Lamp/42?q=Zebra4
 PAGE = {"app": "Google Chrome", "bundle": "com.google.Chrome", "site": ADDRESS, "documents": 1, "tabs": 3,
         "sheetOpen": False, "kinds": {"button": 12, "link": 40}, "withPageID": 7, "elements": 52, "onScreen": 30,
         "loading": False, "truncated": False, "ms": 140}
+# Needles for the leak tests. None can occur in a hex ID or an ISO timestamp: a bare "8443" matched a random
+# run ID (Codex, PR #32 checks), but ":8443" can't, since no clock field reaches 84 and hex has no colon.
+PAGE_WORDS = ("Zebra42", "Velvet", ":8443", "/ip/", "reviews", "shopper", "911.5")
 HIT = {"role": "AXButton", "kind": "button", "label": LABEL, "visible": True, "enabled": True,
        "frame": [911.5, 422.25, 120, 40]}
 
@@ -124,7 +127,7 @@ class GlanceToolTest(unittest.TestCase):
         self.glance(report(find=find, text="Zebra42 secret page text"), find="Add to cart")
         stored = self.stored_bytes()
         self.assertTrue(stored)
-        for needle in ("Zebra42", "Velvet", "8443", "/ip/", "reviews", "shopper", "911.5", "secret page text"):
+        for needle in PAGE_WORDS + ("secret page text",):
             self.assertNotIn(needle, stored)
 
     def test_status_json_and_lookout_show_the_glance_without_page_words(self):
@@ -137,7 +140,7 @@ class GlanceToolTest(unittest.TestCase):
         self.assertIn(self.run, html)
         self.assertIn("alike", html)
         self.assertIn(SITE, html)
-        for needle in ("Zebra42", "Velvet", "8443", "/ip/", "reviews", "shopper", "911.5"):
+        for needle in PAGE_WORDS:
             self.assertNotIn(needle, html)
             self.assertNotIn(needle, json.dumps(status))
 
@@ -224,6 +227,17 @@ class GlanceToolTest(unittest.TestCase):
         for find in ("Añadir al carrito", "Add to cart \u2013 Bananas", "カートに入れる", "Save\u00a0draft"):
             with self.subTest(passes=find):
                 glance.check(find=find)
+
+    def test_a_lone_surrogate_in_find_is_refused_by_check_before_reading(self):
+        # Review N1 on #32: MCP JSON "Add\\ud800" decodes to a lone surrogate (category Cs).
+        # check() must refuse it with its own sentence, before any reader runs or anything is recorded.
+        glance.reader = Fake(report())
+        for find in ("Add\ud800", "\udfffcart"):
+            with self.subTest(find=ascii(find)):
+                with self.assertRaisesRegex(ValueError, "invisible format characters"):
+                    self.server.call("screen_glance", {"find": find})
+        self.assertEqual(glance.reader.calls, [])
+        self.assertEqual(glance.recent(self.store), [])
 
     def test_ordinary_names_roles_and_bundles_pass(self):
         result, fake = self.glance(report(find={"name": "Save - draft", "match": "none", "count": 0,
