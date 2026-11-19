@@ -1,7 +1,7 @@
 # Routines (RTN)
 
 A routine is a recurring review that an employee does on a fixed cadence: an hourly check of its own work, a
-manager's team review, and (from P2) a daily dream that consolidates memory. It is built on what already exists:
+manager's team review, and a daily dream that consolidates memory and leaves the next session a working context. It is built on what already exists:
 an ordinary work record, the clock that fires a waiting work's `wake_at`, and a normal work session. There is no
 scheduler and no new database.
 
@@ -45,11 +45,19 @@ scheduler and no new database.
   (`Store.admission_held`): the engine's idle check, `run_begin` and the limit-pause selection skip it, so it
   can't start another session or build a failure streak. It stays pending as evidence. The next session
   started by any other input shows the quarantine in `routines_due`; `routine_rearm` consumes the held input.
-  After an operator `routine restore` the old input stays pending and held (it never runs).
+  An operator `routine restore` consumes it too (P2 n3: marked processed by `routine.restored`, never run), so
+  held inputs don't pile up.
 - **Quarantine is never silent (addendum (c)).** It shows in that home's `routines_due`, in `doctor`
   (`routine_quarantined`, `routine_failures`) and on Lookout's Routines block.
-- **working_context (addendum (b), P2).** Written only by the employee's own dream session through the normal
-  memory path (`memory_put` with `replaces`), never by another home or the CLI.
+- **One notice per quarantine (P2 N3).** In the same run-end transaction, the home queues one ordinary outbox
+  message from the employee to `report_to` (Manager routing below), naming the routine, the reason, the run and
+  `routine restore KIND`. It is keyed `routine-quarantine-<work id>-<anchor_at>`, so later polls, a worker
+  restart or a second failure of the same cycle send nothing more; a repair (`routine_rearm` or `restore`) moves
+  `anchor_at`, so only a fresh quarantine sends a new one. There is no model call and no re-arm. When no
+  recipient resolves, nothing is sent and doctor warns `routine_no_manager`. `quarantine.notice` records
+  `{key, sent, message_id | reason}`.
+- **working_context (addendum (b), D3).** Written only by the employee's own dream session through the normal
+  memory path (`memory_put` with `replaces`), never by another home or the CLI. See "The dream" below.
 - **Cost.** A quiet session costs about the same as any single-input session ($0.5-1.7 measured on 11-19).
   Hourly for three employees plus a daily dream is roughly $80-95/day of usage, measured against each home's
   enforced daily limit. Defaults stay at 60 minutes. If a limit pause holds a routine, it shows as
@@ -98,8 +106,9 @@ cadence (dream: the next `--dream-at`).
    already running must restart to load the new code and `prompts/routines.md` (after the merge, restart every
    worker anyway).
 2. **Seed.** `synthetics --home H routine seed --kinds hourly-check` (developer), or `--kinds team-review` for
-   the manager (team review includes the manager's own check, so it doesn't also need hourly-check). Kinds come
-   from the flag only; nothing defaults from the role. `dream` is refused until P2.
+   the manager (team review includes the manager's own check, so it doesn't also need hourly-check). Add
+   `dream` for any employee whose memory should be consolidated daily (`--kinds hourly-check,dream`,
+   `--dream-at HH:MM`). Kinds come from the flag only; nothing defaults from the role.
 3. **Initial wake.** Each routine starts waiting with `wake_at = now + every` (dream: the next `--dream-at`,
    default 01:30Z, just after the UTC daily-limit reset). `anchor_at` starts there.
 4. **Cadence.** `--every` is in minutes, minimum 5 (use 5 in a test home to watch two fires). The default is 60
@@ -124,7 +133,7 @@ cadence (dream: the next `--dream-at`).
 | `routine_closed` | warning | done or cancelled without teardown; restore with `routine restore KIND` |
 | `routine_no_manager` | warning | no manager resolved (E2) |
 
-## Dream checkpoint (D2, E1; guidance in P2)
+## Dream checkpoint (D2, E1)
 
 `routine_rearm(covered_through=T, omissions=[{reason, from?}])` is accepted only for the dream routine, and
 only when:
@@ -137,3 +146,35 @@ cutoff). The store records `coverage {run, at, cutoff, through, advanced, omissi
 checkpoint where it is, as does a failed or interrupted dream, which is also quarantined. A since= search or
 reaching a tool limit alone never justifies advancing it: the store can't see what was read, so that rule
 lives in the guidance and in the `from` bound.
+
+## The dream (P2)
+
+The `## dream` section of `synthetics/prompts/routines.md` is the guidance; the mechanics are:
+
+- **Retrieval in time order (since=).** MCP `memory_search(since=S)` and `event_search(since=S)` return
+  `{memories|events, since, capped, unread_from}`: items created at or after S (inclusive, by `created_at`),
+  oldest first, with every query word required (no ranked fill). `capped: true` means the limit cut the page,
+  and `unread_from` is the `created_at` of the first item not returned: the next page's `since`, or the `from`
+  of an omission if the dream stops there. Without `since` both tools behave and return exactly as before.
+- **Checkpoint.** The dream passes `covered_through` (≤ `evidence_cutoff`, ≤ every omission's `from`) and its
+  omissions to `routine_rearm`, as in "Dream checkpoint" above. Paging from `unread_from` and the inclusive
+  `since` mean a T equal to an omission's `from` re-reads that one item next time and skips nothing.
+- **working_context (D3).** One memory, predicate `working_context`, subject the employee's own identity, at
+  most 4000 characters. `memory_put` accepts it only inside a session whose `routines_due` lists the dream,
+  and, while one is active, only with `replaces=<that id>`; the CLI (no run) is refused. Every snapshot carries
+  it as `working_context {id, value, created_at, source, replaces}` (null when none), outside `memories`,
+  `memory_index` and `memory_context_truncated`, so it survives a worker restart and any number of newer
+  memories. The full record also stays retrievable with `memory_search`.
+- **Seeding.** `routine seed --kinds dream [--dream-at HH:MM]` (default 01:30Z, just after the daily-limit
+  reset); `--first dream=+MIN` for a test home.
+
+## Test map (E1-E3, D3; P2 addendum)
+
+| Rule | Tests |
+|---|---|
+| E1 evidence cutoff, omissions bound covered_through | `test_rtn_p1_routines.DreamCheckpoint`, `test_rtn_p1r1.F3UnknownOmission`, `test_rtn_p2_dream.Since` (capped page through the dream path) |
+| E2 manager resolved from configuration | `test_rtn_p1_routines.ManagerRoute`, `test_rtn_p1r1.F4OfficialRoster`, `test_rtn_p2_dream.QuarantineNotice` (no manager: nothing sent) |
+| E3 session fencing, audited refusals | `test_rtn_p1_routines.SessionFencing` (incl. the `authority.refused` rows) |
+| D3 working_context consumed by a later session | `test_rtn_p2_dream.WorkingContext` (new Store, 61 newer memories, a real Engine session) |
+| N3 one quarantine notice | `test_rtn_p2_dream.QuarantineNotice` (finish, fail + restart, interrupt + second failure, repair + re-quarantine) |
+| n3 restore consumes the held input | `test_rtn_p2_dream.RestoreConsumesHeldInput` |

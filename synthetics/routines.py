@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 KINDS = ("hourly-check", "team-review", "dream")
-SEED_KINDS = ("hourly-check", "team-review")  # dream guidance ships in P2; the store already supports the kind
+SEED_KINDS = KINDS  # P2: the dream guidance has shipped, so every kind is seedable
 DEFAULT_EVERY = {"hourly-check": 60, "team-review": 60, "dream": 1440}
 MIN_EVERY = 5
 DEFAULT_DREAM_AT = "01:30"
@@ -21,6 +21,22 @@ FOLD_IN_MINUTES = 15  # a waiting routine due within this window rides along in 
 REVIEW_MAX = 2048
 FAILURE_WINDOW_DAYS = 7
 GUIDANCE_FILE = Path(__file__).with_name("prompts") / "routines.md"
+WORKING_CONTEXT = "working_context"  # D3: the memory predicate the dream writes; the snapshot shows it on its own
+WORKING_CONTEXT_MAX = 4000
+
+
+def quarantine_key(work_id, cycle):
+    """N3: one notice per quarantined cycle. A repeat or second failure of the same cycle reuses this key; a
+    repair (routine_rearm or restore) moves anchor_at, so a fresh quarantine gets a new key."""
+    return "routine-quarantine-%s-%s" % (work_id, cycle)
+
+
+def quarantine_notice(kind, work_id, cycle, entry, home):
+    """N3: the deterministic notice text (no model call)."""
+    return ("Routine %s (%s) was quarantined: %s (run %s at %s), cycle %s. It will not fire again until it is "
+            "repaired: the employee's next session re-arms it with routine_rearm after doing the review, or the "
+            "owner runs: synthetics --home %s routine restore %s. doctor shows routine_quarantined until then."
+            % (kind, work_id, entry.get("reason"), entry.get("run"), entry.get("at"), cycle, home, kind))
 
 
 def parse(value):

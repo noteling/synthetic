@@ -24,8 +24,16 @@ Start a short team discussion (Board post or message) only when the answer needs
 
 ## dream
 
-Daily reflection over evidence since the last checkpoint (`covered_through`, or the start of this home when it is null), up to this session's `evidence_cutoff` (when it began). P2 expands the retrieval guidance; the checkpoint rules hold now:
-- Pass `covered_through=T` only for material you actually read. T is at most `evidence_cutoff` and never later than the earliest material you didn't read.
-- When a retrieval was truncated, capped, hit a tool limit, or a `since=` search didn't reach the cutoff, record it in `omissions` as {reason, from}, with from = the timestamp of the earliest unread material. A since= search or reaching a tool limit alone never justifies advancing covered_through.
-- A partial review passes the T it actually reached, or omits covered_through so the checkpoint stays put.
-- Private reflections about yourself and colleagues stay in your memory or views; only project lessons go to project logs. Zero new insight is a valid result, and a reflection is a hypothesis, not evidence.
+A daily reflection over the evidence that arrived since your last checkpoint: `covered_through` in this item, or the start of this home when it is null, up to `evidence_cutoff` (when this session began). Its purpose is to keep what you learned retrievable and to leave the next session a short, accurate working context. Plan freely: deciding next steps from what you find is part of it.
+
+1. Retrieve in time order. Call `memory_search(since=S)` and `event_search(since=S)` with S = `covered_through` (`1970-01-01T00:00:00Z` when it is null), using the largest limit you can read. Each result is `{memories|events, since, capped, unread_from}`, oldest first. When `capped` is true, page on with `since=unread_from` until a page is not capped or reaches `evidence_cutoff`. Items created after `evidence_cutoff` belong to the next dream; you may read them, but they don't count toward this checkpoint. Use thread_history or event_get when a conversation's context matters.
+2. Reflect. Look for facts that changed, memories an event contradicts or makes obsolete, procedures you learned the hard way, commitments you made, and what colleagues now rely on you for. Correct an obsolete memory with `memory_put(..., replaces=<old id>)` instead of adding a near-duplicate. Store only what a source supports, and cite it. A reflection is a hypothesis, not evidence, and zero new insight is a valid result.
+3. Write the working context. One memory with predicate `working_context`, subject your own identity ID, at most 4000 characters: your current goals and their owners, what each waits on, the next concrete steps, and anything a fresh session must not forget. When one is active (the snapshot's `working_context`), pass `replaces=<its id>`. Only a dream session can write it, and every later snapshot shows it on its own, however many memories come after it.
+4. Record coverage and re-arm with `routine_rearm(work_id, review, cycle, covered_through=T, omissions=[...])`:
+   - T is the point you actually read through: `evidence_cutoff` when every page reached it uncapped, otherwise earlier. T is never later than `evidence_cutoff` or than the earliest material you did not read.
+   - Each retrieval you stopped while it was still `capped`, or that was truncated, skipped or hit a tool limit, goes into `omissions` as {reason, from}, with from = that retrieval's `unread_from` (the earliest unread material). If you can't tell where the unread material starts, give the reason without from, and leave covered_through out: the checkpoint stays put.
+   - A `since=` search or reaching a tool limit alone never justifies advancing covered_through; only material you read does.
+   - A partial dream passes the T it actually reached, or omits covered_through so the next dream starts from the same point.
+   - The review says what you read (counts and range), what you corrected or added, and what you left unread.
+
+Private reflections about yourself and colleagues stay in your memory or views; only project lessons go to project logs, through the project tools.
