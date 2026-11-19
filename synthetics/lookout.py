@@ -291,8 +291,9 @@ STYLE = ("body{font:14px/1.45 -apple-system,system-ui,sans-serif;margin:1.5em;ma
 
 def page(title, body, root_projects=()):
     nav = '<nav><a href="/">Team</a>' + "".join(
-        '<a href="/p/%s/threads">%s threads</a><a href="/p/%s/board">board</a><a href="/p/%s/memory">memory</a>'
-        % (quote(p), E(p), quote(p), quote(p)) for p in root_projects) + "</nav>"
+        '<a href="/p/%s/threads">%s threads</a><a href="/p/%s/work">open work</a><a href="/p/%s/board">board</a>'
+        '<a href="/p/%s/memory">memory</a>'
+        % (quote(p), E(p), quote(p), quote(p), quote(p)) for p in root_projects) + "</nav>"
     return ("<!doctype html><html><head><meta charset='utf-8'><title>%s</title><style>%s</style></head><body>%s"
             "<h1>%s</h1>%s<p class='muted'>Lookout: generated %s from shared records only. Read-only.</p></body></html>"
             % (E(title), STYLE, nav, E(title), body, E(datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ"))))
@@ -525,6 +526,44 @@ def board_page(root, project):
     return page("%s: board" % project, "\n".join(out), projects(root))
 
 
+OPEN_STATUSES = ("ready", "waiting")
+
+
+def work_page(root, project, now=None):
+    """VIS G1: the project's open published works (ready/waiting backlog rows), grouped by owner name.
+
+    Built only from the project log's backlog projection, the same rows the board shows; unpublished work appears
+    only on the Team page of its owner's home. Closed rows (done/cancelled) are counted and left to the board."""
+    now = now or datetime.now(timezone.utc)
+    entries, _ = project_entries(root, project)
+    rows = list(projectlog.fold(entries)["backlog"].values())
+    people = company(root).get("people", {})
+    open_rows = [r for r in rows if r.get("status") in OPEN_STATUSES]
+    closed = len(rows) - len(open_rows)
+    groups = {}
+    for r in open_rows:
+        groups.setdefault(r.get("owner"), []).append(r)
+    out = ["<p class='muted'>Open works published to this project (ready or waiting), by owner. "
+           "Updated = age of the owner's latest projection of that work.</p>"]
+    if not open_rows:
+        out.append("<p class='muted'>No open published work.</p>")
+    for owner in sorted(groups, key=lambda o: (_name(people, o).lower(), o or "")):
+        mine = sorted(groups[owner], key=lambda r: (r.get("priority") if isinstance(r.get("priority"), int) else 99,
+                                                    r["seq"]))
+        out.append("<h2>%s (%d)</h2>" % (E(_name(people, owner)), len(mine)))
+        out.append("<table><tr><th>status</th><th>pri</th><th>title</th><th>waiting for</th><th>blocked by</th>"
+                   "<th>updated</th><th>work</th></tr>")
+        for r in mine:
+            out.append("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td><code>%s</code></td>"
+                       "</tr>" % (_v(r.get("status")), _v(r.get("priority")), _v(r.get("title")),
+                                  _v(r.get("waiting_for")), E("; ".join(r.get("blocked_by") or [])),
+                                  E(_age(r.get("at"), now)), _v(r.get("work_id"))))
+        out.append("</table>")
+    out.append("<p class='muted'>%d closed (done or cancelled) on the <a href=\"/p/%s/board\">board</a>.</p>"
+               % (closed, quote(project)))
+    return page("%s: open work" % project, "\n".join(out), projects(root))
+
+
 def memory_page(root, project):
     entries, texts = project_entries(root, project)
 
@@ -551,6 +590,8 @@ def route(root, path, agents=None):
             body = thread_page(root, project, parts[3])
             if body is not None:
                 return 200, body
+        if what == "work" and len(parts) == 3:
+            return 200, work_page(root, project)
         if what == "board" and len(parts) == 3:
             return 200, board_page(root, project)
         if what == "memory" and len(parts) == 3:
