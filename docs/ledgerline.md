@@ -53,12 +53,17 @@ receipts, and builds the contiguous read chain per stream (events, memories):
 
 1. A `since=` page continues the chain when its `since` ≤ the chain end, a `cursor=` page when its cursor is the
    previous page's `next_cursor`. Its end is `created_last`, or the cutoff when `capped` is false.
-2. A page whose `result.bytes` exceeds the spill threshold (default 32000, F2's `max_bytes`) is
-   `possibly_spilled`: the chain stops at its `created_first`. **This is predicted, not observed** (C2): only an
-   executor stream (E4, not built) would show what the client displayed. The output says so in `spill_check`.
+2. A page the client did not display whole stops the chain at its `created_first`. With an executor stream
+   (E4 below) this is **observed**: the receipt's `tool_use_id` joins the stream's `displayed` fact, and the page
+   counts as seen only when its shape is `full` and its sha256 equals the returned `result.sha256`; otherwise the
+   break is `spilled` (`spill: observed`). A receipt without a join (a run before E4, a `stream_output: false`
+   session, an `unknown` shape) falls back to the prediction: a page whose `result.bytes` exceeds the spill
+   threshold (default 32000, F2's `max_bytes`) is `possibly_spilled`. **That is predicted, not observed** (C2);
+   `spill_check` says which applied (`observed`, `mixed: N observed, M predicted`, or the predicted note).
    A smaller re-read of the same range (same `since`, or the same `cursor`, at a lower `max_bytes`, as the dream
    guidance says) heals the break: verify keeps scanning, and a spill counts only if no seen page carries the
-   chain past its `from`; healed spills are listed under the stream's `healed` (B1, r2).
+   chain past its `chain_at` (where the spill stopped the chain: its `from`, unless the chain already stood further
+   on); healed spills are listed under the stream's `healed` (B1, r2).
 3. A `truncated` item is unread unless `event_get` receipts for its ID cover `0..body_len`; the chain stops at its
    `created_at`. An `event_get` receipt covers only when its `result.bytes` is at or under the spill threshold: a
    plain `event_get` of a large body can spill too (listed under `spilled_event_get`). For a plain `event_get`,
@@ -75,7 +80,7 @@ read a large body with `event_get` chunks (`body_offset`). Each break and each s
 `unread_from` (G4), to match against an omission's `from`.
 
 Verdict: `overclaimed` (with `first_unread`) when `through` is past the smaller chain end or an omission's `from`;
-`possibly_spilled` / `unread_truncated` when a break in the chain has no recorded omission at or before it;
+`spilled` (observed) / `possibly_spilled` (predicted) / `unread_truncated` when a break in the chain has no recorded omission at or before it;
 `consistent` otherwise; `no_evidence` for an unknown run, no `routine.rearmed` row for a dream by this run (C3),
 no receipt file, or `since=` receipts written before E1. `chain` reports `chain_ok`, `chain_broken`
 (an edited line, or a head that differs from the anchored `receipt_chain`), `unanchored` (still running,
@@ -98,14 +103,90 @@ delegation covering it (`adapter.manage` is scoped by labels, so today it covers
   A `through` equal to it is accepted because `since=` is inclusive: the next dream re-reads every item at that
   timestamp, so nothing is skipped (L1).
 - Verify judges one run (G1): a catch-up read in another session doesn't count for this dream (L3).
+- E4's `displayed` facts are what the client reported in its stream, not what the model attended to; a session
+  can rewrite `stream.jsonl` like its receipts (the `stream_chain` anchor makes that visible). The join needs the
+  client to pass `claudecode/toolUseId`; a client that stops sending it leaves receipts unjoined, and verify
+  falls back to the prediction. A receipt whose `tool_use_id` has no matching `displayed` line (a run that timed
+  out mid-stream, a reducer failure on that line) is judged by the prediction too: a missing join never upgrades a
+  page (E4-r1 G4).
+- Opening Claude Code's saved spill file with the client's own Read tool leaves only a Read `tool_use` (its input
+  sha) in the stream, no MCP receipt: E4 does not heal a spill that way, and verify still doesn't count it as a
+  read (G3). Re-read with a smaller `max_bytes` or `event_get` chunks.
 
-## Not in this slice
+## E4: the executor stream and runs/ retention (Codex event-8b40b227, C1-C6)
 
-E4, the executor stream (`--output-format stream-json`, needs its own redaction design), and `runs/` retention
-(none exists; it must never prune a run named by a routine's `coverage.run` or a work's evidence) are separate
-proposal-first follow-ups.
+Proposal `reviews/E4/proposal.md` (Vesper's workspace), approved with Q1 E4-B (no raw stream on disk).
+
+- **E4a, join key.** The MCP server reads `params._meta["claudecode/toolUseId"]` (a plain token, at most 128
+  characters) and adds it to the receipt as `tool_use_id`. The response bytes are the same with or without it.
+- **E4b, display facts.** `brain.py` runs the session with `--output-format stream-json --verbose`. stdout is a
+  pipe read line by line by a reducer thread (`ledgerline.StreamReducer`); raw lines, which hold everything the
+  model saw (other people's messages, memory values, private views, shell output), are never written to disk. The
+  reducer appends facts to `runs/<run>.stream.jsonl` (0600, `prev_sha256` chain, head anchored in the run record
+  as `stream_chain`, only when the file exists). One line per event, keys limited to `ledgerline.STREAM_ALLOWED`:
+  `init {model, claude_code_version, tools, mcp_servers [{name, status}]}`; `tool_use {tool_use_id, name,
+  input_bytes, input_sha256}`; `displayed {tool_use_id, shape, bytes, sha256, reported_chars?,
+  saved_outside_home?}` with shape `full`, `spilled` (the client's "exceeds maximum allowed tokens" form),
+  `preview` (`<persisted-output>`), `error`, or `unknown` (never guessed); `turn {text_blocks, text_bytes}`;
+  `result {subtype, is_error, num_turns, total_cost_usd, duration_ms}`; `stream_error {stage, type}`;
+  `reader_detached {join_seconds}` (below). Never text,
+  input, thinking, paths, cwd, session ID, socket path, credential expiry or memory paths (static test,
+  `STREAM_FORBIDDEN`). The stream's `result` line is kept apart before any reduction and written to
+  `<run>.claude.json` as json mode wrote it, so cost, budget-cap and error handling are unchanged; a reducer or
+  stream-file failure only means fewer facts.
+- **Escaped pipe holder (E4-r2, Rowan B1).** After the CLI exits and its process group is stopped, the worker
+  waits at most `ClaudeBrain.READER_JOIN` (10 s) for the reader. A descendant that left the group (setsid and a
+  double fork) can still hold the pipe's write end; closing the stream then would block until that holder exits,
+  past `timeout`. So if the reader is still alive, the worker leaves the stream to the daemon reader, writes
+  `reader_detached`, ignores later lines and keeps what was read (the result line included). Limit: that pipe's fd
+  and the reader thread stay open until the holder exits; a stream session can take up to 10 s longer than json mode
+  in this case (Rowan's probe: 25 s holder → 10.2 s, was 25 s; json 0.4 s).
+- **Fallback (C1).** `runtime.json` `"stream_output": false` restores the pre-E4 `--output-format json` path
+  exactly (same argv and files). It is optional: a config without it stays valid and keeps its digest. Change it
+  with `synthetics --home H runtime request --set stream_output=false --reason R --by ID` (not employee
+  self-service); it applies when the worker restarts or loads the config.
+- **E4c.** `routine verify` judges each joined page by what was displayed (step 2 above). The display threshold
+  is host-specific: on Vesper's host Claude Code 2.1.326 showed 40 105-character MCP results whole and spilled
+  70 240 (token-based), so the predicted 32 000 over-flags; it stays for runs without a join (C5), since
+  over-flagging is the safe direction.
+- **Export.** `export runs` adds `kind: stream` lines: `{run_id, seq, stream_kind, line_sha256, prev_sha256,
+  facts}`; a field not allowed for its kind becomes `{bytes, sha256}`. Same fence as the rest of export.
+- **What the facts say about other people.** Only sha256 of displayed text that may contain their words (the
+  same exposure as E1's `result.sha256`). Claude Code's own spill files outside the home are issue #64, out of
+  scope here.
+
+**runs/ retention (Codex Q2, C3).** `Store.runs_prune`: keep 30 days and at most 200 MB per home's `runs/`
+(`runtime.json` `runs_keep_days`, `runs_max_mb`, both optional). Only regular files named `<run-id>.<suffix>`
+directly in `runs/` for a known run that is `finished`, `failed` or `interrupted`, oldest first; never a symlink,
+a directory, a file of an unknown run or anything outside `runs/`. Never pruned: a running run, the newest 50, a
+run named by a routine's `coverage.run`, `rearmed_by_run` or `last_review.run`, a run cited as work evidence (a
+`ref`, or `run-<hex>` inside an evidence ref or note), a run cited in any memory's `source` (active or superseded;
+a full ID or a prefix of 8+ hex pins every run it names; E4-r1 G1), a failed run whose cost is unknown (cost
+backfill reads its `claude.json`). **Limit:** a run named only in other prose (a work note, a message, a private
+view, a self note, a review file) is not pinned; cite it as evidence or in a memory's `source` to keep it. The run rows and their
+`receipt_chain` anchors stay, so a pruned run verifies `no_receipts` with the anchor visible; cost comes from the
+row. The worker prunes at an idle point at most once per UTC day; `synthetics --home H prune-runs [--dry-run]
+[--keep-days N] [--max-mb N]` runs it by hand: the owner on any home, a session on its own home only (refused
+`own_home_only` otherwise, audited `authority.refused`; an allowed session prune is audited `authority.used`).
+A session prunes by exactly the configured rules (E4-r1 G2): `--keep-days` and `--max-mb` are owner-only
+(`owner_only`, audited), and `runs_keep_days` / `runs_max_mb` are owner config in `runtime.json`, not
+self-service (`runtime_restart` refuses them).
+The size bound counts only the files a prune manages (E4-r2, Rowan L2): files of unknown runs and other names
+are never removed and never drive the size pass, so they can't make it delete young runs; the result reports them
+as `unremovable_bytes`, with `over_bound_after` for `runs/` as a whole.
+No approval step. A prune that removes something writes audit `runs.pruned {runs, files, bytes, oldest, newest,
+kept_pinned, size_before, size_after, unremovable_bytes, over_bound_after, ...}`. Doctor reports info `runs_size`
+when `runs/` is over 80% of its bound, and warning `runs_over_bound` when it is over (after the daily prune that
+means pinned, newest, running or unknown files fill it). The worker checks the day once per process day, not on
+every idle poll (E4-r2 L1); a failed prune is reported once and retried the next UTC day.
+
+Measurements (C4) are in the E4 build handoff.
 
 ## Tests
 
 `tests/test_i17_ledgerline.py` (E1, chain, C4) and `tests/test_i17_export_verify.py` (E2 allow-list, static
 credential names, unchanged home bytes; E3 fixtures incl. the run-30546289 shape; C5 fence).
+`tests/test_e4_stream.py` (E4a join key, reducer shapes and allow-list, C1 json fallback and identical results,
+timeout, E4c observed verdicts, stream export) and `tests/test_e4_retention.py` (bounds, pins, file rules, dry
+run, C3 unchanged costs/Lookout/doctor/recovery, CLI fence, once-a-day idle prune), and `tests/test_e4_r2.py` (escaped pipe holder, reducer detach, idle-poll
+cache, unremovable bytes, doctor `runs_over_bound`).

@@ -376,6 +376,7 @@ def diagnose(home, label=None, compare=None, key_files=(), launchd=_launchd_pid,
         self_raise_checks(db, add, report)
         clamped_checks(home, add, report)
         launch_op_checks(db, add, report)
+        runs_size_check(home, add)
     finally:
         db.close()
     collector_checks(home, collector_plists, collector_dirs, add, report)
@@ -399,6 +400,30 @@ def self_raise_checks(db, add, report):
     if raises:
         add("info", "limit_self_raise", "%d self-raise(s) of the daily limit; newest %s $%s %s (run %s)"
             % (len(raises), raises[0]["at"], raises[0]["usd"], raises[0]["duration"], raises[0]["run"]))
+
+
+def runs_size_check(home, add):
+    """E4: info runs_size when runs/ is over 80% of its retention size bound (the worker prunes at idle)."""
+    try:
+        from . import runtime as runtime_settings
+        try:
+            config = json.loads((Path(home) / runtime_settings.CONFIG_FILE).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            config = {}
+        bound = float(runtime_settings.setting(config, "runs_max_mb")) * 1024 * 1024
+        total = sum(e.stat(follow_symlinks=False).st_size for e in os.scandir(str(Path(home) / "runs"))
+                    if e.is_file(follow_symlinks=False))
+    except Exception:  # noqa: BLE001 - no runs/ yet, or unreadable: nothing to report
+        return
+    if total > bound:
+        # E4-r2 (Rowan L2): still over after the daily prune means pinned, recent or unknown files fill runs/.
+        add("warning", "runs_over_bound", "runs/ holds %.1f MB, over its %.0f MB bound; if the daily prune already ran, "
+            "what is left is pinned, among the newest runs, running, or not a known run's file "
+            "(`synthetics prune-runs --dry-run` shows unremovable_bytes and over_bound_after)"
+            % (total / 1048576.0, bound / 1048576.0))
+    elif total > 0.8 * bound:
+        add("info", "runs_size", "runs/ holds %.1f MB of a %.0f MB bound; the worker prunes once a day at idle "
+            "(`synthetics prune-runs --dry-run` lists what would go)" % (total / 1048576.0, bound / 1048576.0))
 
 
 def launch_op_checks(db, add, report):

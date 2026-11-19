@@ -237,6 +237,7 @@ class Server:
     def __init__(self, store, run_id=None):
         self.store = store
         self.run_id = run_id
+        self.tool_use_id = None  # E4a: set by respond() for the duration of one tools/call
 
     def call(self, name, arguments):
         try:
@@ -322,6 +323,8 @@ class Server:
             "tool": name, "arguments": self._redact(arguments) if name in self.PRIVATE_TOOLS else arguments,
             "success": bool(success),
         }
+        if getattr(self, "tool_use_id", None):
+            record["tool_use_id"] = self.tool_use_id
         if error is not None:
             record["error"] = error[:1000]
         if value is not self._NO_VALUE:
@@ -365,11 +368,18 @@ class Server:
             result = {"tools": offered(self.store.home)}
         elif method == "tools/call":
             params = message.get("params") or {}
+            # E4a: the client's tool_use_id joins this call's receipt to what the executor stream shows it
+            # displayed. Read only; the response bytes are the same with or without _meta.
+            meta = params.get("_meta") if isinstance(params, dict) else None
+            use_id = meta.get("claudecode/toolUseId") if isinstance(meta, dict) else None
+            self.tool_use_id = use_id if isinstance(use_id, str) and ledgerline.TOOL_USE_ID.fullmatch(use_id) else None
             try:
                 value = self.call(params.get("name"), params.get("arguments", {}))
                 result = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}]}
             except (ValueError, TypeError, KeyError) as exc:
                 result = {"isError": True, "content": [{"type": "text", "text": str(exc)}]}
+            finally:
+                self.tool_use_id = None
         else:
             return {"jsonrpc": "2.0", "id": identifier, "error": {"code": -32601, "message": "Method not found."}}
         return {"jsonrpc": "2.0", "id": identifier, "result": result}

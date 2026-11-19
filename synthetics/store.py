@@ -3,6 +3,7 @@
 import hashlib
 import json
 import math
+import os
 import re
 import sqlite3
 import uuid
@@ -3091,6 +3092,7 @@ class Store:
                 raise ValueError("Only an active run can finish.")
             run.update(status="finished", summary=summary, cost=cost, finished_at=timestamp())
             run["receipt_chain"] = self._receipt_chain(run_id)
+            self._stream_chain(run, run_id)
             for event_id in run["event_ids"]:
                 self.db.execute("UPDATE events SET processed_run=? WHERE id=? AND processed_run IS NULL", (run_id, event_id))
             self._quarantine_left_ready(run, "finished")
@@ -3106,6 +3108,7 @@ class Store:
                 raise ValueError("Only an active run can fail.")
             run.update(status="failed", error=str(error), cost=cost, finished_at=timestamp())
             run["receipt_chain"] = self._receipt_chain(run_id)
+            self._stream_chain(run, run_id)
             self._quarantine_left_ready(run, "failed")
             return self._save("runs", run, "run.failed")
 
@@ -3172,6 +3175,143 @@ class Store:
         except Exception as exc:  # noqa: BLE001
             return {"error": type(exc).__name__}
 
+    def _stream_chain(self, run, run_id):
+        """E4: anchor the head of runs/<run>.stream.jsonl too, only when the executor stream exists (a session on
+        the stream_output: false path leaves the run record exactly as before). Never fails the transition."""
+        if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", run_id):
+            return
+        try:
+            head = ledgerline.chain_head(self.home / "runs" / (run_id + ".stream.jsonl"))
+        except Exception as exc:  # noqa: BLE001
+            head = {"error": type(exc).__name__}
+        if head is not None:
+            run["stream_chain"] = head
+
+    RUNS_TERMINAL = ("finished", "failed", "interrupted")
+    RUN_CITE = re.compile(r"(?<![0-9A-Za-z_-])run-([0-9a-f]{8,32})(?![0-9a-f])")
+
+    def runs_pins(self):
+        """E4 retention: {run_id: reason} for runs whose files are never pruned: routine fields, work evidence
+        (a ref, or `run-<hex>` in a ref or note) and any memory's `source` (active or superseded; full IDs and
+        8+ hex prefixes). Runs named only in other prose (work notes, messages, views, files) are not pinned."""
+        pins = {}
+        cited = set()
+        for work in self._all("works"):
+            routine = work.get("routine") if isinstance(work.get("routine"), dict) else {}
+            for reason, value in (("routine coverage.run", (routine.get("coverage") or {}).get("run")),
+                                  ("routine rearmed_by_run", routine.get("rearmed_by_run")),
+                                  ("routine last_review.run", (routine.get("last_review") or {}).get("run"))):
+                if isinstance(value, str):
+                    pins.setdefault(value, reason)
+            for item in work.get("evidence") or []:
+                ref = item.get("ref") if isinstance(item, dict) else None
+                if isinstance(ref, str) and ref.startswith("run-"):
+                    pins.setdefault(ref, "work evidence")
+                if isinstance(item, dict):  # E4-r1 G1: a run named inside an evidence ref or note
+                    for text in (item.get("ref"), item.get("note")):
+                        cited.update(("work evidence", m) for m in self.RUN_CITE.findall(str(text or "")))
+        for memory in self._all("memories"):  # E4-r1 G1 (Rowan, Codex event-9c211ffd): memory sources cite runs
+            cited.update(("memory source", m) for m in self.RUN_CITE.findall(str(memory.get("source") or "")))
+        heads = {}
+        for reason, prefix in sorted(cited):
+            heads.setdefault(prefix[:8], []).append((prefix, reason))
+        runs = self._all("runs")
+        for run in runs:
+            run_id = str(run.get("id") or "")
+            for prefix, reason in heads.get(run_id[4:12], ()):  # a short prefix (8+ hex) pins every run it names
+                if run_id[4:].startswith(prefix):
+                    pins.setdefault(run_id, reason)
+        for run in runs:
+            if run.get("status") == "failed" and _known_cost(run.get("cost")) is None:
+                pins.setdefault(run.get("id"), "failed run without known cost (claude.json backfill)")
+        return pins
+
+    def runs_prune(self, keep_days=30.0, max_mb=200.0, keep_newest=50, dry_run=False, now=None):
+        """E4 retention of runs/ (Codex Q2, C3). Deletes only regular files named <run-id>.<suffix> directly in
+        runs/ (never a symlink, a directory or anything outside runs/) for finished/failed/interrupted runs older
+        than keep_days, then oldest first while runs/ is over max_mb. Never: a running run, the newest
+        keep_newest runs, a pinned run (runs_pins). The run rows and their receipt_chain anchors stay. Audited
+        runs.pruned unless dry_run."""
+        if isinstance(keep_days, bool) or not isinstance(keep_days, (int, float)) or keep_days < 1:
+            raise ValueError("keep_days must be at least 1.")
+        if isinstance(max_mb, bool) or not isinstance(max_mb, (int, float)) or max_mb <= 0:
+            raise ValueError("max_mb must be positive.")
+        folder = self.home / "runs"
+        moment = datetime.fromisoformat(timestamp(now).replace("Z", "+00:00"))
+        horizon = timestamp(moment - timedelta(days=float(keep_days)))
+        runs = sorted(self._all("runs"), key=lambda r: (str(r.get("started_at") or ""), str(r.get("id"))))
+        newest = {r.get("id") for r in runs[-keep_newest:]} if keep_newest > 0 else set()
+        status = {r.get("id"): r for r in runs}
+        pins = self.runs_pins()
+        files = {}
+        total = 0
+        unremovable = 0  # E4-r2 (Rowan L2): bytes no prune can remove (unknown runs, other names)
+        try:
+            entries = list(os.scandir(str(folder)))
+        except FileNotFoundError:
+            entries = []
+        for entry in entries:
+            if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                continue
+            run_id = entry.name.split(".", 1)[0]
+            size = entry.stat(follow_symlinks=False).st_size
+            total += size
+            if "." in entry.name and run_id in status and ledgerline.RUN_ID.fullmatch(run_id):
+                files.setdefault(run_id, []).append((entry.name, size))
+            else:
+                unremovable += size
+        kept_pinned = []
+        candidates = []
+        for run in runs:
+            run_id = run.get("id")
+            if run_id not in files:
+                continue
+            if run.get("status") not in self.RUNS_TERMINAL:
+                continue
+            if run_id in pins:
+                kept_pinned.append(run_id)
+                continue
+            if run_id in newest:
+                continue
+            candidates.append(run)
+        chosen = []
+        remaining = total
+        limit = float(max_mb) * 1024 * 1024
+        # E4-r2 (Rowan L2): the size bound applies to the files a prune manages. Bytes it can never remove (files
+        # of unknown runs, other names) don't count, so they can't make the size pass delete young runs; they are
+        # reported as unremovable_bytes, and doctor warns runs_over_bound when runs/ as a whole is over.
+        for run in candidates:  # oldest first
+            old = str(run.get("started_at") or "") < horizon
+            if old or remaining - unremovable > limit:
+                chosen.append(run)
+                remaining -= sum(size for _, size in files[run["id"]])
+        removed_bytes = 0
+        removed = []
+        for run in chosen:
+            for name, size in files[run["id"]]:
+                if not dry_run:
+                    path = folder / name
+                    try:
+                        if path.is_symlink() or not path.is_file():
+                            continue
+                        path.unlink()
+                    except FileNotFoundError:
+                        continue
+                removed_bytes += size
+                removed.append(name)
+        result = {"runs": len(chosen), "files": len(removed), "bytes": removed_bytes, "dry_run": bool(dry_run),
+                  "oldest": chosen[0].get("started_at") if chosen else None,
+                  "newest": chosen[-1].get("started_at") if chosen else None,
+                  "kept_pinned": len(kept_pinned), "size_before": total, "size_after": total - removed_bytes,
+                  "unremovable_bytes": unremovable, "over_bound_after": total - removed_bytes > limit,
+                  "keep_days": float(keep_days), "max_mb": float(max_mb), "keep_newest": keep_newest}
+        if dry_run:
+            result["would_remove"] = [r.get("id") for r in chosen]
+        elif chosen:  # a prune that removes nothing leaves no row (the worker checks once a day)
+            with self._tx():
+                self._audit("runs.pruned", "runs", result)
+        return result
+
     def recover_runs(self):
         count = 0
         with self._tx():
@@ -3180,6 +3320,7 @@ class Store:
                     run.update(status="interrupted", error="Worker stopped before completing this run; inspect existing effects before retrying.",
                                finished_at=timestamp())
                     run["receipt_chain"] = self._receipt_chain(run["id"])
+                    self._stream_chain(run, run["id"])
                     self._quarantine_left_ready(run, "interrupted")
                     self._save("runs", run, "run.interrupted")
                     count += 1
