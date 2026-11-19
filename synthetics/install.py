@@ -65,8 +65,22 @@ def resolve_claude(explicit, native=None):
     return str(Path(found).absolute())
 
 
+def resolve_codex(explicit=None):
+    """Resolve the owner-selected Codex CLI without requiring a Claude installation."""
+    if explicit:
+        candidate = Path(explicit).expanduser()
+        if not (candidate.is_file() and os.access(candidate, os.X_OK)):
+            raise ValueError("--codex is not an executable file: %s" % candidate)
+        return str(candidate.absolute())
+    found = shutil.which("codex")
+    if not found:
+        raise ValueError("Codex CLI was not found; the transport remains available.")
+    return str(Path(found).absolute())
+
+
 def worker_argv(home, claude, model, budget, timeout, poll=2.0, daily_limit=75.0, limit_notify=None,
-                limit_allow=(), runtime_config=False, allow_model=(), allow_claude=(), python=None):
+                limit_allow=(), runtime_config=False, allow_model=(), allow_claude=(), python=None,
+                brain="claude", codex=None, allow_codex=()):
     """The `serve` argv for a worker plist. Order matches the pre-M25 telegram install."""
     import math
 
@@ -75,7 +89,15 @@ def worker_argv(home, claude, model, budget, timeout, poll=2.0, daily_limit=75.0
             raise ValueError("Worker %s must be positive." % name)
     if not math.isfinite(daily_limit) or daily_limit < 0:
         raise ValueError("Worker daily limit must be zero or positive.")
-    argv = module_prefix(home, python) + ["serve", "--claude", str(Path(claude).absolute()), "--model", model,
+    if brain not in ("claude", "codex"):
+        raise ValueError("brain must be claude or codex.")
+    executable = ["--claude", str(Path(claude).absolute())] if brain == "claude" else [
+        "--brain", "codex", "--codex", resolve_codex(codex)]
+    model = model if model is not None else ("claude-opus-5-5" if brain == "claude" else "")
+    # An omitted Codex model selects its CLI default. Launch-agent argv deliberately refuses empty
+    # strings, so represent that choice by omitting --model rather than an empty argument.
+    model_args = ["--model", model] if model else []
+    argv = module_prefix(home, python) + ["serve"] + executable + model_args + [
                                   "--budget", str(budget), "--timeout", str(timeout),
                                   "--poll", ("%g" % poll), "--daily-limit", str(daily_limit)]
     if limit_notify:
@@ -88,6 +110,8 @@ def worker_argv(home, claude, model, budget, timeout, poll=2.0, daily_limit=75.0
         argv += ["--allow-model", item]
     for item in allow_claude:
         argv += ["--allow-claude", item]
+    for item in allow_codex:
+        argv += ["--allow-codex", item]
     return argv
 
 
@@ -164,7 +188,9 @@ def add_commands(sub):
     inst = ws.add_parser("install", help="write the worker plist and start it (operator)")
     inst.add_argument("--label", help="default: com.synthetics.worker.<sha256(employee id)[:16]>")
     inst.add_argument("--claude", help="Claude executable (default: ~/.local/bin/claude, then PATH)")
-    inst.add_argument("--model", default="claude-opus-5-5")
+    inst.add_argument("--brain", choices=["claude", "codex"], default="claude", help="reasoning executor")
+    inst.add_argument("--codex", help="Codex executable (default: PATH)")
+    inst.add_argument("--model", help="executor model (default: Claude Opus, or Codex CLI default)")
     inst.add_argument("--budget", type=float, default=100.0)
     inst.add_argument("--timeout", type=float, default=600.0)
     inst.add_argument("--poll", type=float, default=2.0)
@@ -174,6 +200,8 @@ def add_commands(sub):
     inst.add_argument("--runtime-config", action="store_true", help="M19: read HOME/runtime.json at start")
     inst.add_argument("--allow-model", action="append", default=[])
     inst.add_argument("--allow-claude", action="append", default=[])
+    inst.add_argument("--allow-codex", action="append", default=[],
+                      help="owner-provisioned Codex executable paths runtime requests may select")
     inst.add_argument("--launch-agents-dir", help="write the plist here instead of ~/Library/LaunchAgents")
     inst.add_argument("--no-start", action="store_true", help="write the plist only")
     for name in ("start", "stop", "restart", "remove"):
@@ -249,9 +277,12 @@ def handle(args, home):
     label = _check_prefix(args.label or worker_label(identity), WORKER_PREFIX)
     if args.worker_command != "install":
         return _control("worker", args.worker_command, label, args)
-    claude = resolve_claude(args.claude)
+    selected = getattr(args, "brain", "claude")
+    claude = resolve_claude(args.claude) if selected == "claude" else ""
+    codex = resolve_codex(getattr(args, "codex", None)) if selected == "codex" else None
     argv = worker_argv(home, claude, args.model, args.budget, args.timeout, args.poll, args.daily_limit,
-                       args.limit_notify, args.limit_allow, args.runtime_config, args.allow_model, args.allow_claude)
+                       args.limit_notify, args.limit_allow, args.runtime_config, args.allow_model, args.allow_claude,
+                       brain=selected, codex=codex, allow_codex=getattr(args, "allow_codex", ()))
     agents = Path(args.launch_agents_dir).absolute() if args.launch_agents_dir else None
     plist = write_worker(home, label, argv, agents)
     result = {"employee": identity["id"], "label": label, "plist": str(plist), "argv": argv,
@@ -294,6 +325,12 @@ def delegated_install_params(home, args, refuse):
     from . import authority, roster, runtime
     from .store import Store
 
+    if (getattr(args, "brain", "claude") != "claude" or getattr(args, "codex", None)
+            or getattr(args, "allow_codex", None)):
+        refuse("executor_owner_only", "Codex worker installation and executor allow-lists are owner-only; "
+               "a delegated worker install preserves the provisioned Claude executor.")
+    if args.model is None:
+        args.model = "claude-opus-5-5"
     with Store(home) as store:
         identity = store.identity()
     company = roster.company_state_for_home(home)

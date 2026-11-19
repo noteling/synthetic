@@ -23,7 +23,8 @@ FIELDS = ("claude", "model", "budget", "timeout", "poll", "retry", "daily_limit"
 METADATA = ("version", "written_by", "request_id", "written_at")
 # E4 (Ledgerline): optional settings. A config without them stays valid and keeps its digest; readers use
 # setting(). stream_output false restores the pre-E4 `--output-format json` session path exactly (Codex C1).
-OPTIONAL = {"stream_output": True, "runs_keep_days": 30.0, "runs_max_mb": 200.0}
+OPTIONAL = {"stream_output": True, "runs_keep_days": 30.0, "runs_max_mb": 200.0,
+            "brain": "claude", "codex": None}
 OPTIONAL_BOUNDS = {"runs_keep_days": (1.0, 3650.0), "runs_max_mb": (1.0, 100000.0)}
 
 
@@ -34,6 +35,14 @@ def setting(config, name):
 
 
 def _optional(name, value):
+    if name == "brain":
+        if value not in ("claude", "codex"):
+            raise ValueError("brain must be claude or codex.")
+        return value
+    if name == "codex":
+        if value is not None and (not isinstance(value, str) or "\x00" in value or not os.path.isabs(value)):
+            raise ValueError("codex must be null or an absolute path.")
+        return value
     if name == "stream_output":
         if not isinstance(value, bool):
             raise ValueError("stream_output must be true or false.")
@@ -51,6 +60,7 @@ def _present(config):
     names = list(FIELDS) + [name for name in OPTIONAL if name in config]
     return {name: config[name] for name in names}
 MODEL_PATTERN = re.compile(r"claude-[a-z0-9.-]{1,57}\Z")
+CODEX_MODEL_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}\Z")
 RECIPIENT_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}\Z")
 BOUNDS = {"budget": (0.0, 100.0, False), "timeout": (60.0, 3600.0, True), "poll": (0.5, 60.0, True),
           "retry": (5.0, 3600.0, True), "daily_limit": (0.0, 500.0, True)}
@@ -67,11 +77,12 @@ def _number(name, value):
     return float(value)
 
 
-def validate(config, allowed_models=None, allowed_claude=None):
+def validate(config, allowed_models=None, allowed_claude=None, allowed_codex=None):
     """Return a normalized copy of a complete config, or raise ValueError naming the field.
 
-    allowed_models / allowed_claude: when given, the model must be listed and the claude
-    executable's realpath must equal the realpath of a listed path (M19 R1, R2).
+    When allow-lists are given, the model and the active executor's realpath must be listed.
+    Legacy configs still select Claude. Only an explicitly selected Codex config may leave
+    the inactive Claude path empty (M19 R1, R2).
     """
     if not isinstance(config, dict):
         raise ValueError("Runtime config must be a JSON object.")
@@ -84,19 +95,29 @@ def validate(config, allowed_models=None, allowed_claude=None):
     if "version" in config and config["version"] != SCHEMA:
         raise ValueError("Runtime config version must be %d." % SCHEMA)
     result = {}
+    brain = _optional("brain", config.get("brain", "claude"))
     claude = config["claude"]
-    if not isinstance(claude, str) or "\x00" in claude or not os.path.isabs(claude):
-        raise ValueError("claude must be an absolute path.")
-    if not os.path.isfile(claude) or not os.access(claude, os.X_OK):
+    if not isinstance(claude, str) or "\x00" in claude or (claude and not os.path.isabs(claude)):
+        raise ValueError("claude must be an absolute path (or empty when inactive).")
+    if brain == "claude" and (not os.path.isfile(claude) or not os.access(claude, os.X_OK)):
         raise ValueError("claude must be an existing executable file: %s" % claude)
-    if allowed_claude is not None:
+    if brain == "claude" and allowed_claude is not None:
         permitted = {os.path.realpath(path) for path in allowed_claude}
         if os.path.realpath(claude) not in permitted:
             raise ValueError("claude %s is not an allowed executable: %s." % (claude, ", ".join(sorted(allowed_claude))))
     result["claude"] = claude
+    if brain == "codex":
+        codex = _optional("codex", config.get("codex"))
+        if not codex or not os.path.isfile(codex) or not os.access(codex, os.X_OK):
+            raise ValueError("codex must be an existing executable file: %s" % codex)
+        if allowed_codex is not None and os.path.realpath(codex) not in {os.path.realpath(p) for p in allowed_codex}:
+            raise ValueError("codex %s is not an allowed executable." % codex)
     model = config["model"]
-    if not isinstance(model, str) or not MODEL_PATTERN.fullmatch(model):
+    if brain == "claude" and (not isinstance(model, str) or not MODEL_PATTERN.fullmatch(model)):
         raise ValueError("model must look like claude-<name>.")
+    if brain == "codex" and (not isinstance(model, str) or (model and not CODEX_MODEL_PATTERN.fullmatch(model))
+                             or model.startswith("claude-")):
+        raise ValueError("Codex model must be a model name or empty for its CLI default, not a Claude model.")
     if allowed_models is not None and model not in allowed_models:
         raise ValueError("model %s is not in the allowed models: %s." % (model, ", ".join(sorted(allowed_models))))
     result["model"] = model
@@ -145,7 +166,7 @@ def write_atomic(path, config, **metadata):
     return digest(value)
 
 
-def _read(path, allowed_models, allowed_claude=None):
+def _read(path, allowed_models, allowed_claude=None, allowed_codex=None):
     try:
         raw = json.loads(Path(path).read_text(encoding="utf-8"))
     except FileNotFoundError:
@@ -153,14 +174,14 @@ def _read(path, allowed_models, allowed_claude=None):
     except (OSError, ValueError) as error:
         return None, "unreadable: %s" % error
     try:
-        config = validate(raw, allowed_models, allowed_claude)
+        config = validate(raw, allowed_models, allowed_claude, allowed_codex)
     except ValueError as error:
         return None, "invalid: %s" % error
     config["request_id"] = raw.get("request_id") if isinstance(raw.get("request_id"), str) else None
     return config, None
 
 
-def load(home, baseline, allowed_models=None, allowed_claude=None):
+def load(home, baseline, allowed_models=None, allowed_claude=None, allowed_codex=None):
     """Choose the effective config: runtime.json, then last-good, then baseline. Never raises.
 
     Returns {effective, source, sha, request_id, problems[]}. A missing runtime.json
@@ -168,14 +189,14 @@ def load(home, baseline, allowed_models=None, allowed_claude=None):
     """
     home = Path(home)
     problems = []
-    current, error = _read(home / CONFIG_FILE, allowed_models, allowed_claude)
+    current, error = _read(home / CONFIG_FILE, allowed_models, allowed_claude, allowed_codex)
     if current is not None:
         request_id = current.pop("request_id")
         return dict(effective=current, source="file", sha=digest(current), request_id=request_id, problems=problems)
     seed = error == "absent"
     if not seed:
         problems.append("%s %s" % (CONFIG_FILE, error))
-    good, good_error = _read(home / LAST_GOOD_FILE, allowed_models, allowed_claude)
+    good, good_error = _read(home / LAST_GOOD_FILE, allowed_models, allowed_claude, allowed_codex)
     if good is not None:
         good.pop("request_id")
         if seed:
@@ -186,11 +207,11 @@ def load(home, baseline, allowed_models=None, allowed_claude=None):
     if good_error != "absent":
         problems.append("%s %s" % (LAST_GOOD_FILE, good_error))
     try:
-        base = validate(dict(baseline), allowed_models, allowed_claude)
+        base = validate(dict(baseline), allowed_models, allowed_claude, allowed_codex)
     except ValueError as error:
         # The launch argv itself is the operator's; run it as given but say so loudly.
         problems.append("baseline invalid: %s" % error)
-        base = {name: baseline[name] for name in FIELDS}
+        base = _present(baseline)
         return dict(effective=base, source="baseline-unvalidated", sha=digest(base), request_id=None,
                     problems=problems)
     if seed:
@@ -260,7 +281,7 @@ def parse_assignments(pairs):
             if flag not in ("true", "false"):
                 raise ValueError("stream_output must be true or false.")
             settings[name] = flag == "true"
-        elif name in OPTIONAL:
+        elif name in OPTIONAL_BOUNDS:
             try:
                 settings[name] = float(value)
             except ValueError:
@@ -374,12 +395,14 @@ class Controller:
     GRACE_SECONDS = 60.0
 
     def __init__(self, home, baseline, allowed_models=None, allowed_claude=None, label=None, restarter=None,
-                 mode="kickstart", argv=None, pid=None, clock=None):
+                 mode="kickstart", argv=None, pid=None, clock=None, allowed_codex=None):
         import time
         self.home = Path(home).resolve()
-        self.baseline = {name: baseline[name] for name in FIELDS}
+        self.baseline = _present(baseline)
         self.allowed_models = sorted(set(allowed_models or [self.baseline["model"]]))
         self.allowed_claude = sorted(set(allowed_claude or [self.baseline["claude"]]))
+        default_codex = [self.baseline["codex"]] if self.baseline.get("brain") == "codex" else []
+        self.allowed_codex = sorted(set(default_codex if allowed_codex is None else allowed_codex))
         self.label = label
         self.restarter = restarter
         if mode not in ("kickstart", "exit"):
@@ -395,7 +418,7 @@ class Controller:
 
     # -- start ---------------------------------------------------------------
     def load(self):
-        self.loaded = load(self.home, self.baseline, self.allowed_models, self.allowed_claude)
+        self.loaded = load(self.home, self.baseline, self.allowed_models, self.allowed_claude, self.allowed_codex)
         return self.loaded
 
     @property
@@ -434,6 +457,8 @@ class Controller:
                           request_id=loaded["request_id"], problems=loaded["problems"], pid=self.pid,
                           label=self.label, argv=self.argv, started_at=_now(), probation=self.probation,
                           restart_mode=self.mode, capabilities=list(CAPABILITIES))
+        if self.allowed_codex:
+            self.state["policy"]["allowed_codex"] = self.allowed_codex
         self._publish()
         store.runtime_audit("started", "worker-%d" % self.pid, self.state)
         if loaded["problems"]:
@@ -447,7 +472,11 @@ class Controller:
     def _publish(self):
         try:
             write_json(self.home / STATE_FILE, self.state)
-        except OSError:
+        except OSError as error:
+            if self.state.get("effective", {}).get("brain") == "codex":
+                # Floor consults this record before yielding ordinary work. Stale Claude state must
+                # never allow a Codex worker to hand off into an unsupported Claude live session.
+                raise ValueError("Cannot publish Codex executor state: %s" % error)
             pass  # Context and requests then report "not started with --runtime-config"; audit still has it.
 
     # -- idle ----------------------------------------------------------------
@@ -474,7 +503,8 @@ class Controller:
                                  "an operator must run `limit resume` first")
             if record.get("origin") == "self":
                 check_self_service(record["settings"], self.effective, self.baseline)
-            proposed = validate(merge(self.effective, record["settings"]), self.allowed_models, self.allowed_claude)
+            proposed = validate(merge(self.effective, record["settings"]), self.allowed_models, self.allowed_claude,
+                                self.allowed_codex)
             if not self.label or not LABEL_PATTERN.fullmatch(self.label):
                 raise ValueError("not launchd-managed: XPC_SERVICE_NAME is %r" % (self.label,))
             if self.mode == "kickstart" and self.restarter is None:
@@ -530,7 +560,7 @@ class Controller:
             self._notify(store, record, "applied", "Runtime request %s applied: %s." % (record["id"], record["outcome"]),
                          requester_only=True)
             return
-        good, _ = _read(self.home / LAST_GOOD_FILE, self.allowed_models, self.allowed_claude)
+        good, _ = _read(self.home / LAST_GOOD_FILE, self.allowed_models, self.allowed_claude, self.allowed_codex)
         if good is not None:
             good.pop("request_id")
             source = LAST_GOOD_FILE

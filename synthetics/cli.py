@@ -893,11 +893,14 @@ def parser():
     for name, help_text in [("run", "work for a bounded number of sessions"),
                             ("serve", "stay available; act on events, work, and follow-ups")]:
         runner = sub.add_parser(name, help=help_text)
+        runner.add_argument("--brain", choices=["claude", "codex"], default="claude", help="reasoning executor")
         runner.add_argument("--claude", default="claude", help="Claude executable")
-        runner.add_argument("--model", default="claude-opus-5-5")
+        runner.add_argument("--codex", default="codex", help="Codex executable")
+        runner.add_argument("--model", help="executor model (default: Claude Opus, or Codex CLI default)")
         runner.add_argument("--timeout", type=float, default=300)
         runner.add_argument("--budget", type=float, default=100.0,
-                            help="API-equivalent USD usage cap per model session; not a subscription charge")
+                            help="Claude API-equivalent USD session cap, not a subscription charge; "
+                                 "Codex has no dollar-cap capability")
         if name == "run":
             runner.add_argument("--turns", type=int, default=1)
         else:
@@ -916,6 +919,9 @@ def parser():
             runner.add_argument("--allow-claude", action="append", default=[],
                                 help="claude executable a runtime request may select, compared by realpath "
                                      "(repeatable; default: the baseline --claude)")
+            runner.add_argument("--allow-codex", action="append", default=[],
+                                help="owner-provisioned Codex executable paths runtime requests may select "
+                                     "(default for a Codex worker: its --codex executable)")
             runner.add_argument("--restart-mode", choices=["kickstart", "exit"], default="kickstart",
                                 help="how a runtime request restarts the job: launchctl kickstart -k, or exit 75 "
                                      "for KeepAlive{SuccessfulExit:false} to relaunch")
@@ -1021,7 +1027,7 @@ def main(argv=None):
             output({"stop_requested": current["running"], "pid": current["pid"]})
             return 0
         if args.command in ("run", "serve"):
-            from .brain import ClaudeBrain
+            from .brain import make_brain
 
             # A service manager's normal stop should clean up Claude/MCP children
             # just as Ctrl-C does. SIGKILL recovery uses the durable run fence.
@@ -1030,8 +1036,9 @@ def main(argv=None):
                 stopped_by_signal.append(signum)
                 raise KeyboardInterrupt()
             signal.signal(signal.SIGTERM, terminate)
-            brain = ClaudeBrain(home, executable=args.claude, model=args.model,
-                                timeout=args.timeout, budget=args.budget)
+            model = args.model if args.model is not None else ("claude-opus-5-5" if args.brain == "claude" else "")
+            brain = make_brain(home, brain=args.brain, claude=args.claude, codex=args.codex, model=model,
+                               timeout=args.timeout, budget=args.budget)
             def update(event):
                 print(json.dumps(event, ensure_ascii=False), file=sys.stderr, flush=True)
             if args.command == "run":
@@ -1039,16 +1046,21 @@ def main(argv=None):
                 output(engine.run(max_turns=args.turns))
                 return 0
             controller = None
-            if args.runtime_config:
+            if args.runtime_config or args.brain == "codex":
                 from . import runtime
                 from .service import request_restart
-                if Path(args.runtime_config).expanduser().resolve() != home / runtime.CONFIG_FILE:
+                if args.runtime_config and Path(args.runtime_config).expanduser().resolve() != home / runtime.CONFIG_FILE:
                     raise ValueError("--runtime-config must be %s." % (home / runtime.CONFIG_FILE))
-                baseline = dict(claude=args.claude, model=args.model, budget=args.budget, timeout=args.timeout,
+                from .install import resolve_claude, resolve_codex
+                claude = resolve_claude(args.claude if args.claude != "claude" else None) if args.brain == "claude" else ""
+                baseline = dict(claude=claude, model=model, budget=args.budget, timeout=args.timeout,
                                 poll=args.poll, retry=args.retry, daily_limit=args.daily_limit,
                                 limit_notify=args.limit_notify, limit_allow=args.limit_allow)
+                if args.brain == "codex":
+                    baseline.update(brain="codex", codex=resolve_codex(args.codex if args.codex != "codex" else None))
                 controller = runtime.Controller(home, baseline, allowed_models=args.allow_model,
                                                 allowed_claude=args.allow_claude,
+                                                allowed_codex=args.allow_codex or None,
                                                 label=os.environ.get("XPC_SERVICE_NAME"), restarter=request_restart,
                                                 mode=args.restart_mode, argv=sys.argv)
             engine = Engine(home, brain, on_update=update, daily_limit=args.daily_limit,
