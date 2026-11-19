@@ -94,7 +94,7 @@ TOOLS = [
         "recipient_work_id": text_property("Optional: the recipient's own work ID this concerns, if they gave you one. work_id is always your own work; recipient_work_id is theirs and only a hint to them unless the delivery is authenticated."),
         "thread": text_property("Preserve the incoming conversation ID when asking in that conversation."),
         "in_reply_to": text_property("Message/event being replied to; separate from the question ID used to correlate its eventual answer."),
-        "project": text_property("Optional: one project this message is for, when you hold a write grant on it. The recipient captures it into that project only if the channel is unbound; your own body is captured too. Leave it out for messages about several projects."),
+        "project": text_property("Optional: one project this message is for, when you hold a write grant on it. The recipient captures it into that project only if the channel is unbound; your own body is captured too. Omitted: when work_id is your own work published to a project you can write, that project is used (the result's project_default says so, or why not). Pass \"\" for a message about several projects or none."),
         "work_ids": {"type": "array", "items": {"type": "string"}, "description": "Optional: several of your own works this one question blocks (a shared blocker). Each waits on it and any answer wakes all of them; work_id defaults to the first."},
         "relays": {"type": "array", "items": {"type": "string"}, "description": "Optional: when this question carries others onward (you ask David what a colleague asked you), the colleague's question IDs from the question-id: header of their received messages. Each asker then sees where their question is (with-<recipient>, answered-pending-relay); you still answer them yourself."},
     }, ["to", "body", "key"]),
@@ -107,7 +107,7 @@ TOOLS = [
         "recipient_work_id": text_property("Optional: the recipient's own work ID this concerns, if they gave you one. work_id is always your own work; recipient_work_id is theirs and only a hint to them unless the delivery is authenticated."),
         "thread": text_property("Preserve the incoming conversation ID when replying in that conversation."),
         "in_reply_to": text_property("Message/event being replied to; this metadata does not answer an open question."),
-        "project": text_property("Optional: one project this message is for, when you hold a write grant on it. The recipient captures it into that project only if the channel is unbound; your own body is captured too. Leave it out for messages about several projects."),
+        "project": text_property("Optional: one project this message is for, when you hold a write grant on it. The recipient captures it into that project only if the channel is unbound; your own body is captured too. Omitted: when work_id is your own work published to a project you can write, that project is used (the result's project_default says so, or why not). Pass \"\" for a message about several projects or none."),
     }, ["to", "body", "key"]),
     tool("question_resolve", "Record that a message you already received answers one of your open questions, when it arrived without correlation (an ordinary reply). The message must come from the question's recipient and arrive after the question; linked work wakes. Do not use it for messages from anyone else.", {
         "question_id": text_property("Your open question."),

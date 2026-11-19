@@ -128,6 +128,13 @@ fairness guarantee yet.
   lessons by status, history, open Board backlog), rewritten after each write; a failed rewrite never fails the
   write. `synthetics project view P [--as-of N] [--out F | --write]` renders it; a session needs read access.
   Corrections go through the log, never into the view.
+- Message project tags (M21; VIS G3 delta): `message_send`/`question_ask(project=P)` tags a message for P when
+  the sender holds a write grant on P (otherwise refused). With `project` omitted and `work_id` the sender's own
+  work published to P, the message is tagged P with `project_by: "work"`; the recipient's `project_ref` shows
+  `by: "work"` and checks the sender's write grant as for `by: "sender"`. An explicit `project` wins; `project=""`
+  opts out; `recipient_work_id` is never used. The default never refuses a send: unpublished work tags nothing,
+  and when P does not exist or the sender cannot write P the message goes untagged and the tool result's
+  `project_default` (not stored) says `applied: false` with `reason` `unknown-project` or `no-write-grant`.
 - Lookout (VIS P1, `docs/lookout.md`): `synthetics web` serves a read-only page on 127.0.0.1 from shared records
   only: project and company `log.jsonl`, launchd, `runtime.state.json`, the pid in `worker.lock`, and one engine-written
   export per home, `<home>/shared/status.json` (session state, work titles and waiting_for, Docket, run id/status/cost;

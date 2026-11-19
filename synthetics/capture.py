@@ -287,7 +287,8 @@ RESERVED_PROJECTS = frozenset({"company"})
 
 def is_project_name(raw) -> bool:
     return isinstance(raw, str) and bool(PROJECT_NAME.fullmatch(raw)) and raw not in RESERVED_PROJECTS
-TAG_BY = ("feeder", "sender")
+# "work": the sender's own published work supplied the tag (VIS G3 delta); checked like "sender".
+TAG_BY = ("feeder", "sender", "work")
 
 
 def sender_may_write(store, project: str, sender: str) -> bool:
@@ -315,7 +316,7 @@ def tag_ref(store, raw, by: str, sender: str, bound: list[str]) -> tuple[dict, b
         return dict(ref, effect="none", reason="bound-elsewhere"), False
     if not project_path(store, raw).exists():
         return dict(ref, effect="none", reason="unknown-project"), False
-    if by == "sender" and not sender_may_write(store, raw, sender):
+    if by in ("sender", "work") and not sender_may_write(store, raw, sender):
         return dict(ref, effect="none", reason="sender-not-granted"), False
     return dict(ref, effect="capture"), True
 
