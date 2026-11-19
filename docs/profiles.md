@@ -50,9 +50,10 @@ Fix it with `profile set NAME` or `profile clear`.
 
 - `system-prompt` shows the block headed `Role defaults (profile developer v1, sha256 <12 hex>; …)`.
 - `doctor` reports `profile: {name, version, sha256}`.
-- Every run record (and its `run.started` audit row) carries `profile: {name, version, sha256}` from the
-  moment the session starts; a home without a profile has no `profile` field. The sha256 is of the
-  profile file's bytes, so a run can be tied to the exact text it ran under after the file changes.
+- Every run record carries `profile: {name, version, sha256}` from the moment the session starts,
+  or `profile: null` when no profile is selected. A recorded run missing the key is refused before
+  either executor starts. The sha256 is of the profile file's bytes, so a run can be tied to the
+  exact text it ran under after the file changes.
 
 ## Changing a profile
 

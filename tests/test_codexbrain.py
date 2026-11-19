@@ -88,6 +88,10 @@ assert '--model' not in args
         self.assertEqual(command[command.index('--add-dir')+1], str(write.resolve()))
         self.assertNotIn(str(read), command)
 
+    def test_recorded_run_missing_profile_is_refused_before_cli_launch(self):
+        with self.assertRaisesRegex(BrainError, 'record has no profile key'):
+            CodexBrain(self.home, executable='/missing/codex').run({'run': {'id': 'run-profile-lost'}})
+
     def test_error_or_missing_completion_never_becomes_success(self):
         for body in (
             "print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'Partial'}}))\n",
