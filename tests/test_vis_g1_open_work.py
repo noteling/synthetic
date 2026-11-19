@@ -68,7 +68,7 @@ class OpenWorkPageTests(unittest.TestCase):
         self.assertIn("<h2>Rowan (1)</h2>", body)
         self.assertIn("<h2>Vesper (2)</h2>", body)
         self.assertLess(body.index("<h2>Rowan"), body.index("<h2>Vesper"))
-        self.assertLess(body.index("Open slice"), body.index("Waiting slice"))  # priority 2 before 3
+        self.assertLess(body.index("Waiting slice"), body.index("Open slice"))  # higher priority first: 3 before 2
 
     def test_updated_age_from_latest_projection(self):
         entries, _ = lookout.project_entries(self.root, "synthetics")
