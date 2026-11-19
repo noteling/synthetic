@@ -263,7 +263,7 @@ def _delegated_limit(store, home, args):
         res = authority.require("limit.resume", home=a.get("home") or home, target_home=home,
                                 what="limit resume %s" % home,
                                 check=lambda sc: authority.homes_cover(sc["homes"], home, a.get("home")))
-        latest = failure_streak(store.run_list(3))
+        latest = failure_streak(store.run_list(50))  # MTG F1: yielded runs are skipped
         fields = dict(resume_after_run=latest, resumed_by=by)
         if res["delegation"]:
             fields.update(delegation=res["delegation"], resumed_run=a["run"])
@@ -629,6 +629,8 @@ def parser():
         if name == "serve":
             cmd.add_argument("--key-file", required=True, help="the lookout-desk channel key (0600)")
             cmd.add_argument("--port", type=int, default=8766)
+    from . import floor as floor_cli
+    floor_cli.add_parsers(sub)  # MTG F1
     docket_parser = sub.add_parser("docket", help="read-only: this home's open questions to a person, oldest first")
     docket_parser.add_argument("--person", help="person ID, name or alias (default: humans.json default_human)")
     docket_parser.add_argument("--format", choices=["text", "json"], default="text")
@@ -1042,6 +1044,9 @@ def main(argv=None):
         if args.command == "status":
             output(status(home))
             return 0
+        if args.command == "floor":
+            from . import floor as floor_cli
+            return floor_cli.attach(home, args.key_file)
         if args.command == "answer-desk":
             from . import answer_desk
             answer_desk.refuse_in_session(args.desk_command)

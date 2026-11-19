@@ -3092,15 +3092,136 @@ class Store:
                 return True
             return False
 
+    # -- MTG F1 (Floor): a meeting yields the idle boundary (docs/floor.md) ------------------------------------
+    MEETING_KEY = "meeting_pending"
+    MEETING_GRACE = 45          # E2: seconds a running session gets after the yield notice before it is stopped
+    MEETING_WAIT_SECONDS = 300  # a pending meeting nobody attaches to (or renews) lapses after this
+    FLOOR_HOLD_SECONDS = 300    # the attach hold expires 5 min after its last renewal (a killed attach frees the worker)
+    MEETING_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}")
+
+    def _meeting_row(self):
+        self.db.execute("CREATE TABLE IF NOT EXISTS capture_meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)")
+        row = self.db.execute("SELECT v FROM capture_meta WHERE k=?", (self.MEETING_KEY,)).fetchone()
+        if row is None:
+            return None
+        pending = json.loads(row["v"])
+        return pending if pending.get("expires_at", "") > timestamp() else None
+
+    def meeting_pending(self):
+        """The unexpired pending meeting (begun, not yet attached), or None. While it exists no run starts."""
+        return self._meeting_row()
+
+    def _floor_only(self, meeting_id):
+        if self.run_id is not None:
+            raise ValueError("floor meetings are begun by the stand channel's attach process, not by a session tool.")
+        if not isinstance(meeting_id, str) or not self.MEETING_ID.fullmatch(meeting_id):
+            raise ValueError("meeting must be 1-64 letters, digits or _.:- characters.")
+
+    def meeting_begin(self, meeting_id, channel, grace=None):
+        """C3/F1: record a pending meeting. If a session is running it is the yield target: its tool results carry
+        the yield notice and the worker stops it once `deadline` passes. Idempotent for the same meeting."""
+        self._floor_only(meeting_id)
+        grace = self.MEETING_GRACE if grace is None else float(grace)
+        if not (0 <= grace <= 600):
+            raise ValueError("grace must be between 0 and 600 seconds.")
+        with self._tx():
+            old = self._meeting_row()
+            if old is not None and old["meeting"] != meeting_id:
+                raise ValueError("meeting %s is already pending in this home." % old["meeting"])
+            hold = self._hold_row()
+            if hold is not None and hold.get("kind") == "floor":
+                raise ValueError("meeting %s is attached in this home." % hold.get("meeting"))
+            if old is not None:
+                return old
+            now = datetime.now(timezone.utc)
+            running = next((run["id"] for run in self._all("runs") if run["status"] == "running"), None)
+            row = dict(meeting=meeting_id, channel=channel, at=timestamp(now), grace_seconds=grace, yield_run=running,
+                       deadline=timestamp(now + timedelta(seconds=grace)) if running else None,
+                       expires_at=timestamp(now + timedelta(seconds=grace + self.MEETING_WAIT_SECONDS)))
+            self.db.execute("INSERT OR REPLACE INTO capture_meta(k,v) VALUES (?,?)", (self.MEETING_KEY, json.dumps(row)))
+            self._audit("floor.meeting_pending", meeting_id, row)
+            return row
+
+    def meeting_wait_renew(self, meeting_id):
+        """The attach process is still waiting for the yield: keep the pending row alive."""
+        self._floor_only(meeting_id)
+        with self._tx():
+            row = self._meeting_row()
+            if row is None or row["meeting"] != meeting_id:
+                return None
+            row["expires_at"] = timestamp(datetime.now(timezone.utc) + timedelta(seconds=self.MEETING_WAIT_SECONDS))
+            self.db.execute("UPDATE capture_meta SET v=? WHERE k=?", (json.dumps(row), self.MEETING_KEY))
+            return row
+
+    def meeting_attach(self, meeting_id):
+        """C4: take the idle hold for a pending meeting, as its own holder kind `floor`. Returns the hold, or None
+        while a run is still running or another hold is unexpired. The pending row is consumed."""
+        self._floor_only(meeting_id)
+        with self._tx():
+            row = self._meeting_row()
+            if row is None or row["meeting"] != meeting_id:
+                raise ValueError("meeting %s is not pending in this home." % meeting_id)
+            if any(run["status"] == "running" for run in self._all("runs")) or self._hold_row() is not None:
+                return None
+            now = datetime.now(timezone.utc)
+            hold = dict(kind="floor", op="floor attach", meeting=meeting_id, channel=row.get("channel"),
+                        token=uuid.uuid4().hex, at=timestamp(now),
+                        expires_at=timestamp(now + timedelta(seconds=self.FLOOR_HOLD_SECONDS)))
+            self.db.execute("INSERT OR REPLACE INTO capture_meta(k,v) VALUES (?,?)", (self.HOLD_KEY, json.dumps(hold)))
+            self.db.execute("DELETE FROM capture_meta WHERE k=?", (self.MEETING_KEY,))
+            self._audit("floor.attached", meeting_id, dict(hold, waited_for_run=row.get("yield_run")))
+            return hold
+
+    def meeting_renew(self, token):
+        """Extend the floor hold. None when it is gone or expired (the attach then ends the meeting)."""
+        with self._tx():
+            hold = self._hold_row()
+            if hold is None or hold.get("kind") != "floor" or hold.get("token") != token:
+                return None
+            hold["expires_at"] = timestamp(datetime.now(timezone.utc) + timedelta(seconds=self.FLOOR_HOLD_SECONDS))
+            self.db.execute("UPDATE capture_meta SET v=? WHERE k=?", (json.dumps(hold), self.HOLD_KEY))
+            return hold
+
+    def meeting_end(self, meeting_id, token=None, reason="end"):
+        """Release this meeting's hold (by token) or drop its pending row. Audited once; idempotent."""
+        self._floor_only(meeting_id)
+        with self._tx():
+            self.db.execute("CREATE TABLE IF NOT EXISTS capture_meta (k TEXT PRIMARY KEY, v TEXT NOT NULL)")
+            released = dropped = False
+            row = self.db.execute("SELECT v FROM capture_meta WHERE k=?", (self.HOLD_KEY,)).fetchone()
+            if token and row is not None and json.loads(row["v"]).get("token") == token:
+                self.db.execute("DELETE FROM capture_meta WHERE k=?", (self.HOLD_KEY,))
+                released = True
+            row = self.db.execute("SELECT v FROM capture_meta WHERE k=?", (self.MEETING_KEY,)).fetchone()
+            if row is not None and json.loads(row["v"]).get("meeting") == meeting_id:
+                self.db.execute("DELETE FROM capture_meta WHERE k=?", (self.MEETING_KEY,))
+                dropped = True
+            if released or dropped:
+                self._audit("floor.ended", meeting_id, dict(reason=str(reason)[:64], released_hold=released,
+                                                           dropped_pending=dropped))
+            return dict(meeting=meeting_id, released_hold=released, dropped_pending=dropped)
+
+    def floor_yield_audit(self, run_id, meeting, grace, outcome):
+        """C2: the worker records how a yield target ended: `stopped` after the grace, or `ended` by itself."""
+        with self._tx():
+            self._audit("floor.yield", run_id, dict(run=run_id, meeting=meeting, grace_seconds=grace, outcome=outcome))
+
     def run_begin(self, event_ids=None):
         """Start a run. event_ids, when given, restricts the captured inputs to those pending events."""
         with self._tx():
             if any(run["status"] == "running" for run in self._all("runs")):
                 raise ValueError("Another run is active; recover interrupted runs after acquiring the worker lock.")
             held = self._hold_row()
+            if held is not None and held.get("kind") == "floor":
+                raise WorkerHeld("floor meeting %s holds this home's idle boundary until %s"
+                                 % (held.get("meeting"), held.get("expires_at")))
             if held is not None:
                 raise WorkerHeld("worker.manage %s holds this home's idle boundary until %s"
                                  % (held.get("op"), held.get("expires_at")))
+            pending = self._meeting_row()
+            if pending is not None:
+                raise WorkerHeld("floor meeting %s is pending in this home until %s"
+                                 % (pending["meeting"], pending["expires_at"]))
             now = timestamp()
             if event_ids is None:
                 events = self.event_admissible()
@@ -3138,8 +3259,9 @@ class Store:
             self._quarantine_left_ready(run, "finished")
             return self._save("runs", run, "run.finished")
 
-    def run_fail(self, run_id, error, cost=None):
-        """Record a failed run. cost is the session's reported cost when known."""
+    def run_fail(self, run_id, error, cost=None, yielded=None):
+        """Record a failed run. cost is the session's reported cost when known. yielded (MTG F1): the meeting this
+        run was stopped for; such a run is no failure verdict and quarantines no routine (its inputs stay pending)."""
         if not isinstance(cost, (int, float)) or isinstance(cost, bool):
             cost = None
         with self._tx():
@@ -3147,9 +3269,12 @@ class Store:
             if run["status"] != "running":
                 raise ValueError("Only an active run can fail.")
             run.update(status="failed", error=str(error), cost=cost, finished_at=timestamp())
+            if yielded is not None:
+                run["yielded"] = str(yielded)
             run["receipt_chain"] = self._receipt_chain(run_id)
             self._stream_chain(run, run_id)
-            self._quarantine_left_ready(run, "failed")
+            if yielded is None:
+                self._quarantine_left_ready(run, "failed")
             return self._save("runs", run, "run.failed")
 
     def run_cost_backfill(self):
