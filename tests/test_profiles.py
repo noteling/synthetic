@@ -89,12 +89,14 @@ class NoProfileGuards(Base):
         self.assertEqual(brain.system_prompt(self.home), expected)
         self.assertNotIn("Role defaults", brain.system_prompt(self.home))
 
-    def test_run_record_has_no_profile_field_without_profile_json(self):
+    def test_run_record_profile_is_none_without_profile_json(self):
+        # #85 L1: the key is always recorded (None = no profile at run start), so a record without it is detectable
         with Store(self.home) as s:
             run = s.run_begin()
-            self.assertNotIn("profile", run)
+            self.assertIn("profile", run)
+            self.assertIsNone(run["profile"])
             s.run_finish(run["id"], "ok")
-            self.assertNotIn("profile", s.run_get(run["id"]))
+            self.assertIsNone(s.run_get(run["id"])["profile"])
 
 
 class Shipped(unittest.TestCase):
@@ -277,7 +279,11 @@ class Evidence(Base):
             new = s.run_begin()
             s.run_finish(new["id"], "ok")
         lines = {l["run_id"]: l for l in ledgerline.export_runs(self.home) if l["kind"] == "run"}
-        self.assertNotIn("profile", lines[old["id"]])
+        self.assertNotIn("profile", lines[old["id"]])  # recorded None exports exactly as before
+        old_audit = [l for l in ledgerline.export_runs(self.home, audit=True)
+                     if l["kind"] == "audit" and l.get("record_id") == old["id"] and l.get("action", "").startswith("run.")]
+        self.assertTrue(old_audit)
+        self.assertTrue(all("profile" not in l.get("fields", {}) for l in old_audit))
         self.assertEqual(lines[new["id"]]["profile"]["name"], "developer")
         self.assertEqual(len(lines[new["id"]]["profile"]["sha256"]), 64)
         audit = [l for l in ledgerline.export_runs(self.home, audit=True)

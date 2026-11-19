@@ -269,6 +269,8 @@ def export_audit(home_id, row):
                 found, value = _pick(parsed, name)
                 chain = name == "receipt_chain" and isinstance(value, dict) and set(value) <= {"head_sha256", "lines", "error"}
                 if found and name == "profile":
+                    if value is None:  # no profile at run start: export as before the key was always recorded
+                        continue
                     value, chain = profile_fact(value), True
                 if found and (_scalar_or_ids(value) or chain):
                     _set(fields, name, value)
@@ -331,7 +333,7 @@ def export_runs(home, run=None, since=None, audit=False):
                     "started_at": record.get("started_at"), "finished_at": record.get("finished_at"),
                     "cost": record.get("cost"), "event_ids": record.get("event_ids"),
                     "receipt_chain": record.get("receipt_chain")}
-            if "profile" in record:  # role profile the session started under; runs without one export as before
+            if record.get("profile") is not None:  # role profile the session started under; none → export as before
                 line["profile"] = profile_fact(record["profile"])
             yield line
             if not isinstance(run_id, str) or not RUN_ID.fullmatch(run_id):

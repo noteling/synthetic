@@ -3237,9 +3237,9 @@ class Store:
                           kind="meeting", meeting=meeting_id, text_mode=text_mode, event_ids=[], events=[],
                           history_sequence=history_sequence, finished_at=None, summary="", error=None, cost=None)
             from . import profiles
-            prof = profiles.triple(self.home)  # #81 L2: the meeting prompt carries the role block too; record it
-            if prof is not None:
-                record["profile"] = prof
+            # #81 L2: the meeting prompt carries the role block too; record it. Always present (None = no profile.json),
+            # so a record without the key is distinguishable and the session fails closed on it (#85 L1).
+            record["profile"] = profiles.triple(self.home)
             return self._save("runs", record, "run.started")
 
     def floor_yield_audit(self, run_id, meeting, grace, outcome):
@@ -3372,9 +3372,9 @@ class Store:
                           event_ids=[e["id"] for e in events], events=events, history_sequence=history_sequence,
                           finished_at=None, summary="", error=None, cost=None)
             from . import profiles
-            prof = profiles.triple(self.home)  # role profile the session starts under; absent without profile.json
-            if prof is not None:
-                record["profile"] = prof
+            # Role profile the session starts under. Always present (None = no profile.json), so a run record without
+            # the key is distinguishable and ClaudeBrain.run fails closed on it (#85 L1).
+            record["profile"] = profiles.triple(self.home)
             if executor is not None:
                 record["executor"] = executor
             return self._save("runs", record, "run.started")
