@@ -129,7 +129,10 @@ def handle(args, home):
                 "thread": data.get("local_thread", data.get("thread")), "bot_username": state.get("bot_username"),
                 "paired": state.get("paired", False), "user_id": state.get("bound_user_id"),
                 "chat_id": state.get("bound_chat_id"), "update_cursor": state.get("update_cursor"),
-                "delivery_counts": counts, "accepted_means": "provider accepted; human reading is unknown"}
+                "delivery_counts": counts,
+                "feed_rejections": int(state.get("feed_rejections_total") or len(state.get("feed_rejections", []))),
+                "last_feed_rejection": (state.get("feed_rejections") or [None])[-1],
+                "accepted_means": "provider accepted; human reading is unknown"}
     if args.telegram_command == "serve":
         from .telegram import TelegramAdapter
 
@@ -138,6 +141,10 @@ def handle(args, home):
         except KeyboardInterrupt:
             return {"stopped": True}
         except Exception as error:
+            config_error = getattr(sys.modules.get(__package__ + ".telegram"), "ChannelConfigError", None)
+            if config_error is not None and isinstance(error, config_error):
+                # Issue #5: our own message (channel ID and source prefix only, no token or key).
+                raise RuntimeError(str(error)) from None
             # Provider exception chains can include a token-bearing URL. Never
             # let a traceback or raw response escape the transport boundary.
             raise RuntimeError("Telegram transport stopped (%s); inspect private delivery state." %

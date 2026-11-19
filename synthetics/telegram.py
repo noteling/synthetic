@@ -224,6 +224,33 @@ def _feed_event(store: Any, *, in_reply_to: Optional[str] = None,
     return store.feed(in_reply_to=in_reply_to, **kwargs)
 
 
+class ChannelConfigError(RuntimeError):
+    """The channel key is not registered in the home, or may not write this source (issue #5).
+
+    Deterministic for every update, so the adapter stops instead of retrying or dropping messages."""
+
+
+FEED_REJECTIONS_KEPT = 50
+
+
+def channel_problem(store: Any, credential: Optional[bytes], source: str) -> Optional[str]:
+    """None when *credential* is a registered channel of *store* that may write *source*.
+
+    Otherwise a short reason. No credential means unauthenticated input (M22): nothing to check."""
+    if credential is None:
+        return None
+    try:
+        digest = store.credential_hash(credential)
+    except ValueError as exc:
+        return str(exc)
+    for channel in store.channel_list():
+        if channel.get("key_sha256") == digest:
+            if any(source.startswith(prefix) for prefix in channel.get("source_prefixes") or []):
+                return None
+            return "channel %s may not write source %s" % (channel.get("id"), source)
+    return "the credential does not match a registered channel"
+
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -319,6 +346,7 @@ class TelegramChannelState:
             self._d.setdefault("deliveries", {})
             self._d.setdefault("question_map", {})
             self._d.setdefault("pairing_rejections", [])
+            self._d.setdefault("feed_rejections", [])
             # employee_id is new in schema v2 — may be absent in older state files
             self._d.setdefault("employee_id", None)
             # bound_colleague_id/bound_local_thread are new in schema v3
@@ -355,6 +383,8 @@ class TelegramChannelState:
                 "question_map": {},
                 # list of rejected pairing attempt records
                 "pairing_rejections": [],
+                # updates the Store refused deterministically (issue #5), newest last, bounded
+                "feed_rejections": [],
             }
 
     def save(self) -> None:
@@ -532,6 +562,16 @@ class TelegramChannelState:
         """
         rejections = self._d.setdefault("pairing_rejections", [])
         rejections.append({"reason": reason, "update_id": update_id, "at": _now_utc()})
+        self.save()
+
+    def record_feed_rejection(self, update_id: int, error: str) -> None:
+        """Persist that the Store refused update *update_id* (issue #5), before the cursor moves past it.
+
+        Keeps the last FEED_REJECTIONS_KEPT records; never stores the message body."""
+        rejections = self._d.setdefault("feed_rejections", [])
+        rejections.append({"update_id": update_id, "at": _now_utc(), "error": str(error)[:200]})
+        del rejections[:-FEED_REJECTIONS_KEPT]
+        self._d["feed_rejections_total"] = int(self._d.get("feed_rejections_total") or 0) + 1
         self.save()
 
 
@@ -850,9 +890,21 @@ class UpdateProcessor:
                     in_reply_to=tg_in_reply_to,
                     **feed_kwargs,
                 )
+        except ValueError as exc:
+            # Deterministic refusal (issue #5). If the channel itself is wrong (key unregistered
+            # or source prefix not allowed) every later update fails the same way: stop the
+            # adapter without advancing, so nothing is dropped and the operator sees why.
+            problem = channel_problem(store, self.credential, self._source_ns())
+            if problem is not None:
+                raise ChannelConfigError("Telegram channel misconfigured: %s" % problem) from exc
+            # Otherwise only this update is refused: record it and let the cursor advance,
+            # so later updates from the paired human are not blocked forever.
+            self.state.record_feed_rejection(update_id, str(exc))
+            logger.error("Store refused update %d (recorded, skipped): %s", update_id, exc)
+            return {"processed": False, "reason": "rejected", "event_id": None}
         except Exception as exc:
             logger.error("Failed to feed update %d to store: %s", update_id, exc)
-            # Return store_error — caller must NOT advance cursor (retryable).
+            # Return store_error — caller must NOT advance cursor (retryable, with backoff).
             return {"processed": False, "reason": "store_error", "event_id": None}
 
         return {"processed": True, "reason": kind, "event_id": event["id"]}
@@ -1525,6 +1577,9 @@ class TelegramAdapter:
         self._ensure_pairing_nonce()
 
         credential = self.config.load_credential()
+        problem = channel_problem(store, credential, "telegram:%s" % self.state.bot_id)
+        if problem is not None:
+            raise ChannelConfigError("Telegram channel misconfigured: %s" % problem)
         processor = UpdateProcessor(
             self.state,
             self.config.colleague_id,
@@ -1549,6 +1604,7 @@ class TelegramAdapter:
         outbox.rebuild_question_map(store)
 
         backoff = TRANSIENT_BACKOFF_INITIAL
+        store_backoff = TRANSIENT_BACKOFF_INITIAL
 
         while True:
             offset = (
@@ -1585,6 +1641,7 @@ class TelegramAdapter:
                 logger.error("Poll failed (non-retryable API error): %s", exc)
                 raise
 
+            store_failed = False
             for update in updates:
                 update_id = update["update_id"]
                 result = processor.process(update, store, outbox=outbox)
@@ -1595,6 +1652,7 @@ class TelegramAdapter:
                 # advance the cursor past the failed one — that would create an
                 # unrecoverable inbox gap.
                 if result.get("reason") == "store_error":
+                    store_failed = True
                     break
 
                 self.state.update_cursor = update_id
@@ -1606,6 +1664,14 @@ class TelegramAdapter:
                 except Exception as exc:
                     logger.warning("Outbox processing error: %s", exc)
                 self._service_activity(client, store)
+
+            # Issue #5: a store_error is retried, but not in a hot loop.
+            if store_failed:
+                logger.warning("Store error; retrying the update in %.1fs", store_backoff)
+                self._sleep_servicing_outbox(store_backoff, outbox, store, activity_client=client)
+                store_backoff = min(store_backoff * 2, TRANSIENT_BACKOFF_MAX)
+            else:
+                store_backoff = TRANSIENT_BACKOFF_INITIAL
 
 
 # ---------------------------------------------------------------------------
