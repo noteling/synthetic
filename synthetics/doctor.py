@@ -208,7 +208,7 @@ def diagnose(home, label=None, compare=None, key_files=(), launchd=_launchd_pid,
             add("error", "profile_invalid", "%s: sessions refuse to start until the owner fixes it "
                 "(synthetics profile set NAME, or profile clear)." % prof.get("detail"))
 
-        # runtime.json: valid, and its claude executable (allowlists are the worker's argv; not checked here)
+        # runtime.json: validate the selected executor (allowlists are the worker's argv; not checked here).
         config, problem = runtime._read(home / runtime.CONFIG_FILE, None, None)
         limit_allow = []
         if config is None:
@@ -218,15 +218,35 @@ def diagnose(home, label=None, compare=None, key_files=(), launchd=_launchd_pid,
             limit_allow = list(config.get("limit_allow") or [])
             report["runtime"] = {k: config.get(k) for k in ("model", "budget", "timeout", "daily_limit",
                                                             "limit_notify", "limit_allow", "claude")}
+            from .brain import executor_capabilities
+            backend = config.get("brain", "claude")
+            executable = config.get("codex" if backend == "codex" else "claude")
+            report["runtime"].update(brain=backend)
+            if backend == "codex":
+                report["runtime"]["codex"] = executable
+            report["executor"] = dict(executor_capabilities(backend), executable=executable)
+            if not report["executor"]["session_budget_cap"]:
+                add("warning", "executor_budget_unsupported", "%s does not enforce the configured $%s session "
+                    "budget; the session timeout still applies." % (backend, config.get("budget")))
+            if not report["executor"]["usage_cost"]:
+                add("warning", "executor_cost_unavailable", "%s reports token usage, not USD cost. Cost is "
+                    "unknown, not zero; the USD daily limit cannot measure these sessions." % backend)
+            if not report["executor"]["native_tool_allow_list"]:
+                add("warning", "executor_tool_allow_list_unavailable", "%s has no equivalent of Claude's native "
+                    "tool allow-list. The adapter uses its workspace-write shell sandbox; MCP servers remain "
+                    "host processes, and access grants are not OS isolation." % backend)
+            if not report["executor"]["live_meetings"]:
+                add("info", "executor_live_meetings_unsupported", "%s supports bounded employee work, not the "
+                    "persistent live meeting session. Meeting startup refuses before yielding ordinary work."
+                    % backend)
             notify = config.get("limit_notify")
             channels = _all(db, "channels")
             if notify and channels and not any(notify in (c.get("routes") or []) for c in channels):
                 # backlog 25: limit/stop alerts and runtime notices to limit_notify would queue forever
                 add("warning", "limit_notify_unroutable", "runtime limit_notify %s is routed by no channel of this "
                     "home (channels: %s)" % (notify, ", ".join(sorted(c.get("id", "?") for c in channels))))
-            claude = config.get("claude")
-            if claude and not os.access(os.path.realpath(os.path.expanduser(claude)), os.X_OK):
-                add("error", "claude_not_executable", claude)
+            if executable and not os.access(os.path.realpath(os.path.expanduser(executable)), os.X_OK):
+                add("error", backend + "_not_executable", executable)
 
         # humans.json (C1/C2): missing is a warning, malformed an error
         cfg = None

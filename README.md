@@ -3,14 +3,15 @@
 A digital employee with its own identity, memory, working relationships, communication,
 and continuing work. The employee exists across projects and model sessions.
 
-The first increment is a local work engine and CLI. Claude Code supplies reasoning
+The first increment is a local work engine and CLI. Claude Code or Codex CLI supplies reasoning
 and local execution; Synthetics owns durable identity, memory, inbox/outbox,
 assignments, questions, follow-ups, and recovery. Voice and desktop interaction come
 later. Noteling and Stand have been studied as reference projects and remain untouched.
 
 ## Start an employee
 
-Requires macOS or Linux, Python 3.9+, and a logged-in Claude CLI. There are no Python
+Requires macOS or Linux, Python 3.9+, and a logged-in Claude CLI or Codex CLI. Claude remains
+the default executor. There are no Python
 runtime dependencies. Run from this repository, or install with `pip install .`
 (`pip install -e .` needs pip 21.3 or newer; the stock macOS Command Line Tools pip is older).
 
@@ -37,6 +38,21 @@ then refuses because the file exists. To recover, set `"default_human": "david"`
 in that humans.json and rerun init (no `--human`), or remove that empty file and rerun with `--human`. The first reasoning session can
 introduce the employee and ask what it needs. Initial project ignorance is expected.
 No Noteling checkout or company accounts are assigned automatically.
+
+To use Codex for bounded work, select it explicitly:
+
+```sh
+python3 -m synthetics --home .synthetics/rowan run --brain codex
+python3 -m synthetics --home .synthetics/rowan serve --brain codex
+```
+
+`--codex /absolute/path/to/codex` selects an executable, and `--model` optionally selects a
+Codex model. Without a model, Codex uses its own default. This adapter uses saved ChatGPT login;
+it does not require an API key and does not fall back to API billing. Choosing an executor
+does not create another employee or change its durable identity and work. Codex has no equivalent
+USD session-budget cap or USD cost report; token usage is retained separately and cost stays
+unknown. Its persistent live-meeting session is not supported in this increment. See
+[executors](docs/executors.md) for setup, capabilities and restrictions.
 
 The output includes queued messages and questions. Reply to a question using its
 `question_id` from the outbox (or its `id` from status.questions):
