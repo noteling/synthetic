@@ -179,6 +179,62 @@ class ExecutorCLITests(unittest.TestCase):
         self.assertEqual(state["effective"]["brain"], "codex")
         self.assertEqual(state["policy"]["allowed_codex"], [sys.executable])
 
+    def codex_serve_options(self):
+        # Permit both models/executables, so a mismatched saved config is genuinely valid;
+        # rejection must come from explicit executor selection, not baseline fallback.
+        return ["serve", "--brain", "codex", "--codex", sys.executable,
+                "--allow-model", "", "--allow-model", "claude-opus-5-5",
+                "--allow-claude", sys.executable]
+
+    def test_plain_codex_serve_refuses_valid_saved_claude_selection_before_execution(self):
+        config = self.home / runtime.CONFIG_FILE
+        runtime.write_atomic(config, baseline())
+        before = config.read_bytes()
+        with patch("synthetics.engine.Engine.serve") as serve:
+            code, out, err = self.call(*self.codex_serve_options())
+        self.assertEqual(code, 1)
+        self.assertIn("explicitly selects Codex", err)
+        self.assertIn("runtime.json selects claude", err)
+        self.assertIn("--runtime-config", err)
+        serve.assert_not_called()
+        self.assertEqual(config.read_bytes(), before)
+        with Store(self.home) as store:
+            self.assertEqual(store.run_list(), [])
+
+    def test_plain_codex_serve_also_refuses_claude_last_good_fallback(self):
+        (self.home / runtime.CONFIG_FILE).write_text("{broken")
+        runtime.write_atomic(self.home / runtime.LAST_GOOD_FILE, baseline())
+        with patch("synthetics.engine.Engine.serve") as serve:
+            code, out, err = self.call(*self.codex_serve_options())
+        self.assertEqual(code, 1)
+        self.assertIn("last-good settings select claude", err)
+        serve.assert_not_called()
+
+    def test_explicit_runtime_config_allows_saved_selection_to_override_launch_baseline(self):
+        runtime.write_atomic(self.home / runtime.CONFIG_FILE, baseline())
+        captured = []
+        def stored_mode(engine, **kwargs):
+            captured.append(engine.runtime.load()["effective"].get("brain", "claude"))
+        with patch("synthetics.engine.Engine.serve", autospec=True, side_effect=stored_mode):
+            code, out, err = self.call(*self.codex_serve_options(), "--runtime-config",
+                                       str(self.home / runtime.CONFIG_FILE))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(captured, ["claude"])
+
+    def test_claude_launch_can_explicitly_follow_owner_provisioned_codex_runtime(self):
+        runtime.write_atomic(self.home / runtime.CONFIG_FILE,
+                             baseline(brain="codex", codex=sys.executable, model=""))
+        captured = []
+        def stored_mode(engine, **kwargs):
+            captured.append(engine.runtime.load()["effective"]["brain"])
+        with patch("synthetics.engine.Engine.serve", autospec=True, side_effect=stored_mode):
+            code, out, err = self.call("serve", "--claude", sys.executable,
+                                       "--runtime-config", str(self.home / runtime.CONFIG_FILE),
+                                       "--allow-model", "", "--allow-model", "claude-opus-5-5",
+                                       "--allow-codex", sys.executable)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(captured, ["codex"])
+
 
 if __name__ == "__main__":
     unittest.main()

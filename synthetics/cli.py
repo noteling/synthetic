@@ -1063,6 +1063,19 @@ def main(argv=None):
                                                 allowed_codex=args.allow_codex or None,
                                                 label=os.environ.get("XPC_SERVICE_NAME"), restarter=request_restart,
                                                 mode=args.restart_mode, argv=sys.argv)
+                if args.brain == "codex" and not args.runtime_config:
+                    # Auto-persisting Codex state makes its capabilities visible to Floor; it must not
+                    # turn an explicit executor choice into permission to run a previously saved Claude.
+                    loaded = controller.load()
+                    selected = runtime.setting(loaded["effective"], "brain")
+                    if selected != "codex":
+                        source = "runtime.json" if loaded["source"] == "file" else "%s settings" % loaded["source"]
+                        verb = "selects" if loaded["source"] == "file" else "select"
+                        raise ValueError("This launch explicitly selects Codex, but %s %s %s. "
+                                         "Have the owner switch the persisted executor and provision its allowed "
+                                         "executable/model, or pass --runtime-config %s to explicitly follow "
+                                         "the saved executor selection." %
+                                         (source, verb, selected, home / runtime.CONFIG_FILE))
             engine = Engine(home, brain, on_update=update, daily_limit=args.daily_limit,
                             limit_notify=args.limit_notify, limit_allow=args.limit_allow, runtime=controller)
             try:

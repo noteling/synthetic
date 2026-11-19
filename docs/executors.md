@@ -35,6 +35,13 @@ runtime files without a `brain` field continue to select Claude. Changing the pr
 Codex executable is an owner-controlled operation, not a model's implicit fallback. Stop or
 restart through the supported worker lifecycle rather than editing an active process.
 
+Plain `serve --brain codex` also publishes private runtime state, but treats Codex as an explicit
+choice: it refuses to start if an existing runtime file or last-good fallback selects Claude.
+It does not silently run the old executor. If you deliberately pass `--runtime-config HOME/runtime.json`,
+the existing runtime precedence applies instead: launch flags are the baseline, while a valid saved
+selection wins. This explicit mode supports owner-provisioned runtime switches between executors;
+the target executable and model must be in the worker's configured allow-lists.
+
 ## Capabilities and limits
 
 `synthetics --home EMPLOYEE_HOME doctor --json` reports the selected executor and its capabilities
