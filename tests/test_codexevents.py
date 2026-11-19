@@ -190,6 +190,17 @@ class CodexEvents(unittest.TestCase):
         reducer.feed(event("turn.completed"))
         self.assertEqual(reducer.finish()["error_kind"], "empty")
 
+    def test_message_after_completion_is_not_retroactively_a_final_answer(self):
+        reducer = CodexReducer()
+        reducer.feed(event("turn.completed"))
+        reducer.feed(message("Arrived outside the completed turn"))
+        self.assertEqual(reducer.finish()["error_kind"], "empty")
+        reducer = CodexReducer()
+        reducer.feed(message("Committed answer"))
+        reducer.feed(event("turn.completed"))
+        reducer.feed(message("Late replacement"))
+        self.assertEqual(reducer.finish()["summary"], "Committed answer")
+
     def test_display_records_are_private_structural_facts_with_a_valid_chain(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "run.stream.jsonl"

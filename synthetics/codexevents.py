@@ -104,6 +104,10 @@ class CodexReducer:
             self._write({"kind": "result", "subtype": "error" if self.error else "success",
                          "is_error": self.error is not None, "usage": dict(self.usage)})
         elif kind in ("item.started", "item.updated", "item.completed"):
+            if self.completed:
+                # Only messages in the completed turn can be its final answer.
+                # A later turn must begin explicitly before accepting new items.
+                return
             item = value.get("item")
             if not isinstance(item, dict):
                 self.malformed_lines += 1
