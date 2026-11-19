@@ -14,6 +14,8 @@ Fields (v1; add, never rename):
   questions_open [{id, to, first_line, asked_at, hop}]
   runs [{id, status, started_at, finished_at, cost, events, failed_tool_count}]   (newest 10)
   outbox_stuck {count, older_than_48h}
+  glances [{id, run_id, at, ok, exit, status, counts, find, browser}]   (RW-1, newest 5; already whitelisted by
+           glance.py: counts and find summary only, never page text, hit labels or frames)
 """
 
 from __future__ import annotations
@@ -23,13 +25,14 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import docket
+from . import docket, glance
 
 VERSION = 1
 RUNS = 10
 FILENAME = "status.json"
 PAUSE_KEYS = ("reason", "day", "limit_usd", "cost_usd", "run_id")
 KEEP = object()
+GLANCE_KEYS = ("id", "run_id", "at", "ok", "exit", "status", "counts", "find", "browser")
 
 
 def path(home):
@@ -72,13 +75,18 @@ def build(store, paused=None, now=None):
                              finished_at=run.get("finished_at"), cost=run.get("cost"),
                              events=len(run.get("event_ids") or []), failed_tool_count=failed))
     stuck = store.outbox_stuck(now)
+    try:
+        glances = [{k: g.get(k) for k in GLANCE_KEYS} for g in glance.recent(store)]
+    except Exception:  # noqa: BLE001 - an older home without the table; the rest of the export still matters
+        glances = []
     return dict(
         v=VERSION, employee=identity["id"], name=identity.get("name"), role=identity.get("role"),
         written_at=now.strftime("%Y-%m-%dT%H:%M:%S.%fZ"), pid=os.getpid(),
         session=dict(state="running" if active else "idle", run=active["id"] if active else None,
                      started_at=active.get("started_at") if active else None, paused=_pause(paused)),
         works=works, docket=dock, docket_error=dock_error, questions_open=questions, runs=run_rows,
-        outbox_stuck=dict(count=stuck.get("count", 0), older_than_48h=stuck.get("older_than_48h", 0)))
+        outbox_stuck=dict(count=stuck.get("count", 0), older_than_48h=stuck.get("older_than_48h", 0)),
+        glances=glances)
 
 
 def read(home):

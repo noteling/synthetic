@@ -33,7 +33,8 @@ class MCPTests(unittest.TestCase):
         self.assertEqual(result["protocolVersion"], "2025-03-26")
         self.assertIn("tools", result["capabilities"])
         tools = self.request("tools/list")["result"]["tools"]
-        self.assertEqual(tools, TOOLS)
+        # RW-1 C1: screen_glance is offered only in a home that opts in (glance.json); this one doesn't.
+        self.assertEqual(tools, [entry for entry in TOOLS if entry["name"] != "screen_glance"])
         self.assertIn("memory_search", {entry["name"] for entry in tools})
         self.assertIsNone(self.server.respond({"jsonrpc": "2.0", "method": "notifications/initialized"}))
 

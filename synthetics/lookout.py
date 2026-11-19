@@ -412,6 +412,20 @@ def team_page(root, agents=None, now=None):
                            % (_v(r.get("id")), _v(r.get("status")), _v(r.get("started_at")), _v(r.get("finished_at")),
                               E(cost), _v(r.get("events")), _v(r.get("failed_tool_count"))))
             out.append("</table>")
+        glances = (status.get("glances") or [])[:5]
+        if glances:
+            out.append("<p><b>Recent glances</b> <span class='muted'>(screen_glance: counts and find only)</span></p>"
+                       "<table><tr><th>at</th><th>run</th><th>status</th><th>site</th><th>elements / on screen</th>"
+                       "<th>find</th></tr>")
+            for g in glances:
+                counts, find = g.get("counts") or {}, g.get("find") or {}
+                seen_text = "%s / %s" % (counts.get("elements", "?"), counts.get("onScreen", "?")) if counts else ""
+                find_text = ("“%s”%s → %s ×%s" % (find.get("name"), " (%s)" % find["role"] if find.get("role") else "",
+                                                   find.get("match"), find.get("count"))) if find else ""
+                out.append("<tr><td>%s</td><td><code>%s</code></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
+                           % (_v(g.get("at")), _v(g.get("run_id")), _v(g.get("status")), _v(counts.get("site")),
+                              E(seen_text), E(find_text)))
+            out.append("</table>")
         if (status.get("outbox_stuck") or {}).get("count"):
             out.append("<p class='bad'>Outbox: %d message(s) stuck over 10 minutes.</p>" % status["outbox_stuck"]["count"])
     others = [pid for pid, p in sorted(people.items()) if pid not in seen and p.get("kind") != "system"]
