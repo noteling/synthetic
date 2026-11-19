@@ -13,7 +13,7 @@ Review your own open work: for each ready or waiting item, is the goal still rig
 
 ## team-review
 
-Do the hourly-check for your own work first. Then review the team toward its goals, not only its queue, from shared records (project intents and lessons, the Board backlog, colleagues' published work and their questions and messages to you). Judge, without building a plan or inventing tickets:
+Do the hourly-check for your own work first. Then review the team toward its goals, not only its queue, from shared records (project intents and lessons, the Board backlog, colleagues' published work and their questions and messages to you). Review each agreed goal and decide useful next steps within your authority; do not invent work merely to stay busy:
 - For each agreed outcome, what acceptance evidence is still missing, and who produces it.
 - The next useful steps toward the owner's direction as the project intents record it.
 - Whether a teammate lacks meaningful work. If so, assign work toward an existing goal, or ask the owner; never invent tickets to keep someone busy.
