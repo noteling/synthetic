@@ -96,7 +96,7 @@ class TelegramOperationTests(unittest.TestCase):
             base = "http://127.0.0.1:%s" % server.server_port
             brain = root / "test_brain"
             brain.write_text("#!" + sys.executable + "\n" + '''
-import json,os,sys
+import json,os,sys,time
 from datetime import datetime,timedelta,timezone
 from synthetics.store import Store
 raw=sys.stdin.read(); c=json.loads(raw[raw.index('{'):])
@@ -105,6 +105,7 @@ with Store(os.environ['SYNTHETICS_HOME'],run_id=c['run']['id']) as s:
   t=e.get('thread') or 'continuing-human-conversation'
   if e['kind']=='reminder':
    s.message_send('david','PROACTIVE amber',thread=t,key='proactive')
+   time.sleep(0.3)  # keep the session open after a delivered send: stop() must still wait for run_finish
   elif 'pairing confirmed' in e['body']:
    assert any('elsewhere' in i['body'] for i in c['threads'][t]['items'])
    s.message_send('david','READY',thread=t,key='ready')
@@ -124,6 +125,7 @@ with Store(os.environ['SYNTHETICS_HOME'],run_id=c['run']['id']) as s:
    assert any(i['body']=='Is amber final?' for i in h['items'])
    assert any(i['body']=='yes' for i in h['items'])
    s.message_send('david','CONTEXT amber',thread=t,key='context-after-restart')
+   time.sleep(0.3)
 print(json.dumps({'result':'Handled captured input through durable employee state.','total_cost_usd':0}))
 ''')
             brain.chmod(0o700)
@@ -160,6 +162,20 @@ print(json.dumps({'result':'Handled captured input through durable employee stat
                         os.killpg(process.pid, signal.SIGKILL)
                         process.wait()
                 processes.clear()
+
+            def await_idle():
+                # A delivered send happens inside the session; its inputs are marked processed only by run_finish
+                # after the brain exits. Stopping earlier interrupts the run and (by design) keeps them pending.
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    with Store(home) as store:
+                        if not store.event_pending() and not any(
+                                run["status"] == "running" for run in store.run_list(limit=50)):
+                            return
+                    if any(process.poll() is not None for process in processes):
+                        break
+                    time.sleep(0.05)
+                self.fail("Worker did not finish its pending inputs before stop")
 
             self.addCleanup(stop)
             for_log_cleanup = lambda: [log.close() for log in logs]
@@ -198,6 +214,7 @@ print(json.dumps({'result':'Handled captured input through durable employee stat
             publish("yes", reply=question["message_id"])
             await_text("CONFIRMED amber")
             await_text("PROACTIVE amber")  # No incoming message caused this send.
+            await_idle()
             stop()
             with guard:
                 before_restart = len(sent)
@@ -205,6 +222,7 @@ print(json.dumps({'result':'Handled captured input through durable employee stat
             publish("Other person", sender=999)
             publish("What did I choose?")
             await_text("CONTEXT amber")
+            await_idle()
             stop()
             with guard:
                 self.assertEqual(len(sent), before_restart + 1)
