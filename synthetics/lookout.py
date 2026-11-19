@@ -328,13 +328,19 @@ def _relay_links(people, q):
     """G3: the asker's side shows where its question is now (hop) and links the onward question; the carrier's
     side shows which askers' questions it carries and links them. The link resolves when the other home's open
     question is on the same page; otherwise it is just the ID."""
+    return "".join(" — " + part for part in _relay_parts(people, q))
+
+
+def _relay_parts(people, q):
+    """The hop (with the onward question it went via) and each carried question, as linked HTML fragments.
+    Shared by the open-questions list (G3) and the Docket table's "now" cell (Docket links)."""
     parts = []
     if q.get("hop"):
         parts.append(E(q["hop"]) + (" via " + _qlink(q["hop_via"]) if q.get("hop_via") else ""))
     for link in q.get("carries") or []:
         if isinstance(link, dict) and link.get("question_id"):
             parts.append("carries %s for %s" % (_qlink(link["question_id"]), E(_name(people, link.get("asker")))))
-    return "".join(" — " + part for part in parts)
+    return parts
 
 
 def _name(people, pid):
@@ -416,9 +422,12 @@ def team_page(root, agents=None, now=None):
             if dock.get("items"):
                 out.append("<table><tr><th>question</th><th>asked</th><th>ack</th><th>now</th><th>blocks</th></tr>")
                 for item in dock["items"]:
-                    out.append("<tr><td><code>%s</code> %s</td><td>%s (%s)</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
-                        _v(item.get("question_id")), _v(item.get("summary")), _v(item.get("asked_at")),
-                        _age(item.get("asked_at"), now), _v(item.get("ack")), _v(item.get("hop")),
+                    # Docket links: the question links to its open-question anchor in this block, and "now" shows
+                    # the hop with the onward question it went via and the carried questions, linked like G3.
+                    out.append("<tr><td>%s %s</td><td>%s (%s)</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
+                        _qlink(item.get("question_id")), _v(item.get("summary")), _v(item.get("asked_at")),
+                        _age(item.get("asked_at"), now), _v(item.get("ack")),
+                        "; ".join(_relay_parts(people, item)),
                         E("; ".join(w.get("title") or w.get("id") for w in item.get("works") or []))))
                 out.append("</table>")
         questions = status.get("questions_open") or []

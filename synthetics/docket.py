@@ -130,7 +130,9 @@ def build(store, person=None, now=None):
             # P1b (additive fields): what this question carries onward, and its hop as last reported to me.
             carries=[dict(question_id=link["question_id"], asker=link["asker"],
                           link_auth=(link.get("link_auth") or {}).get("channel")) for link in question.get("relays") or []],
-            hop=store.hop_label(question), hop_since=question.get("hop_since")))
+            hop=store.hop_label(question), hop_since=question.get("hop_since"),
+            # Docket links (additive): the onward question the hop went via, so Lookout can link it.
+            hop_via=question.get("hop_via")))
     items.sort(key=lambda item: (item["asked_at"] or "", item["question_id"]))
     return dict(v=VERSION, person=pid, addresses=names, home=store.identity()["id"],
                 generated_at=now.strftime("%Y-%m-%dT%H:%M:%SZ"), count=len(items), items=items,
