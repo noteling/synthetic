@@ -215,7 +215,9 @@ name that `worker` subcommand (D9a; `kickstart` is accepted as an alias for `res
   target write transaction the CLI checks that no run is `running` and stores an idle hold
   (`capture_meta worker_hold`, expiry 120 s so a crashed holder cannot block the worker for long). While
   the hold is unexpired `run_begin` raises `WorkerHeld` and the engine starts no session; the hold is
-  released after the op, also on error. A busy target: `restart` becomes a **deferred** M19 runtime request
+  released after the op, also on error. (MTG F1: `floor attach` takes the same slot as its own holder kind
+  `floor`, authorized only by the provisioned `stand` channel key, never by a session or a worker.manage grant;
+  renewed every 60 s, expiry 5 min; docs/floor.md.) A busy target: `restart` becomes a **deferred** M19 runtime request
   (no settings, origin `delegated`) that the target's own runtime controller carries out at its next idle
   point and records applied/failed (result `outcome: deferred`, audit `stage: deferred`); a target without
   `--runtime-config` cannot record it → `not_idle`. **Asymmetry (D11):** restart is deferred, but `stop` and

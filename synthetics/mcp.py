@@ -267,8 +267,25 @@ class Server:
         if self.store.resolved and isinstance(value, dict):
             # Backlog 24 (K6): show the full IDs short prefixes were expanded to.
             value = dict(value, resolved=dict(self.store.resolved))
+        if isinstance(value, dict):
+            notice = self._yield_notice()
+            if notice is not None:
+                value = dict(value, **{"yield": notice})  # MTG F1 (C2): before the receipt, so it records it
         self.receipt(name, arguments, success=True, value=value)  # i17 E1: after the value is final
         return value
+
+    YIELD_TEXT = "a meeting is starting: save your next step with work_put and end now (stopped at %s)"
+
+    def _yield_notice(self):
+        """MTG F1: the yield notice when a pending meeting names this session's run. None otherwise (C1: then the
+        result is unchanged). A failure to read it never fails the tool call."""
+        try:
+            pending = self.store.meeting_pending()
+        except Exception:  # noqa: BLE001
+            return None
+        if not pending or self.store.run_id is None or pending.get("yield_run") != self.store.run_id:
+            return None
+        return self.YIELD_TEXT % pending.get("deadline")
 
     @staticmethod
     def _compact_defaults(name, arguments):

@@ -231,6 +231,13 @@ class ClaudeBrain:
                 pass
         process.wait()
 
+    def yield_stop(self):
+        """MTG F1: stop the running session's process group because a meeting's grace has passed (called from the
+        engine's watcher thread). The session then ends like any stopped CLI; the engine records it as yielded."""
+        process = getattr(self, "_current", None)
+        if process is not None and process.poll() is None:
+            self._stop_group(process)
+
     def run(self, context):
         workspace = self.home / "workspace"
         workspace.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -303,6 +310,7 @@ class ClaudeBrain:
                     )
                 except OSError as exc:
                     raise BrainError("Could not start Claude CLI: %s" % exc) from exc
+                self._current = process  # MTG F1: yield_stop's target
                 reader = threading.Thread(target=self._drain, args=(process.stdout, reducer), daemon=True)
                 reader.start()
                 feeder = threading.Thread(target=self._feed, args=(process.stdin, user_message), daemon=True)
@@ -356,6 +364,7 @@ class ClaudeBrain:
                 )
             except OSError as exc:
                 raise BrainError("Could not start Claude CLI: %s" % exc) from exc
+            self._current = process  # MTG F1: yield_stop's target
             try:
                 process.communicate(user_message, timeout=self.timeout)
             except subprocess.TimeoutExpired as exc:

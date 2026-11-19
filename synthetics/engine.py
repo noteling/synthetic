@@ -24,6 +24,8 @@ class WorkerStopped(RuntimeError):
 
 LIMIT_FILE = "usage_limit.json"
 FAILURE_WINDOW = 3
+FAILURE_SCAN = 50  # MTG F1: runs read to find FAILURE_WINDOW non-yielded ones
+YIELD_PREFIX = "yielded: meeting "
 
 
 def utc_day(moment=None):
@@ -51,8 +53,9 @@ def write_limit_override(home, **fields):
 
 
 def failure_streak(runs, window=FAILURE_WINDOW):
-    """Latest run id when the newest `window` runs all failed or were interrupted, else None."""
-    recent = runs[:window]
+    """Latest run id when the newest `window` runs all failed or were interrupted, else None.
+    MTG F1 (C3): a run stopped for a meeting (`yielded`) is no verdict; it is skipped, neither failure nor success."""
+    recent = [run for run in runs if not run.get("yielded")][:window]
     if len(recent) < window or any(run.get("status") not in ("failed", "interrupted") for run in recent):
         return None
     return recent[0]["id"]
@@ -218,7 +221,9 @@ class Engine:
             if not store.event_admissible(limit=1) and not store.runnable_work():
                 return None
             if store.worker_hold() is not None:
-                return None  # M28 D10c: a delegated worker op holds the idle boundary
+                return None  # M28 D10c: a delegated worker op (or a floor meeting) holds the idle boundary
+            if store.meeting_pending() is not None:
+                return None  # MTG F1: a meeting is about to attach; start nothing new
             pause = self.pause_state(store)
             if pause is None:
                 if self._last_pause is not None:
@@ -247,6 +252,7 @@ class Engine:
                     run = store.run_begin(event_ids=allowed)
                 except WorkerHeld:
                     return None
+        yielded = {}
         try:
             with Store(self.home) as store:
                 context = store.context(run_id=run["id"])
@@ -258,9 +264,10 @@ class Engine:
             context["run"] = run
             context["workspace"] = str(self.home / "workspace")
             self.on_update({"type": "started", "run_id": run["id"]})
-            result = self.brain.run(context)
+            result = self._run_yieldable(run["id"], context, yielded)
             with Store(self.home) as store:
                 finished = store.run_finish(run["id"], result.summary, cost=result.cost)
+                self._yield_ended_itself(store, run["id"], yielded)
                 sharedstatus.write(store, paused=self._last_pause)  # VIS: session ended, idle
                 try:
                     board.advance(store, run["id"], finished=True)
@@ -272,6 +279,8 @@ class Engine:
                     except Exception:  # noqa: BLE001 - retried by the next idle step
                         pass
         except BaseException as error:
+            if yielded.get("stopped") and isinstance(error, Exception):
+                return self._yielded_run(run["id"], error, yielded)
             # Tool effects may already exist. Failed input is retained for reconciliation.
             with Store(self.home) as store:
                 store.run_fail(run["id"], str(error) or type(error).__name__, cost=getattr(error, "cost", None))
@@ -290,6 +299,66 @@ class Engine:
                 self._probation(store, run["id"], None)
         self.on_update({"type": "finished", "run": finished})
         return finished
+
+    YIELD_POLL = 1.0  # seconds between checks for a meeting deadline while a session runs
+
+    def _run_yieldable(self, run_id, context, yielded):
+        """MTG F1: run the session while a watcher stops it once a meeting's grace for this run has passed."""
+        done = threading.Event()
+
+        def watch():
+            from .store import timestamp
+            while not done.wait(self.YIELD_POLL):
+                try:
+                    with Store(self.home) as store:
+                        pending = store.meeting_pending()
+                except Exception:  # noqa: BLE001 - a busy store is retried on the next poll
+                    continue
+                if not pending or pending.get("yield_run") != run_id:
+                    continue
+                yielded.update(meeting=pending["meeting"], grace=pending.get("grace_seconds"))
+                if pending.get("deadline") and pending["deadline"] <= timestamp():
+                    yielded["stopped"] = True
+                    stop = getattr(self.brain, "yield_stop", None)
+                    if stop is not None:
+                        stop()
+                    return
+
+        watcher = threading.Thread(target=watch, name="floor-yield-watch", daemon=True)
+        watcher.start()
+        try:
+            return self.brain.run(context)
+        finally:
+            done.set()
+            watcher.join(timeout=5)
+
+    def _yield_ended_itself(self, store, run_id, yielded):
+        """C2: a yield target that finished on its own (inside the grace, or racing the stop) is audited `ended`."""
+        try:
+            pending = store.meeting_pending()
+            if pending and pending.get("yield_run") == run_id:
+                yielded.setdefault("meeting", pending["meeting"])
+                yielded.setdefault("grace", pending.get("grace_seconds"))
+            if yielded.get("meeting"):
+                store.floor_yield_audit(run_id, yielded["meeting"], yielded.get("grace"), "ended")
+                self.on_update({"type": "yield_ended", "run_id": run_id, "meeting": yielded["meeting"]})
+        except Exception:  # noqa: BLE001 - the audit row never changes the run's outcome
+            pass
+
+    def _yielded_run(self, run_id, error, yielded):
+        """C3: the session was stopped for a meeting. Its inputs stay pending and replay after the meeting; the run
+        is no failure verdict (failure_streak skips it), no probation verdict, and serve does not count it."""
+        with Store(self.home) as store:
+            failed = store.run_fail(run_id, YIELD_PREFIX + yielded["meeting"], cost=getattr(error, "cost", None),
+                                    yielded=yielded["meeting"])
+            store.floor_yield_audit(run_id, yielded["meeting"], yielded.get("grace"), "stopped")
+            sharedstatus.write(store, paused=self._last_pause)
+            try:
+                board.advance(store, run_id, finished=False)
+            except Exception:  # noqa: BLE001
+                pass
+        self.on_update({"type": "yielded", "run_id": run_id, "meeting": yielded["meeting"]})
+        return failed
 
     def run(self, max_turns=1):
         if max_turns < 1:
@@ -347,7 +416,7 @@ class Engine:
             with Store(self.home) as store:
                 store.identity()
                 recovered = store.recover_runs()
-                streak = failure_streak(store.run_list(FAILURE_WINDOW))
+                streak = failure_streak(store.run_list(FAILURE_SCAN))
                 if streak and read_limit_override(self.home).get("resume_after_run") != streak:
                     self.failure_pause = streak
                 if self.runtime is not None:
