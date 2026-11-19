@@ -234,31 +234,45 @@ lives in the guidance and in the `from` bound.
 The `## dream` section of `synthetics/prompts/routines.md` is the guidance; the mechanics are:
 
 - **Retrieval in time order (since=).** MCP `memory_search(since=S)` and `event_search(since=S)` return
-  `{memories|events, since, capped, unread_from, next_cursor}`: items created at or after S (inclusive, by
-  `created_at`), oldest first, with every query word required (no ranked fill). Ties on `created_at` are
-  ordered by memory ID or event arrival (`seq`). `capped: true` means the limit cut the page; `unread_from` is
+  `{memories|events, since, capped, unread_from, next_cursor, truncated_from}`: items created at or after S
+  (inclusive, by `created_at`), oldest first, with every query word required (no ranked fill). Ties on
+  `created_at` are ordered by memory ID or event arrival (`seq`). `capped: true` means the limit or the byte
+  budget (below) cut the page; `unread_from` is
   the `created_at` of the first item not returned (the `from` of an omission if the dream stops there), and
   `next_cursor` continues strictly after the last item returned (`cursor=`), so items sharing a timestamp are
   never repeated or skipped (H2). Without `since` or `cursor` both tools behave and return exactly as before.
-- **Bounded dreams (H5).** Each dream reads at most about 200 event records, 100 memory records and 10
-  topical older lookups; these are ceilings, not targets. Read them in pages: start at about 15-20 events
-  and 20-30 memories per call (`limit=`), and continue with `cursor=next_cursor`. A page that comes back
-  spilled to a file, truncated or shown only in part is **not read**: seeing only a saved-file path, a
-  preview or prefix, or a generated summary does not count. Halve `limit` and re-read that same range (same
-  `since`/`cursor`); until it is read in full, record it as an omission with `from` = its first item's
-  `created_at` and don't advance `covered_through` past it. Summarizing *after* the complete originals have
-  been read is fine. If even `limit=1` spills (one very large item, such as a `source_update` document),
-  read that item's saved original body in bounded sequential chunks, keeping its ID; any unread remainder is
-  an omission with `from` = that item's `created_at`. Event records vary widely in
-  size (early `source_update` events carry whole document bodies, ~3.8 KB per event on average in one home),
-  so a fixed page size can still spill. It looks at current goals and the newest
-  consequential feedback and outcomes first, and spends what is left on chronological backfill from
-  `covered_through`. Coverage is contiguous: reading newer material first never moves `covered_through` past
-  an older unread gap, so it advances only to the end of the unbroken run read from the previous checkpoint,
-  or stays put, with the gap recorded as an omission. A current-day lesson may still be kept. A home with a
-  null or old checkpoint catches up over several dreams. Nothing claims lifetime coverage and no raw history
-  is deleted. The bound is guidance only: no new cursor, checkpoint field or service, and the runtime guards
-  (E1 validation in `routine_rearm`, the next self-rearm) are unchanged.
+- **Results fit tool output (F2).** Tool output has a size ceiling (not measured: 25 KB showed in full and
+  80 KB spilled), and event bodies range up to ~90 KB, so no fixed `limit` fits. Through MCP every
+  `event_search` and `memory_search` result stops before `max_bytes` (default 32 000 bytes of serialized
+  JSON) and returns at least one item; `capped` says it stopped. Query/thread mode then returns
+  `{events|memories, capped, ...}` instead of a bare list. On since= pages bodies stay whole: the page holds
+  as many complete records as fit, and only a first item too large alone is cut to fit. Without since,
+  event bodies are cut to `body_chars` (default 500): search finds events, `event_get` reads them. Every
+  event carries `body_len` and `body_truncated`, and `truncated_from` is the `created_at` of the first cut
+  item (null if none). A cut item still counts as returned, so `next_cursor` moves past it. Memories are
+  never cut. `event_get(id, body_offset=, body_chars=)` returns a slice of the original body with
+  `body_len`, `body_offset` and `body_next` (null at the end; MCP default chunk 30 000 characters); a plain
+  `event_get(id)` is unchanged. **Reading rule:** a `body_truncated` item is unread until `event_get` has
+  covered its body from 0 to `body_len`; until then `truncated_from` bounds `covered_through` and is the
+  omission's `from`. The store's own defaults are unchanged (no `body_chars`, no `max_bytes`), so the CLI
+  and internal callers still get full records.
+- **Bounded dreams (H5).** Each dream reads at most about 200 event records, 100 memory records and 10 topical
+  older lookups; these are ceilings, not targets. Read them in pages with `cursor=next_cursor`; the byte
+  budget (F2, above) sizes each page, so a generous `limit` is fine. Output that comes back spilled to a file,
+  truncated or shown only in part is **not read**: seeing only a saved-file path, a preview or prefix
+  (including a `body_truncated` search item), or a generated summary does not count. Fetch each cut item with
+  `event_get` (in `body_offset` chunks when `body_len` is over ~30 000), keeping its ID; until a range is read
+  in full, record it as an omission with `from` = its first unread item's `created_at` (a page's
+  `truncated_from`), and don't advance `covered_through` past it. If a result still spills (the ceiling may be
+  lower on another host), pass a smaller `max_bytes` and re-read the same range. Summarizing *after* the
+  complete originals have been read is fine. It looks at current goals and the newest consequential feedback
+  and outcomes first, and spends what is left on chronological backfill from `covered_through`. Coverage is
+  contiguous: reading newer material first never moves `covered_through` past an older unread gap, so it
+  advances only to the end of the unbroken run read from the previous checkpoint, or stays put, with the gap
+  recorded as an omission. A current-day lesson may still be kept. A home with a null or old checkpoint
+  catches up over several dreams. Nothing claims lifetime coverage and no raw history is deleted. The bound is
+  guidance only: no new cursor, checkpoint field or service, and the runtime guards (E1 validation in
+  `routine_rearm`, the next self-rearm) are unchanged.
 - **Checkpoint.** The dream passes `covered_through` (≤ `evidence_cutoff`, ≤ every omission's `from`) and its
   omissions to `routine_rearm`, as in "Dream checkpoint" above. The inclusive `since` means a T equal to an
   omission's `from` re-reads the items at that timestamp next time and skips nothing.
@@ -293,5 +307,6 @@ The `## dream` section of `synthetics/prompts/routines.md` is the guidance; the 
 | H3 working_context kind and provenance | `test_rtn_p2_dream.H3WorkingContextKind` |
 | H4 brief owner-level quarantine notice | `test_rtn_p2_dream.H4BriefNotice` |
 | H5 bounded dream, current first, contiguous checkpoint | prose only (`## dream` and "Bounded dreams" above); read review, no wording test; runtime unchanged |
-| Dream page size; spilled/summarized output is not read (P3 finding) | prose only (`## dream` step 1 and "Bounded dreams"); read review, no wording test; runtime unchanged |
+| Dream page size; spilled/summarized output is not read (P3 finding) | prose only (`## dream` step 1 and "Bounded dreams"); read review, no wording test |
+| F2 results fit tool output: byte budget, body previews, cut first item, `event_get` chunks, store defaults unchanged | `test_f2_compact_search` (QueryPreview, Budget incl. C1 query mode and C3 cursor past a cut item, Chunks incl. C2 plain `event_get`, StoreDefaultsUnchanged C4) |
 | Fresh-home init needs `--human` (README, Provisioning step 1) | existing `tests/test_humans_cli.py` (`test_no_file_and_no_flag_fails_clearly`, `test_init_human_writes_config_and_is_default_everywhere`) |

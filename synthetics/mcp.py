@@ -30,16 +30,26 @@ def tool(name, description, properties=None, required=None):
     }
 
 
+# F2: compact retrieval defaults for the model. The store returns full records unless asked (CLI, internal
+# callers and tests are unchanged); the tool-output ceiling is not measured, so max_bytes is a margin under it.
+SEARCH_BODY_CHARS = 500
+SEARCH_MAX_BYTES = 32000
+EVENT_CHUNK_CHARS = 30000
+
 KEY = text_property("Stable descriptive key for this intended operation. Reuse after interruption; a different payload with the same key is rejected.")
 TOOLS = [
     tool("employee_context", "Read current identity, relationships, memories, ongoing work, pending inputs, questions, and recent runs."),
-    tool("event_get", "Read the original source event by ID, including messages already processed in earlier sessions. Use this to verify the evidence behind a memory. A unique ID prefix of 8+ hex characters is accepted.", {
+    tool("event_get", "Read the original source event by ID, including messages already processed in earlier sessions. Use this to verify the evidence behind a memory. A unique ID prefix of 8+ hex characters is accepted. Without body_offset/body_chars the whole event is returned; when its body_len is over ~30 000, read it in chunks instead: body_offset=0 with body_chars, then body_offset=body_next until body_next is null.", {
         "id": text_property(),
+        "body_offset": {"type": "integer", "minimum": 0, "description": "Character offset into the original body; the result has that slice plus body_len, body_offset and body_next (null at the end)."},
+        "body_chars": {"type": "integer", "minimum": 0, "description": "Characters of the body to return from body_offset (default %d when only body_offset is given)." % EVENT_CHUNK_CHARS},
     }, ["id"]),
-    tool("event_search", "Search original source events across sessions, including processed events. Filter by thread when tracing an ongoing conversation. With since, read in time order with a capped flag (the dream's retrieval).", {
+    tool("event_search", "Search original source events across sessions, including processed events. Filter by thread when tracing an ongoing conversation. With since, read in time order with a capped flag (the dream's retrieval). The result is {events, capped, truncated_from, ...}; every event has body_len and body_truncated. A body_truncated event is a preview, not a read: fetch it with event_get. Without since, bodies are cut to body_chars (default %d). Every result stops before max_bytes (default %d): capped=true then means more items exist." % (SEARCH_BODY_CHARS, SEARCH_MAX_BYTES), {
         "query": text_property(), "thread": text_property(),
         "limit": {"type": "integer", "minimum": 1, "maximum": 200},
-        "since": text_property("ISO timestamp with timezone. Only items created at or after it, oldest first, every query word required; the result is {events, since, capped, unread_from, next_cursor}. capped=true means the limit cut the page: unread_from is the created_at of the first item not returned (an omission's from); pass next_cursor as cursor to read the next page."),
+        "body_chars": {"type": "integer", "minimum": 0, "description": "Cut each body to this many characters (default %d without since; full bodies with since unless given)." % SEARCH_BODY_CHARS},
+        "max_bytes": {"type": "integer", "minimum": 1024, "description": "Byte budget of the serialized result (default %d). The result stops before the item that would exceed it and returns at least one item; a single item too large alone is cut and marked body_truncated." % SEARCH_MAX_BYTES},
+        "since": text_property("ISO timestamp with timezone. Only items created at or after it, oldest first, every query word required; the result is {events, since, capped, unread_from, next_cursor, truncated_from}. capped=true means the limit or max_bytes cut the page: unread_from is the created_at of the first item not returned (an omission's from); pass next_cursor as cursor to read the next page. truncated_from is the created_at of the first body_truncated item (null if none): unless you fetch that item with event_get, it bounds your coverage too."),
         "cursor": text_property("next_cursor of the previous since= page: continues strictly after its last item, so items with the same created_at are neither repeated nor skipped."),
     }),
     tool("thread_history", "Read a conversation's incoming messages and your outgoing messages/questions, including processed history. Items are chronological; the first page contains the latest items. Use next_before as before to retrieve older pages. A bound work session excludes inputs outside its captured batch.", {
@@ -59,13 +69,14 @@ TOOLS = [
         "source": text_property("Input event ID, colleague, file, or other supporting evidence."),
         "key": KEY, "replaces": text_property("ID of the obsolete memory this corrects."),
     }, ["subject", "predicate", "value", "source"]),
-    tool("memory_search", "Search your memory across projects. Active memories by default; inspect superseded history explicitly when needed. A full memory ID (or a 15+ character prefix) returns that memory first. With since, read in time order with a capped flag (the dream's retrieval).", {
+    tool("memory_search", "Search your memory across projects. Active memories by default; inspect superseded history explicitly when needed. A full memory ID (or a 15+ character prefix) returns that memory first. With since, read in time order with a capped flag (the dream's retrieval). The result is {memories, capped, ...}; it stops before max_bytes (default %d) with at least one memory, and capped=true then means more memories exist (narrow the query, or page with since=). Memories are never cut." % SEARCH_MAX_BYTES, {
         "query": text_property(), "subject": text_property(),
         "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+        "max_bytes": {"type": "integer", "minimum": 1024, "description": "Byte budget of the serialized result (default %d)." % SEARCH_MAX_BYTES},
         "include_superseded": {"type": "boolean"},
         "match": {"type": "string", "enum": ["any", "all"],
                   "description": "any (default): every-word matches first, then ranked matches on any distinctive word. all: every word must appear."},
-        "since": text_property("ISO timestamp with timezone. Only items created at or after it, oldest first, every query word required; the result is {memories, since, capped, unread_from, next_cursor}. capped=true means the limit cut the page: unread_from is the created_at of the first item not returned (an omission's from); pass next_cursor as cursor to read the next page."),
+        "since": text_property("ISO timestamp with timezone. Only items created at or after it, oldest first, every query word required; the result is {memories, since, capped, unread_from, next_cursor, truncated_from}. capped=true means the limit or max_bytes cut the page: unread_from is the created_at of the first item not returned (an omission's from); pass next_cursor as cursor to read the next page."),
         "cursor": text_property("next_cursor of the previous since= page: continues strictly after its last item, so items with the same created_at are neither repeated nor skipped."),
     }),
     tool("work_put", "Create or update ongoing work, including commitments and progress. Pass id to update; omitted fields retain their values. Waiting needs a blocker or future wake-up. A final summary alone does not update work. id, question IDs in waiting_for and evidence refs accept a unique prefix of 8+ hex characters; the full ID is stored.", {
@@ -244,6 +255,7 @@ class Server:
                 method = self.store.context if name == "employee_context" else getattr(self.store, name)
                 if name == "outbox_list":
                     arguments = dict({"limit": 50}, **arguments)  # backlog 6: never the whole outbox by default
+                arguments = self._compact_defaults(name, arguments)
                 value = method(**arguments)
         except Exception as exc:
             self.receipt(name, arguments, success=False, error=str(exc))
@@ -255,6 +267,18 @@ class Server:
             # Backlog 24 (K6): show the full IDs short prefixes were expanded to.
             value = dict(value, resolved=dict(self.store.resolved))
         return value
+
+    @staticmethod
+    def _compact_defaults(name, arguments):
+        """F2: search results fit tool output. Event bodies are previews in query/thread mode (since= pages keep
+        full bodies), every search result has a byte budget, and a bare body_offset reads one chunk."""
+        if name in ("event_search", "memory_search"):
+            arguments = dict({"max_bytes": SEARCH_MAX_BYTES}, **arguments)
+        if name == "event_search" and arguments.get("since") is None and arguments.get("cursor") is None:
+            arguments = dict({"body_chars": SEARCH_BODY_CHARS}, **arguments)
+        if name == "event_get" and "body_offset" in arguments and "body_chars" not in arguments:
+            arguments = dict(arguments, body_chars=EVENT_CHUNK_CHARS)
+        return arguments
 
     PRIVATE_TOOLS = ("view_put", "self_note")
 
