@@ -2967,7 +2967,7 @@ class Store:
         if origin == "self":
             runtime.check_self_service(settings, effective, policy["baseline"])
         proposed = runtime.validate(runtime.merge(effective, settings), policy["allowed_models"],
-                                    policy["allowed_claude"])
+                                    policy["allowed_claude"], policy.get("allowed_codex", []))
         payload = dict(origin=origin, settings=settings, reason=reason, requested_by=requested_by)
         if delegation:
             payload["delegation"] = delegation
@@ -3054,6 +3054,8 @@ class Store:
             policy = state["policy"]
             view["allowed"] = dict(models=policy.get("allowed_models"), claude=policy.get("allowed_claude"),
                                    self_service=list(runtime.SELF_SERVICE), max_self_budget=policy["baseline"]["budget"])
+            if policy.get("allowed_codex"):
+                view["allowed"]["codex"] = policy["allowed_codex"]
         view["requests"] = [{name: r.get(name) for name in ("id", "status", "origin", "requested_by", "reason",
                                                              "settings", "outcome", "updated_at")} for r in requests]
         return view
@@ -3142,7 +3144,11 @@ class Store:
             if old is not None:
                 return old
             now = datetime.now(timezone.utc)
-            running = next((run["id"] for run in self._all("runs") if run["status"] == "running"), None)
+            active = next((run for run in self._all("runs") if run["status"] == "running"), None)
+            if active is not None and active.get("executor") == "codex":
+                raise ValueError("The active Codex executor does not support persistent meeting sessions; "
+                                 "ordinary work has not been yielded.")
+            running = active["id"] if active else None
             row = dict(meeting=meeting_id, channel=channel, at=timestamp(now), grace_seconds=grace, yield_run=running,
                        deadline=timestamp(now + timedelta(seconds=grace)) if running else None,
                        expires_at=timestamp(now + timedelta(seconds=grace + self.MEETING_WAIT_SECONDS)))
@@ -3328,8 +3334,10 @@ class Store:
                                                          run=self.run_id))
             return dict(record, accepted=dict(meeting=meeting, cid=cid, line=number, confirmed_by=confirmed_by))
 
-    def run_begin(self, event_ids=None):
+    def run_begin(self, event_ids=None, executor=None):
         """Start a run. event_ids, when given, restricts the captured inputs to those pending events."""
+        if executor is not None and executor not in ("claude", "codex"):
+            raise ValueError("Unknown run executor.")
         with self._tx():
             if any(run["status"] == "running" for run in self._all("runs")):
                 raise ValueError("Another run is active; recover interrupted runs after acquiring the worker lock.")
@@ -3367,6 +3375,8 @@ class Store:
             prof = profiles.triple(self.home)  # role profile the session starts under; absent without profile.json
             if prof is not None:
                 record["profile"] = prof
+            if executor is not None:
+                record["executor"] = executor
             return self._save("runs", record, "run.started")
 
     def run_get(self, id):

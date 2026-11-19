@@ -131,7 +131,13 @@ class Engine:
 
     def apply_runtime(self, effective):
         """Use the effective persisted settings for brain, limits and polling."""
-        self.brain.executable = str(effective["claude"])
+        backend = effective.get("brain", "claude")
+        if backend != getattr(self.brain, "backend", "claude"):
+            from .brain import make_brain
+            self.brain = make_brain(self.home, brain=backend, claude=effective["claude"],
+                                    codex=effective.get("codex") or "codex", model=effective["model"],
+                                    timeout=effective["timeout"], budget=effective["budget"])
+        self.brain.executable = str(effective.get("codex") if backend == "codex" else effective["claude"])
         self.brain.model = effective["model"]
         self.brain.timeout = float(effective["timeout"])
         self.brain.budget = float(effective["budget"])
@@ -232,7 +238,7 @@ class Engine:
                     sharedstatus.write(store, paused=None)  # VIS: the pause ended
                 self._last_pause = None
                 try:
-                    run = store.run_begin()
+                    run = store.run_begin(executor=getattr(self.brain, "backend", "claude"))
                 except WorkerHeld:
                     return None
             else:
@@ -251,7 +257,7 @@ class Engine:
                 if not allowed:
                     return None
                 try:
-                    run = store.run_begin(event_ids=allowed)
+                    run = store.run_begin(event_ids=allowed, executor=getattr(self.brain, "backend", "claude"))
                 except WorkerHeld:
                     return None
         yielded = {}
@@ -273,6 +279,9 @@ class Engine:
             context["pending_events"] = events
             context["run"] = run
             context["workspace"] = str(self.home / "workspace")
+            capabilities = getattr(self.brain, "capabilities", None)
+            if isinstance(capabilities, dict):
+                context["executor"] = capabilities
             self.on_update({"type": "started", "run_id": run["id"]})
             result = self._run_yieldable(run["id"], context, yielded)
             with Store(self.home) as store:
