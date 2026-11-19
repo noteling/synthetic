@@ -92,8 +92,8 @@ There are no hardcoded IDs, and nothing is inferred from role text.
 and `teardown` are refused to a session on every home, its own or another, including a disposable home under
 `/tmp`. `worker install` is owner-only, except a delegated `worker.manage` reinstall of the standard worker
 plist on another home that the delegation covers (never the session's own home, which uses
-`runtime_restart`; see [authority.md](authority.md)). A session may run only `routine list` on its own home
-and MCP `routine_rearm`.
+`runtime_restart`; see [authority.md](authority.md)). A session may run only `routine list` on its own home,
+`routine verify` (read-only, fenced like doctor; [ledgerline.md](ledgerline.md)) and MCP `routine_rearm`.
 
 | Command | Owner (host account, operator) | A session (SYNTHETICS_SESSION_RUN set) |
 |---|---|---|
@@ -103,6 +103,7 @@ and MCP `routine_rearm`.
 | `synthetics --home H routine restore KIND` | yes | refused `owner_only`; a session clears its own quarantine with `routine_rearm` |
 | `synthetics --home H routine teardown KIND… \| --all [--reason R]` | yes | refused `owner_only` |
 | `synthetics --home H routine list` | yes | own home only; another home is refused `own_home_only` |
+| `synthetics --home H routine verify RUN [--spill-bytes N]` (i17, [ledgerline.md](ledgerline.md)) | yes | fenced exactly like doctor: own home, or another home with a covering delegation (audited); else `own_home_only` |
 | `synthetics --home H doctor` | yes | own home; another home only with a covering `worker.manage` or `runtime.request` delegation (audited), else `own_home_only`; host-path flags own home only (G4, "doctor on another home" below) |
 | MCP `routine_rearm` | no: it needs a run, and operators use `restore` | yes, own home (the MCP server is bound to the session's run) |
 

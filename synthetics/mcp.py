@@ -5,13 +5,14 @@ stdout; both the operator and the CLI adapter may launch this process.
 """
 
 import argparse
+import fcntl
 from datetime import datetime, timezone
 import json
 import os
 import re
 import sys
 
-from . import sharedstatus
+from . import ledgerline, sharedstatus
 from .store import Store
 
 
@@ -260,12 +261,12 @@ class Server:
         except Exception as exc:
             self.receipt(name, arguments, success=False, error=str(exc))
             raise
-        self.receipt(name, arguments, success=True)
         if name in STATUS_TOOLS:
             sharedstatus.write(self.store)  # VIS C1: Lookout sees in-session work/question changes; never fails the call
         if self.store.resolved and isinstance(value, dict):
             # Backlog 24 (K6): show the full IDs short prefixes were expanded to.
             value = dict(value, resolved=dict(self.store.resolved))
+        self.receipt(name, arguments, success=True, value=value)  # i17 E1: after the value is final
         return value
 
     @staticmethod
@@ -292,7 +293,18 @@ class Server:
             return [Server._redact(v) for v in value]
         return value
 
-    def receipt(self, name, arguments, success, error=None):
+    _NO_VALUE = object()
+
+    @staticmethod
+    def _result_facts(name, value):
+        """i17 E1: facts about the text tools/call sends for this value (respond() serialises it the same way).
+        Never raises: a failure is recorded as result_error and the call's result is untouched (C4)."""
+        try:
+            return ledgerline.result_facts(name, value, json.dumps(value, ensure_ascii=False)), None
+        except Exception as exc:  # noqa: BLE001 - evidence must never change the tool result
+            return None, type(exc).__name__
+
+    def receipt(self, name, arguments, success, error=None, value=_NO_VALUE):
         """Diagnostic evidence of attempted tools, separate from committed effects.
 
         A successful read receipt proves that a source was requested. It does not
@@ -312,6 +324,12 @@ class Server:
         }
         if error is not None:
             record["error"] = error[:1000]
+        if value is not self._NO_VALUE:
+            facts, problem = self._result_facts(name, value)
+            if facts is not None:
+                record["result"] = facts
+            else:
+                record["result_error"] = problem
         try:
             folder = self.store.home / "runs"
             folder.mkdir(exist_ok=True, mode=0o700)
@@ -319,10 +337,13 @@ class Server:
             descriptor = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             with os.fdopen(descriptor, "w", encoding="utf-8") as output:
                 os.fchmod(output.fileno(), 0o600)
+                fcntl.flock(output.fileno(), fcntl.LOCK_EX)  # i17 E1: read the tail and append as one step
+                previous = ledgerline.last_line(path)
+                record["prev_sha256"] = ledgerline.sha256_text(previous) if previous is not None else None
                 output.write(json.dumps(record, ensure_ascii=False) + "\n")
                 output.flush()
                 os.fsync(output.fileno())
-        except (OSError, TypeError, ValueError) as exc:
+        except Exception as exc:  # noqa: BLE001 - i17 C4: a receipt failure never fails or alters the call
             print("synthetics MCP receipt failed: %s" % type(exc).__name__, file=sys.stderr)
 
     def respond(self, message):
