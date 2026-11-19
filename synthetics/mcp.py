@@ -142,9 +142,12 @@ TOOLS.extend(projecttools.TOOLS)
 from . import rostertools  # noqa: E402  (M26 roster tools)
 
 TOOLS.extend(rostertools.TOOLS)
+from . import glance  # noqa: E402  (RW-1 Glance)
+
+TOOLS.extend(glance.TOOLS)
 METHODS = {entry["name"]: entry for entry in TOOLS}
 MUTATIONS = {"entity_put", "memory_put", "work_put", "question_ask", "question_resolve", "question_close", "question_relays", "message_send", "reminder_set",
-             "runtime_restart"} | projecttools.MUTATIONS | rostertools.MUTATIONS
+             "runtime_restart"} | projecttools.MUTATIONS | rostertools.MUTATIONS | glance.MUTATIONS
 
 
 def validate_arguments(specification, arguments):
@@ -193,8 +196,16 @@ def validate_value(name, field, value):
             validate_value("%s.%s" % (name, key), properties[key], item)
 
 
+def offered(home):
+    """The tools this home is offered: screen_glance only when the home opts in (RW-1 C1, glance.json)."""
+    if glance.enabled(home):
+        return TOOLS
+    return [entry for entry in TOOLS if entry["name"] not in glance.NAMES]
+
+
 # VIS C1: tools whose success rewrites <home>/shared/status.json.
-STATUS_TOOLS = frozenset({"work_put", "question_ask", "question_close", "question_resolve", "question_relays"})
+STATUS_TOOLS = frozenset({"work_put", "question_ask", "question_close", "question_resolve", "question_relays",
+                          "screen_glance"})  # RW-1: Lookout's Recent glances
 
 
 class Server:
@@ -204,7 +215,7 @@ class Server:
 
     def call(self, name, arguments):
         try:
-            if name not in METHODS:
+            if name not in METHODS or (name in glance.NAMES and not glance.enabled(self.store.home)):
                 raise ValueError("Unknown tool: %s" % name)
             validate_arguments(METHODS[name], arguments)
             self.store.resolved = {}
@@ -214,6 +225,8 @@ class Server:
                 value = projecttools.call(self.store, name, arguments)
             elif name in rostertools.NAMES:
                 value = rostertools.call(self.store, name, arguments)
+            elif name in glance.NAMES:
+                value = glance.call(self.store, name, arguments)
             else:
                 method = self.store.context if name == "employee_context" else getattr(self.store, name)
                 if name == "outbox_list":
@@ -291,7 +304,7 @@ class Server:
         elif method == "ping":
             result = {}
         elif method == "tools/list":
-            result = {"tools": TOOLS}
+            result = {"tools": offered(self.store.home)}
         elif method == "tools/call":
             params = message.get("params") or {}
             try:

@@ -116,7 +116,7 @@ CREATE TABLE IF NOT EXISTS roster_log (
 
 class Store:
     TABLES = ("identity", "entities", "memories", "works", "questions", "messages", "reminders", "runs", "access_grants",
-              "thread_records", "runtime_requests", "channels", "launch_ops")
+              "thread_records", "runtime_requests", "channels", "launch_ops", "glances")
 
     def __init__(self, employee_home, run_id=None):
         self.home = Path(employee_home).expanduser().resolve()

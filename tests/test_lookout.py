@@ -97,7 +97,7 @@ class StatusExportTests(_Root):
             self.assertNotIn(sentinel, text)
         value = json.loads(text)
         self.assertEqual(set(value), {"v", "employee", "name", "role", "written_at", "pid", "session", "works",
-                                      "docket", "docket_error", "questions_open", "runs", "outbox_stuck"})
+                                      "docket", "docket_error", "questions_open", "runs", "outbox_stuck", "glances"})
         self.assertEqual(value["session"], {"state": "idle", "run": None, "started_at": None, "paused": None})
         self.assertEqual([x["id"] for x in value["works"]], [w["id"]])
         self.assertEqual(set(value["works"][0]), {"id", "title", "status", "priority", "waiting_for", "wake_at",
