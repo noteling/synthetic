@@ -93,7 +93,7 @@ def worker_argv(home, claude, model, budget, timeout, poll=2.0, daily_limit=75.0
         raise ValueError("brain must be claude or codex.")
     executable = ["--claude", str(Path(claude).absolute())] if brain == "claude" else [
         "--brain", "codex", "--codex", resolve_codex(codex)]
-    model = model if model is not None else ("claude-opus-5-5" if brain == "claude" else "")
+    model = model or ("claude-opus-5-5" if brain == "claude" else "")
     # An omitted Codex model selects its CLI default. Launch-agent argv deliberately refuses empty
     # strings, so represent that choice by omitting --model rather than an empty argument.
     model_args = ["--model", model] if model else []

@@ -1036,7 +1036,7 @@ def main(argv=None):
                 stopped_by_signal.append(signum)
                 raise KeyboardInterrupt()
             signal.signal(signal.SIGTERM, terminate)
-            model = args.model if args.model is not None else ("claude-opus-5-5" if args.brain == "claude" else "")
+            model = args.model or ("claude-opus-5-5" if args.brain == "claude" else "")
             brain = make_brain(home, brain=args.brain, claude=args.claude, codex=args.codex, model=model,
                                timeout=args.timeout, budget=args.budget)
             def update(event):

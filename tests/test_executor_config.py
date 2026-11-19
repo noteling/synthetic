@@ -161,6 +161,10 @@ class ExecutorCLITests(unittest.TestCase):
         self.assertNotIn("--model", argv)
         self.assertNotIn("--claude", argv)
 
+    def test_empty_claude_model_keeps_existing_default_in_worker_argv(self):
+        argv = install.worker_argv(self.home, sys.executable, "", 100, 600)
+        self.assertEqual(argv[argv.index("--model") + 1], "claude-opus-5-5")
+
     def test_codex_serve_publishes_runtime_even_without_runtime_config_flag(self):
         captured = []
         def no_model_serve(engine, **kwargs):
