@@ -21,7 +21,7 @@ home for an example employee called Rowan.
 
 ```sh
 python3 -m synthetics --home .synthetics/rowan init \
-  --name Rowan --role "Noteling maintainer" \
+  --name Rowan --role "Noteling maintainer" --human david \
   --purpose "Learn the product, maintain it thoughtfully, investigate independently, and collaborate with David."
 
 python3 -m synthetics --home .synthetics/rowan run
@@ -29,7 +29,12 @@ python3 -m synthetics --home .synthetics/rowan outbox
 ```
 
 Initialization creates a permanent employee ID, a self entity, an initial colleague
-(`david`), a workspace, and an onboarding message. The first reasoning session can
+(`david`), a workspace, and an onboarding message. On a fresh home `--human ID` is required (unless you
+pass `--by ID`): it writes `<home>/humans.json` naming that person as the home's human (`default_human` and
+sender), and that person becomes the initial colleague. Without either flag, init fails with `no --by given
+and <home>/humans.json has no default_human` and leaves an empty humans.json behind; a rerun with `--human`
+then refuses because the file exists. To recover, set `"default_human": "david"` and `"senders": ["david"]`
+in that humans.json and rerun init (no `--human`), or remove that empty file and rerun with `--human`. The first reasoning session can
 introduce the employee and ask what it needs. Initial project ignorance is expected.
 No Noteling checkout or company accounts are assigned automatically.
 
