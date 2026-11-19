@@ -130,6 +130,12 @@ fairness guarantee yet.
   Corrections go through the log, never into the view.
   Only `project grant`, `project import` and `project bind` create a project; `project grants`, `export`, `view`
   and `redact` on an unknown project refuse ("No project P") and leave nothing behind (backlog 51).
+  Whichever process appends last re-materialises the fold into the `state` table, stamped with a hash of the
+  fold code it has loaded (`projectlog.py`; `roster.py` too for the company log). A read whose stamp differs
+  re-folds in memory, so a stale process can't make others serve its old fold. It still writes and serves its
+  own old fold until it restarts. After merging a fold change (`projectlog.py`, `roster.py`), restart every
+  long-lived process that imports `synthetics`: the workers, the Fieldpost relay, the Telegram adapter,
+  Fieldstone and Lookout.
 - Message project tags (M21; VIS G3 delta): `message_send`/`question_ask(project=P)` tags a message for P when
   the sender holds a write grant on P (otherwise refused). With `project` omitted and `work_id` the sender's own
   work published to P, the message is tagged P with `project_by: "work"`; the recipient's `project_ref` shows

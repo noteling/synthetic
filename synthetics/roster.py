@@ -39,10 +39,12 @@ import re
 import uuid
 from pathlib import Path
 
-from .projectlog import active_entries
+from .projectlog import FOLD_CODE as _LOG_FOLD_CODE, active_entries, code_id
 from .projects import ProjectError, ProjectStore, _canon
 
 COMPANY = "company"
+# Backlog 60: company_fold uses projectlog.active_entries, so its code ID covers both modules.
+FOLD_CODE = code_id(__file__, _LOG_FOLD_CODE)
 COMPANY_KINDS = ("person", "alias", "unalias", "retire", "retract", "delegation", "policy")
 PERSON_KINDS = ("human", "employee", "system")
 CERTAINTIES = ("stated", "inferred")
@@ -216,6 +218,7 @@ class CompanyStore(ProjectStore):
     """The company profile log. Same storage, fence, grants, export and import as a project."""
 
     _fold = staticmethod(company_fold)
+    _fold_code = FOLD_CODE
 
     def __init__(self, path: str | os.PathLike, project: str = COMPANY):
         super().__init__(path, COMPANY)
