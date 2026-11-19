@@ -26,6 +26,18 @@ with the previous and new `{name, version, sha256}`. The choice is stored as `<h
 `{"v": 1, "profile": "<name>"}` (0600). A running worker picks up a change at its next session; restart
 the worker if you want it applied before any queued session.
 
+The file is read once per session: `run_begin` (and `meeting_run_begin` for a meeting) records the
+`{name, version, sha256}` triple on the run, and the session's prompt is built from that record, so a `set`
+or `clear` in between can't make the prompt and the run record disagree. If the shipped file no longer
+matches the recorded version and sha256 (the package changed under a running worker), the session fails
+closed.
+
+Honest limit: like `attribution.json` (see byline.md), `profile.json` is only fenced at the CLI. A session
+running as the same OS user could write it with the shell. The profile is guidance that an owner file
+selects, not an enforced boundary; the prompt doesn't tell a session to change it. `profile show` shows the
+current file, and a change that has no `profile.set` / `profile.cleared` audit row wasn't made through the
+CLI.
+
 Existing homes keep running without a profile until the owner sets one.
 
 ## Fail closed

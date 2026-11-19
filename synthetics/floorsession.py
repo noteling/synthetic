@@ -81,11 +81,21 @@ class MeetingSession:
         self.restarts = 0
 
     # -- process ------------------------------------------------------------------------------------------------
+    def recorded_profile(self):
+        """#81 L3: the role profile meeting_run_begin recorded for this run (None: none at its start), so a restart
+        of the CLI mid-meeting keeps the same block and the prompt matches the run record."""
+        from .brain import CURRENT
+        from .store import Store
+        with Store(self.home) as store:
+            run = store._find("runs", self.run_id)
+        return CURRENT if run is None else run.get("profile")  # no run row (a bare session in tests): read now
+
     def command(self):
         base = ClaudeBrain(self.home, executable=self.executable, model=self.model, budget=self.budget)
-        command = base.command(self.run_id)
+        profile = self.recorded_profile()
+        command = base.command(self.run_id, profile=profile)
         swap = {"--output-format": ["stream-json", "--verbose", "--input-format", "stream-json"],
-                "--system-prompt": [system_prompt(self.home) + MEETING_BLOCK + "\n# Brief\n" + (self.brief or "")],
+                "--system-prompt": [system_prompt(self.home, profile) + MEETING_BLOCK + "\n# Brief\n" + (self.brief or "")],
                 "--tools": [""],
                 "--allowedTools": [",".join("mcp__synthetics__" + n for n in sorted(floortools.MEETING_TOOLS))]}
         out, i = [], 0

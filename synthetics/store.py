@@ -3230,6 +3230,10 @@ class Store:
             record = dict(id="run-" + uuid.uuid4().hex, status="running", started_at=now, created_at=now,
                           kind="meeting", meeting=meeting_id, text_mode=text_mode, event_ids=[], events=[],
                           history_sequence=history_sequence, finished_at=None, summary="", error=None, cost=None)
+            from . import profiles
+            prof = profiles.triple(self.home)  # #81 L2: the meeting prompt carries the role block too; record it
+            if prof is not None:
+                record["profile"] = prof
             return self._save("runs", record, "run.started")
 
     def floor_yield_audit(self, run_id, meeting, grace, outcome):
