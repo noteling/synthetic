@@ -88,8 +88,16 @@ class Postern:
         argv += list(args)
         stdin = "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in lines) if lines is not None else None
         env = {k: v for k, v in os.environ.items() if k != "SYNTHETICS_SESSION_RUN"}
-        out = subprocess.run(argv, input=stdin, capture_output=True, text=True, env=env, timeout=120)
-        rows = [json.loads(text) for text in out.stdout.splitlines() if text.strip()]
+        try:
+            out = subprocess.run(argv, input=stdin, capture_output=True, text=True, env=env, timeout=120)
+        except subprocess.TimeoutExpired:
+            raise PosternError("channel %s on %s timed out after 120 s" % (name, home))
+        # Split on "\n" only: str.splitlines() also splits on U+2028/U+2029/U+0085, which json.dumps(ensure_ascii=False)
+        # leaves raw inside strings (issue #4).
+        try:
+            rows = [json.loads(text) for text in out.stdout.split("\n") if text.strip()]
+        except ValueError as exc:
+            raise PosternError("channel %s on %s printed a line that is not JSON: %s" % (name, home, exc))
         if out.returncode != 0:
             error = rows[0].get("error") if rows and isinstance(rows[0], dict) else None
             raise PosternError("channel %s on %s failed (exit %s): %s" % (
@@ -113,7 +121,16 @@ class Postern:
                       if p.is_file() and not p.name.endswith(RESULT_SUFFIX))
 
     def process_inbound(self, path):
-        raw = path.read_text().splitlines()
+        try:
+            text = path.read_bytes().decode("utf-8")
+        except UnicodeDecodeError as exc:
+            # Undecodable input can never be fed: answer it with one file-level rejection and move it to done/,
+            # like a file of bad lines, so it does not replay forever (issue #4).
+            return self._finish(path, [dict(v=VERSION, external_id=None, result="rejected", event_id=None,
+                                            error=dict(code="bad_file", message="not UTF-8: %s" % exc))])
+        raw = text.split("\n")
+        if raw and raw[-1] == "":
+            raw.pop()  # the newline that ends the last line
         results = [None] * len(raw)
         batches = {}
         for index, text in enumerate(raw):
@@ -127,6 +144,10 @@ class Postern:
                 item, home = None, None
                 results[index] = dict(v=VERSION, external_id=None, result="rejected", event_id=None,
                                       error=dict(code="bad_line", message="not JSON: %s" % exc))
+                continue
+            if not isinstance(item, dict):
+                results[index] = dict(v=VERSION, external_id=None, result="rejected", event_id=None,
+                                      error=dict(code="bad_line", message="not a JSON object"))
                 continue
             home = self._home_for(item)
             if home is None:
@@ -144,6 +165,9 @@ class Postern:
             for (index, _), row in zip(entries, rows):
                 row["home"] = Path(home).name
                 results[index] = row
+        return self._finish(path, results)
+
+    def _finish(self, path, results):
         result_path = self.inbox / (path.name[:-len(".jsonl")] + RESULT_SUFFIX)
         _atomic_write(result_path, "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
                                            for row in results).encode())
@@ -198,14 +222,32 @@ class Postern:
         return settled
 
     def cycle(self):
-        report = dict(inbound=[], delivered=[], reconciled=[])
+        """One pass. A failure is contained to its file or its home and listed under ``errors``; the other files
+        and homes still run (issue #4: one failing home used to block every home). A failed file stays in the
+        inbox and is retried next cycle (the contract's dedup answers duplicate for lines already fed)."""
+        report = dict(inbound=[], delivered=[], reconciled=[], errors=[])
         for path in self.inbound_files():
-            report["inbound"].append(dict(file=path.name, results=len(self.process_inbound(path))))
+            try:
+                report["inbound"].append(dict(file=path.name, results=len(self.process_inbound(path))))
+            except Exception as exc:  # noqa: BLE001 - contain it to this file
+                report["errors"].append(dict(stage="inbound", file=path.name, error=_describe(exc)))
         for home in self.homes:
-            report["reconciled"] += [dict(home=Path(home).name, message_id=m, outcome=o)
-                                     for m, o in self.reconcile(home)]
-            report["delivered"] += [dict(home=Path(home).name, message_id=m) for m in self.deliver(home)]
+            name = Path(home).name
+            try:
+                report["reconciled"] += [dict(home=name, message_id=m, outcome=o) for m, o in self.reconcile(home)]
+            except Exception as exc:  # noqa: BLE001 - contain it to this home
+                report["errors"].append(dict(stage="reconcile", home=name, error=_describe(exc)))
+                continue  # deliver claims new work; not before this home's uncertain claims are settled
+            try:
+                report["delivered"] += [dict(home=name, message_id=m) for m in self.deliver(home)]
+            except Exception as exc:  # noqa: BLE001
+                report["errors"].append(dict(stage="deliver", home=name, error=_describe(exc)))
         return report
+
+
+def _describe(exc):
+    text = str(exc) if isinstance(exc, PosternError) else "%s: %s" % (type(exc).__name__, exc)
+    return text[-400:]
 
 
 def _atomic_write(path, data):
@@ -235,12 +277,14 @@ def run(config_path, once=False, interval=5.0, out=None):
             if once or any(report.values()):
                 out.write(json.dumps(dict(report, instance=postern.instance), sort_keys=True) + "\n")
                 out.flush()
-        except PosternError as exc:
+            for error in report["errors"]:
+                sys.stderr.write("postern: %s\n" % json.dumps(error, sort_keys=True))
+        except Exception as exc:  # noqa: BLE001 - a long-running bridge logs and keeps cycling (issue #4)
             if once:
                 raise
-            sys.stderr.write("postern: %s\n" % exc)
+            sys.stderr.write("postern: %s\n" % _describe(exc))
         if once:
-            return 0
+            return 1 if report["errors"] else 0  # --once: a contained failure still fails the command
         time.sleep(interval)
 
 

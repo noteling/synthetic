@@ -81,6 +81,16 @@ A crash before the input moves replays the file; the contract's dedup answers
 3. Each pending message is claimed, written atomically to the outbox and
    acked `delivered`. A refused claim is skipped.
 
+Failures are contained (issue #4). A file or a home that fails is listed under
+`errors` in the cycle report (and on stderr), and the other files and homes still
+run. A failed file stays in the inbox for the next cycle. A home whose reconcile
+fails is not delivered to in that cycle. A file that is not UTF-8 gets one
+`rejected` result with code `bad_file` and moves to `done/`. A line that is not a
+JSON object is `rejected` `bad_line`. Lines are split on `\n` only, so U+2028,
+U+2029 and U+0085 inside a JSON string are kept. A contract call that takes over
+120 s is a failure of that home. `postern run --once` exits 1 when the report has
+errors. A long-running `postern run` logs any exception and keeps cycling.
+
 Each process has its own instance ID, so claims left by a crashed Postern
 become uncertain at the next start and are settled by step 2. Nothing is resent
 blindly.
