@@ -68,7 +68,7 @@ from the human through a registered channel key the session doesn't hold.
 | `refused` | checked and refused before any question (reason says why) |
 | `asked` | the question is out; `screen_click` says `waiting` until it is answered |
 | `declined` | answered with anything but `yes <name>` (`declined`), or the answer doesn't count (`not_approved`) |
-| `expired` | outside the 30/10-minute windows. If its question is still open, it is withdrawn in the same transaction, so it leaves the human's Docket. An abandoned request (never fired) is settled the same way before the next request and at the start of every session |
+| `expired` | outside the 30/10-minute windows. If its question is still open, it is withdrawn in the same transaction, so it leaves the human's Docket. An abandoned request (never fired) is settled the same way before the next request and at the start of every session. A work the withdrawal leaves with no linked question gets `wake_at` = now, so the next clock tick makes it ready for a re-check (never an answer wake), and `screen_click` lists it in `work_unlinked`. An asked request that can never be approved for another reason (its question is gone) is settled once both windows have passed. A clicks row that can't be read is skipped and counted (audit `click.expire_skipped`); if settling fails at session start, the session still runs and the engine writes `click.expire_failed` {error class} |
 | `firing` | the one fire is in progress |
 | `done` | pressed (`result.pressed`, `result.changed` as Noteling saw it) |
 | `failed` | Noteling refused or couldn't start; nothing was pressed (`page_changed`, `not_front`, `busy`, ...) |
