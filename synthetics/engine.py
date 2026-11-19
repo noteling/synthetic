@@ -258,8 +258,12 @@ class Engine:
             with Store(self.home) as store:
                 try:  # #73 L1: an abandoned click request's question leaves the human's Docket once it expired
                     click.expire_stale(store)
-                except Exception:  # noqa: BLE001 - an older home without the table; never blocks a session
-                    pass
+                except Exception as exc:  # noqa: BLE001 - never blocks a session, but never silent either (#75 L2)
+                    try:
+                        with store._tx():
+                            store._audit("click.expire_failed", "clicks", {"error": type(exc).__name__})
+                    except Exception:  # noqa: BLE001 - best effort
+                        pass
                 context = store.context(run_id=run["id"])
                 sharedstatus.write(store, paused=self._last_pause)  # VIS: session running
             # Inputs that arrive after this snapshot belong to the next session.

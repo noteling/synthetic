@@ -268,32 +268,50 @@ def _save(store, record, action):
 
 def _finish(store, record, state, reason):
     """Set a final state inside the caller's transaction. An expired request also withdraws its question if it is
-    still open, so it never sits in the human's Docket as a stale "Needs you" (#73 L1)."""
+    still open, so it never sits in the human's Docket as a stale "Needs you" (#73 L1). A work the withdrawal leaves
+    with no linked question gets wake_at=now, so the next due tick makes it ready for a re-check instead of leaving it
+    waiting on nothing (#75 L1); that wake is the ordinary clock wake, never an answer. Returns the IDs of those
+    works (empty unless the request expired)."""
     from .store import timestamp
     record["state"], record["reason"] = state, reason
     _save(store, record, "click." + state)
+    unlinked = []
     if state == "expired":
         question = store._find("questions", record.get("question_id") or "")
         if question is not None and question.get("click_id") == record["id"] and question.get("status") == "open":
-            store._question_withdraw(question, "click request expired", timestamp())
-    return record
+            now = timestamp()
+            unlinked = store._question_withdraw(question, "click request expired", now)["work_unlinked"]
+            for work_id in unlinked:
+                work = store._get("works", work_id)
+                if work.get("status") == "waiting" and not work.get("wake_at"):
+                    work.update(wake_at=now, updated_at=now)
+                    store._save("works", work, "work.click_recheck")
+    return unlinked
 
 
 def expire_stale(store, now=None):
-    """Settle every asked request whose windows have passed as expired and withdraw its open question (#73 L1).
-    Runs before a new request and at each session start, so an abandoned request (never fired) is closed too.
-    Returns the IDs it expired."""
+    """Settle every asked request that can no longer be approved and withdraw its open question (#73 L1): expired
+    ones at once, any other final verdict (e.g. its question is gone, #75 n1) once both windows passed. Runs before a
+    new request and at each session start, so an abandoned request (never fired) is closed too. A row that can't be
+    read is skipped and counted in one click.expire_skipped audit (#75 L2). Returns the IDs it settled."""
     now = now or _now()
-    done = []
+    done, skipped = [], 0
     with store._tx():
         for row in store.db.execute("SELECT data FROM clicks").fetchall():
-            record = json.loads(row["data"])
-            if record.get("state") != "asked":
+            try:
+                record = json.loads(row["data"])
+                if record.get("state") != "asked":
+                    continue
+                verdict, detail = approval(store, record, now)
+                past = now - _parse(record["asked_at"]) > ASK_WINDOW + FIRE_WINDOW
+            except Exception:  # noqa: BLE001 - one unreadable row never stops the others from settling
+                skipped += 1
                 continue
-            verdict, detail = approval(store, record, now)
-            if verdict == "final" and detail[0] == "expired":
+            if verdict == "final" and (detail[0] == "expired" or past):
                 _finish(store, record, *detail)
                 done.append(record["id"])
+        if skipped:
+            store._audit("click.expire_skipped", "clicks", {"rows": skipped})
     return done
 
 
@@ -347,6 +365,8 @@ def screen_click_request(store, name, why, role=None, app=None, work_id=None):
         ok, reason = _hit_ok(found)
     elif code in (1, 8):
         ok, reason = False, (_hit_ok(found)[1] if isinstance(found, dict) else None) or "not_exact"
+    elif code == 7 and report.get("reason") == "sheet_open":
+        ok, reason = False, "sheet_open"       # #75 n2: a sheet at prepare isn't a guard refusal
     else:
         ok, reason = False, EXITS.get(code, "bad_report")
     if ok and (page.get("sheetOpen") is True or report.get("sheetOpen") is True):
@@ -435,7 +455,9 @@ def screen_click(store, request):
         if verdict == "waiting":
             return _result(record, reason="waiting")
         if verdict == "final":
-            _finish(store, record, *detail)
+            unlinked = _finish(store, record, *detail)
+            if record["state"] == "expired":
+                return _result(record, work_unlinked=unlinked)
             return _result(record)
         # Compare-and-set asked -> firing inside this BEGIN IMMEDIATE transaction: exactly one caller gets here.
         record.update(state="firing", reason=None, firing_at=timestamp(), firing_run=store.run_id)
