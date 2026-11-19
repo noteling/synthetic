@@ -7,6 +7,7 @@ import stat
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from synthetics import glance, lookout, sharedstatus
@@ -412,6 +413,17 @@ class LaunchReaderTest(unittest.TestCase):
                      [(100, binary), (7, "/usr/bin/other --json"), (4242, binary + " --read-page --json"),
                       (4243, "/Applications/Other.app/Contents/MacOS/Other --read-page --json")]]
         killed = []
+        folders = []
+        real_mkdtemp = tempfile.mkdtemp
+
+        def recording_mkdtemp(*args, **kwargs):
+            folders.append(real_mkdtemp(*args, **kwargs))
+            return folders[-1]
+        # The temp folder is taken from mkdtemp, not from the stub's argv log: under a loaded full suite the stub
+        # can be killed by the 0.5 s timeout before it writes that log (FileNotFoundError flake, py3.14).
+        patch = mock.patch.object(glance.tempfile, "mkdtemp", recording_mkdtemp)
+        patch.start()
+        self.addCleanup(patch.stop)
         read = glance.LaunchReader(str(self.app), timeout=0.5, opener=self.opener("sleep 5"),
                                    processes=lambda: snapshots.pop(0) if len(snapshots) > 1 else snapshots[0],
                                    kill=lambda pid, sig: killed.append((pid, sig)))
@@ -419,8 +431,8 @@ class LaunchReaderTest(unittest.TestCase):
             read(["--read-page", "--json"])
         self.assertEqual(caught.exception.reason, "timeout")
         self.assertEqual(killed, [(4242, 9)])
-        argv = self.log.read_text().split("\n")
-        self.assertFalse(os.path.exists(os.path.dirname(argv[argv.index("-o") + 1])))
+        self.assertEqual(len(folders), 1)
+        self.assertFalse(os.path.exists(folders[0]))
 
 
 if __name__ == "__main__":
