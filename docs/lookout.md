@@ -20,6 +20,7 @@ pages need no JavaScript, and a Content-Security-Policy forbids scripts.
 | `/` | Team: one block per employee home with the three liveness states, work (title, status, priority, waiting_for, published), waiting-on-David asks (Docket), open questions (first line; relay hops linked on both sides, G3), last 5 sessions (id, status, times, cost, failed tool count), last 5 screen glances (RW-1: time, run, status, element counts, find name → match ×count). Then other people from the company log, then loaded adapters. |
 | `/p/<project>/threads` | Captured conversations, newest first. |
 | `/p/<project>/thread/<key>` | One conversation, both directions in time order, with sender, recipient, time, auth, channel and which home captured it. |
+| `/p/<project>/work` | Open work (VIS G1): the project's published works that are ready or waiting, grouped by owner name, with status, priority, title, waiting_for, blocked_by, the age of the owner's latest projection, and the count of closed rows (done/cancelled) left to the board. Built from the same backlog rows as the board; unpublished work shows only on the Team page. |
 | `/p/<project>/board` | Board backlog (with blocked_by) and posts. |
 | `/p/<project>/memory` | The M21 project memory view (projectview.render). |
 

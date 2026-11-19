@@ -181,7 +181,8 @@ class BoundaryTests(_Root):
         (self.root / "projects" / "noteling").mkdir()
         ProjectStore(self.root / "projects" / "noteling" / "memory.sqlite3", "noteling").close()  # C3: empty store
         self.paths = ["/", "/p/synthetics/threads", "/p/synthetics/board", "/p/synthetics/memory",
-                      "/p/noteling/threads", "/p/noteling/board", "/p/noteling/memory"]
+                      "/p/noteling/threads", "/p/noteling/board", "/p/noteling/memory",
+                      "/p/synthetics/work", "/p/noteling/work"]  # VIS G1
 
     def all_pages(self):
         out = {}
