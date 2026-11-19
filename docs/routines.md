@@ -189,6 +189,10 @@ The `## dream` section of `synthetics/prompts/routines.md` is the guidance; the 
   `working_context {id, kind, value, created_at, source, replaces}` (null when none), outside `memories`,
   `memory_index` and `memory_context_truncated`, so it survives a worker restart and any number of newer
   memories. The full record also stays retrievable with `memory_search`.
+- **Authority is not derived.** The dream and team-review guidance both keep original authorizations,
+  recommendations, unanswered decisions and self-derived hypotheses apart. A memory or working_context never
+  answers a decision or grants authority; a required decision counts as answered only with the original answer
+  or a valid delegation, otherwise the wait stays. Existing standing permissions stay valid without new gates.
 - **Seeding.** `routine seed --kinds dream [--dream-at HH:MM]` (default 01:30Z, just after the daily-limit
   reset); `--first dream=+MIN` for a test home.
 
