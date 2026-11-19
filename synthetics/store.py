@@ -2147,6 +2147,7 @@ class Store:
         return dict(v=1, event_id=event["id"], state="processed" if row["processed_run"] else "accepted",
                     run_id=row["processed_run"])
 
+    QUESTION_FULL_ID = re.compile(r"^question-[0-9a-f]{32}$")
     QUESTION_HIDDEN = "No open question for the human of this home with that ID is visible to this channel."
 
     def channel_question(self, credential, question_id):
@@ -2160,12 +2161,15 @@ class Store:
         if not isinstance(question_id, str) or not question_id.strip():
             raise ChannelError("bad_line", "--id is required")
         from .capture import default_human
+        # Only a full question ID is looked up or written to the audit row; anything else (a prefix, a long or
+        # odd string) is refused the same way and audited without the ID (PR #67 review n2).
+        well_formed = bool(self.QUESTION_FULL_ID.match(question_id))
         human = default_human(self)
-        question = self._find("questions", question_id)
+        question = self._find("questions", question_id) if well_formed else None
         visible = bool(human and question and question["status"] == "open" and question["to"] == human
                        and question.get("to_id") in (None, human))
         with self._tx():
-            self._audit("channel.question_read", question_id,
+            self._audit("channel.question_read", question_id if well_formed else "(malformed id)",
                         dict(channel=channel["id"], result="returned" if visible else "refused"))
         if not visible:
             raise ChannelError("unknown_message", self.QUESTION_HIDDEN)

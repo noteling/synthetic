@@ -35,8 +35,16 @@ is set, so an employee session can't pair or serve. The desk binds to `127.0.0.1
 - `answer-desk pair` prints a one-time code of four groups of five letters and digits. It is
   valid for 5 minutes. Only a salted SHA-256 of it is written, to
   `ROOT/answer-desk/pairing.json` (directory 0700, file 0600); the code itself is never on
-  disk or in a log. Typed codes are compared in constant time. Five wrong codes delete the
+  disk or in a log. The file holds the salt, the hash, the expiry and the count of wrong tries.
+  Typed codes are compared in constant time. Five wrong codes delete the
   pairing, and a new `pair` is needed. A used code is deleted.
+- The code is four groups of five characters from a 31-character alphabet (no `0 1 i l o`),
+  about 99 bits, rather than the P0's word list; Codex accepted both this and the salted-hash
+  file.
+- Every change to `pairing.json` and `sessions.json` (pair, redeem, logout-all) runs under one
+  lock: a thread lock in the server plus `flock` on `ROOT/answer-desk/.lock`, because `pair`
+  and `logout-all` are separate processes. So concurrent wrong codes still count one by one and
+  the fifth kills the pairing. Each write goes to a fresh `mkstemp` file and is renamed into place.
 - Typing the code at `http://127.0.0.1:8766/pair` sets the cookie `desk` (32 random bytes, hex;
   `HttpOnly; SameSite=Strict; Path=/; Max-Age=43200`). Only its SHA-256 is stored, in
   `ROOT/answer-desk/sessions.json` (0600). `answer-desk logout-all` deletes every session and
@@ -44,7 +52,8 @@ is set, so an employee session can't pair or serve. The desk binds to `127.0.0.1
 
 ## Every request
 
-- `Host` must be `127.0.0.1:<port>` (DNS rebinding), on GET as well as POST.
+- `Host` must be exactly `127.0.0.1:<port>` (DNS rebinding), on GET as well as POST.
+  `localhost:<port>` is refused too, so open the desk as `http://127.0.0.1:<port>/`.
 - Every page except `/pair` needs a paired cookie; without one, GET redirects to `/pair` and
   POST is 401.
 - Every POST also needs `Origin: http://127.0.0.1:<port>` (missing is refused),
@@ -76,8 +85,11 @@ Each step comes from a record, never from the HTTP response alone:
 2. **Employee read it**: `event-status` is `processed`, meaning the session that captured the
    event has finished (with its run ID). A captured but unfinished event is not "read".
 3. **Outcome**: step 2 holds and the home's `status.json` no longer lists the question as open.
-   Otherwise it says "still open". `status.json` is rewritten by the employee's tools, so this
-   step can lag behind step 2.
+   Otherwise it says "still open"; a missing or unreadable `status.json` also counts as "still
+   open". `status.json` is rewritten by the employee's tools, so this step can lag behind step 2.
+   It says "no longer open", not "answered": a question that was withdrawn or answered by proxy
+   also leaves the list. The question ID for this step comes from the `?q=` link the desk
+   itself redirected to; P2 derives it from the event record instead.
 
 ## Honest limit
 

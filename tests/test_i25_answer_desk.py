@@ -168,6 +168,92 @@ class PairingTests(DeskBase):
         self.assertIsNotNone(answer_desk.redeem(self.root, code))
 
 
+
+class PairingConcurrencyTests(DeskBase):
+    """PR #67 review F1: the 5-try cap holds under concurrent redeems (threaded server, other processes)."""
+
+    def count_live_reads(self):
+        seen = []
+        original = answer_desk._read_private
+
+        def counting(path):
+            value = original(path)
+            if path.name == "pairing.json" and value:
+                seen.append(1)
+            return value
+        patch = mock.patch.object(answer_desk, "_read_private", counting)
+        patch.start()
+        self.addCleanup(patch.stop)
+        return seen
+
+    def test_concurrent_wrong_codes_respect_the_cap(self):
+        answer_desk.pair(self.root)
+        seen = self.count_live_reads()
+        n = 40
+        barrier = threading.Barrier(n)
+        errors, results = [], []
+
+        def go():
+            barrier.wait()
+            try:
+                results.append(answer_desk.redeem(self.root, "wrong-wrong-wrong-wrong"))
+            except Exception as exc:  # noqa: BLE001
+                errors.append(exc)
+        threads = [threading.Thread(target=go) for _ in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(60)
+        self.assertEqual(errors, [])
+        self.assertEqual(results, [None] * n)
+        self.assertLessEqual(len(seen), answer_desk.PAIR_TRIES)
+        state = self.root / "answer-desk"
+        self.assertFalse((state / "pairing.json").exists())
+        self.assertEqual([p.name for p in state.iterdir() if p.name.endswith(".tmp")], [])
+
+    def test_concurrent_wrong_posts_are_all_401(self):
+        answer_desk.pair(self.root)
+        n = 20
+        barrier = threading.Barrier(n)
+        statuses = []
+
+        def go():
+            barrier.wait()
+            statuses.append(self.request("POST", "/pair", {"code": "wrong-wrong-wrong-wrong"})[0])
+        threads = [threading.Thread(target=go) for _ in range(n)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(60)
+        self.assertEqual(statuses, [401] * n)
+        self.assertFalse((self.root / "answer-desk" / "pairing.json").exists())
+
+    def test_redeem_waits_for_the_file_lock_of_another_process(self):
+        import fcntl
+        code = answer_desk.pair(self.root)
+        fd = os.open(self.root / "answer-desk" / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX)  # a separate open file description, as `answer-desk pair` would hold
+        results = []
+        worker = threading.Thread(target=lambda: results.append(answer_desk.redeem(self.root, code)))
+        worker.start()
+        worker.join(0.5)
+        self.assertTrue(worker.is_alive())
+        self.assertEqual(results, [])
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        worker.join(60)
+        self.assertEqual(len(results), 1)
+        self.assertIsNotNone(results[0])
+
+    def test_unreadable_status_is_not_an_outcome(self):
+        """Review F2: no status.json is no evidence that the question left the open list."""
+        sharedstatus.path(self.home).unlink()
+        self.assertEqual(answer_desk.outcome(self.root, "rowan", self.question["id"], {"state": "processed"}),
+                         (True, False))
+        sharedstatus.path(self.home).write_text("{not json")
+        self.assertEqual(answer_desk.outcome(self.root, "rowan", self.question["id"], {"state": "processed"}),
+                         (True, False))
+
 class AnswerTests(DeskBase):
     def test_answer_wakes_work_through_inbound(self):
         _, cookie = self.paired()

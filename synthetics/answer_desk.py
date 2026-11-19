@@ -18,6 +18,7 @@ The desk never logs, caches or writes a question body, an answer, the key, a coo
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import hmac
 import html
@@ -27,7 +28,10 @@ import re
 import secrets
 import subprocess
 import sys
+import tempfile
+import threading
 import time
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlsplit
@@ -72,13 +76,34 @@ def state_dir(root):
     return path
 
 
+_STATE_LOCK = threading.Lock()
+
+
+@contextmanager
+def _locked(root):
+    """Serialize every read-modify-write of pairing.json and sessions.json: a thread lock for the threaded
+    server, plus flock on answer-desk/.lock because `answer-desk pair` and `logout-all` are other processes.
+    Without it, concurrent wrong codes each read tries=N and the 5-try cap fails (PR #67 review F1)."""
+    with _STATE_LOCK:
+        fd = os.open(state_dir(root) / ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
+
 def _write_private(path, value):
-    tmp = path.with_name(path.name + ".tmp")
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        json.dump(value, fh)
-    os.chmod(tmp, 0o600)
-    tmp.replace(path)
+    fd, tmp = tempfile.mkstemp(prefix="." + path.name + ".", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(value, fh)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
 
 
 def _read_private(path):
@@ -105,8 +130,9 @@ def pair(root, now=None):
     now = time.time() if now is None else now
     code = new_code()
     salt = secrets.token_hex(16)
-    _write_private(state_dir(root) / "pairing.json",
-                   dict(salt=salt, hash=_sha(salt + code), expires=now + PAIR_SECONDS, tries=0))
+    with _locked(root):
+        _write_private(state_dir(root) / "pairing.json",
+                       dict(salt=salt, hash=_sha(salt + code), expires=now + PAIR_SECONDS, tries=0))
     return code
 
 
@@ -118,6 +144,11 @@ def redeem(root, code, now=None):
     """Check a typed code. Success: a new session cookie value (the pairing is used up). Failure: None; the
     fifth wrong try, an expired pairing or no pairing leaves no pairing, so a new `pair` is needed."""
     now = time.time() if now is None else now
+    with _locked(root):
+        return _redeem_locked(root, code, now)
+
+
+def _redeem_locked(root, code, now):
     path = state_dir(root) / "pairing.json"
     pairing = _read_private(path)
     if not pairing:
@@ -158,8 +189,9 @@ def valid_session(root, cookie, now=None):
 
 
 def logout_all(root):
-    for name in ("sessions.json", "pairing.json"):
-        (state_dir(root) / name).unlink(missing_ok=True)
+    with _locked(root):
+        for name in ("sessions.json", "pairing.json"):
+            (state_dir(root) / name).unlink(missing_ok=True)
 
 
 def csrf(cookie, qid, nonce):
@@ -253,7 +285,9 @@ def outcome(root, slug, qid, event_status):
     """C2: (employee read it, answered), each from a record: event-status says processed, and the home's
     status.json no longer lists the question as open. An HTTP 200 alone never makes either true."""
     read = isinstance(event_status, dict) and event_status.get("state") == "processed"
-    status = sharedstatus.read(Path(root) / slug) or {}
+    status = sharedstatus.read(Path(root) / slug)
+    if not isinstance(status, dict):  # unreadable or missing status.json is no evidence (review F2)
+        return read, False
     still_open = any(isinstance(q, dict) and q.get("id") == qid for q in status.get("questions_open") or [])
     answered = read and not still_open
     return read, answered
@@ -267,7 +301,7 @@ def status_page(root, slug, qid, event_id, event_status):
          "no record of this event for the desk"),
         ("Employee read it", read, "in run %s" % event_status.get("run_id") if read else
          "not yet: the employee's session has not finished reading it"),
-        ("Outcome", answered, "the question is answered (no longer open in %s's status)" % slug if answered else
+        ("Outcome", answered, "the question is no longer open in %s's status" % slug if answered else
          "still open"),
     ]
     rows = "".join("<li>%s %s — <span class='muted'>%s</span></li>" % ("✓" if ok else "…", E(name), E(text))

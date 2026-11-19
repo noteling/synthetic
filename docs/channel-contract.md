@@ -223,6 +223,9 @@ being answered; `status.json` carries only the first line.
   whether the question exists.
 - It is read-only. Every call writes one audit row `channel.question_read`
   with the question ID, the channel and `returned|refused`, never the body.
+  Only a full ID (`question-` plus 32 hex) is looked up; any other `--id`
+  (a prefix, an over-long or odd string) gets the same refusal and is audited
+  with the record ID `(malformed id)` instead of the string.
 - A key from another home is `auth_failed` (exit 2, no audit row); inside an
   employee session it is `in_session`.
 - A consumer must not log or cache the body.

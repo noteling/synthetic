@@ -101,6 +101,16 @@ class ChannelQuestionTests(unittest.TestCase):
         results = [json.loads(data)["result"] for _a, _r, data in self.audit()]
         self.assertEqual(results, ["refused"] * 4)
 
+    def test_malformed_ids_are_refused_alike_and_audited_without_it(self):
+        """Review n2: a prefix or an over-long --id is not looked up and not written to the audit row."""
+        _code, good = self.ask("question-" + "0" * 32)
+        for qid in (self.question["id"][:17], "question-" + "a" * 5000):
+            code, row = self.ask(qid)
+            self.assertEqual((code, row["result"], row["error"]), (0, "rejected", good["error"]))
+            self.assertNotIn("body", row)
+        records = [record for _a, record, _d in self.audit()]
+        self.assertEqual(records, ["question-" + "0" * 32, "(malformed id)", "(malformed id)"])
+
     def test_no_humans_file_refuses(self):
         os.unlink(self.home / "humans.json")
         code, row = self.ask(self.question["id"])
