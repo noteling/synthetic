@@ -29,6 +29,8 @@ EXCERPT_GET = 2048
 EXCERPT_FLOOR = 512
 CHUNK_MAX = 4096
 GET_BUDGET = 8192
+LESSON_TEXT_GET = 600
+LESSON_NOTE_GET = 200
 MAX_CLAIMS = 8
 CLAIM_TEXT_MAX = 300
 TITLE_MAX = 120
@@ -727,12 +729,17 @@ class ProjectStore:
         hist_all = _history(st, ref)
         page = hist_all[cursor:cursor + history]
         excerpt_cap = EXCERPT_GET
+        # A lesson's applies_when, uncertainty and evidence live only in its entry body (the fold keeps the
+        # statement), so they were invisible here and a "no evidence refs" check read wrong (pm-3c8d97c7).
+        lesson = self._lesson_body(ref) if rec["kind"] == "lesson" else None
         out = None
         while True:
             out = {"as_of_seq": as_of_seq, "record": rec, "claims": claims, "quote_source": quote_src,
                    **_excerpt(data, utf8_cut(data, excerpt_cap)), "heads": heads, "history": page,
                    "next_cursor": cursor + len(page) if cursor + len(page) < len(hist_all) else None,
                    "history_truncated": len(page) < min(history, len(hist_all) - cursor)}
+            if lesson is not None:
+                out["lesson"] = lesson
             if len(_canon(out).encode("utf-8")) <= GET_BUDGET:
                 return out
             if page:
@@ -741,12 +748,40 @@ class ProjectStore:
             if any("gist" in h for h in heads):
                 heads = [{"claim": h["claim"], "head": h["head"]} for h in heads]
                 continue
+            if lesson is not None and _shrink_lesson(lesson):
+                continue
             if excerpt_cap > EXCERPT_FLOOR:
                 excerpt_cap = max(EXCERPT_FLOOR, excerpt_cap - 256)
                 continue
             fixed = {"as_of_seq": as_of_seq, "record": rec, "claims": claims, "quote_source": quote_src,
                      "quote_bytes": len(data), "quote_cursor": 0 if data else None, "budget_exceeded": True}
+            if lesson is not None:
+                fixed["lesson"] = lesson
             return fixed
+
+    def _lesson_body(self, entry_id: str) -> dict:
+        """The lesson fields project_memory_get shows besides the folded statement: applies_when, uncertainty
+        and evidence. Evidence keeps its stored shape: a list of {ref, level?, note?} (only those keys), or one
+        line of free text (as projectview shows it). Each text is cut to LESSON_TEXT_GET characters."""
+        row = self.db.execute("SELECT body FROM entries WHERE id=?", (entry_id,)).fetchone()
+        body = json.loads(row[0]) if row else {}
+        out = {f: _cut_text(body.get(f) or "", LESSON_TEXT_GET) for f in ("applies_when", "uncertainty")}
+        ev = body.get("evidence")
+        if isinstance(ev, str):
+            out["evidence"] = _cut_text(ev, LESSON_TEXT_GET)
+            out["evidence_count"] = 1 if ev.strip() else 0
+        else:
+            items = []
+            for x in ev or []:
+                if isinstance(x, dict) and x.get("ref"):
+                    item = {"ref": str(x["ref"])}
+                    for k in ("level", "note"):
+                        if isinstance(x.get(k), str) and x[k]:
+                            item[k] = _cut_text(x[k], LESSON_NOTE_GET if k == "note" else LESSON_TEXT_GET)
+                    items.append(item)
+            out["evidence"] = items
+            out["evidence_count"] = len(items)
+        return out
 
     def search(self, query: str, *, kind: str | None = None, status: str | None = None, limit: int = 10,
                as_of: int | None = None) -> dict:
@@ -822,6 +857,27 @@ def _check_text(text: str, limit: int, where: str, field: str) -> None:
 def _gist(text: str) -> str:
     data = " ".join(text.split()).encode("utf-8")
     return data[:utf8_cut(data, 80)].decode("utf-8")
+
+
+def _cut_text(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def _shrink_lesson(lesson: dict) -> bool:
+    """One step of trimming the lesson block to fit GET_BUDGET: notes go first, then evidence items from the
+    end (evidence_count keeps the full number, evidence_truncated says so). False when nothing is left to trim."""
+    ev = lesson.get("evidence")
+    if isinstance(ev, list):
+        noted = [x for x in ev if "note" in x]
+        if noted:
+            for x in ev:
+                x.pop("note", None)
+            return True
+        if ev:
+            ev.pop()
+            lesson["evidence_truncated"] = True
+            return True
+    return False
 
 
 def _excerpt(data: bytes, n: int) -> dict:
