@@ -3174,6 +3174,8 @@ class Store:
 
     def meeting_renew(self, token):
         """Extend the floor hold. None when it is gone or expired (the attach then ends the meeting)."""
+        if self.run_id is not None:  # #74 n1: like the other meeting calls, never from a session-bound Store
+            raise ValueError("floor meetings are held by the stand channel's attach process, not by a session tool.")
         with self._tx():
             hold = self._hold_row()
             if hold is None or hold.get("kind") != "floor" or hold.get("token") != token:
@@ -3225,6 +3227,8 @@ class Store:
     def floor_yield_audit(self, run_id, meeting, grace, outcome):
         """C2: the worker records how a yield target ended: `stopped` after the grace, `ended` by itself, or
         `stopped_completed` (stop sent, yet the CLI returned a successful result)."""
+        if self.run_id is not None:  # #74 n1: the worker writes this, never a session-bound Store
+            raise ValueError("floor.yield is audited by the worker, not by a session tool.")
         with self._tx():
             self._audit("floor.yield", run_id, dict(run=run_id, meeting=meeting, grace_seconds=grace, outcome=outcome))
 

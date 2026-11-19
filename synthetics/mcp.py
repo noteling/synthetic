@@ -244,6 +244,7 @@ class Server:
     def __init__(self, store, run_id=None):
         self.store = store
         self.run_id = run_id
+        self.tool_use_id = None  # E4a: set by respond() for the duration of one tools/call
         # MTG F2 (C5): a meeting run sees only floortools.MEETING_TOOLS. Decided from the run row the attach created,
         # never from anything the model sends.
         self.meeting = None
@@ -261,7 +262,6 @@ class Server:
         if self.meeting:
             return floortools.filter_tools(TOOLS + floortools.TOOLS)
         return offered(self.store.home)
-        self.tool_use_id = None  # E4a: set by respond() for the duration of one tools/call
 
     def call(self, name, arguments):
         try:

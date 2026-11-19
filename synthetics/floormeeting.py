@@ -6,8 +6,10 @@ emit now. An `ask` is handed to the session (``session.submit(turn)``); the sess
 
 Rules:
 - Every in/out line is journaled (floorjournal) with its fixed speaker class.
-- Revision (§4): an ask carries `rev`, the last seq Stand sent. If a panel `note` or a `floor_note` correction is
-  journaled after the ask and before its answer, the answer becomes `stale` (not spoken).
+- Revision (§4): an ask carries `rev`, the last seq Stand sent. If a panel `note` correction is journaled after the
+  ask and before its answer, the answer becomes `stale` (not spoken). A `floor_note` never does: the one session
+  answers asks in order, so it wrote any floor_note itself before or while generating this answer, and the answer
+  already accounts for it (the prompt asks it to journal a correction and say it; #76 r1, Rowan L4).
 - Cancel (§4): `cancel` journals `cancelled`; a later answer for that id is journaled `late` and never emitted.
   The session is told to stop the turn (``session.cancel(id)``).
 - After Stand's `end` (``ended``), an answer is journaled `late` only. ``close()`` (after the session has been
@@ -28,7 +30,7 @@ from . import floorjournal as fj
 IN_OPS = ("heard", "spoken", "note", "ask", "cancel", "confirm")
 TEXT_MAX = 8192
 QUESTION_MAX = 2048
-CORRECTION_OPS = ("note", "floor_note")   # a correction journaled after an ask makes its answer stale (§4)
+CORRECTION_OPS = ("note",)   # a panel correction journaled after an ask makes its answer stale (§4; L4: not floor_note)
 
 
 class LineError(ValueError):

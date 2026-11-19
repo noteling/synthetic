@@ -6,8 +6,9 @@ sha256 of the previous raw line, None on the first): the Ledgerline chain idea, 
 Speaker classes come from the line's op, set by this module, never from the input (P0 §1: a class is never
 upgraded). A `heard` line is always ``room-unidentified``; only a panel line (`note`, `confirm`) is the human's.
 
-Heard text is stored in ONE place, ``_stored_text`` (Codex C8), so a hash-only mode (§9 "don't keep it") is one switch:
-``text_mode="hash"`` keeps {text_bytes, text_sha256} instead of the words.
+Room words are stored in ONE place, ``_stored_text`` (Codex C8), so a hash-only mode (§9 "don't keep it") is one switch:
+``text_mode="hash"`` keeps {<field>_bytes, <field>_sha256} instead of the words. Room words are a `heard` line's `text`
+and an `ask` line's `question` (what someone in the room asked; #76 r1 C8, Rowan F1).
 """
 from __future__ import annotations
 
@@ -32,8 +33,9 @@ FIXED = {"heard": ROOM, "note": PANEL, "confirm": PANEL, "commit": ISSUED,
          "begin": FLOOR, "ask": FLOOR, "answer": FLOOR, "stale": FLOOR, "cancel": FLOOR, "cancelled": FLOOR,
          "floor_note": FLOOR, "end": FLOOR, "late": FLOOR}
 OPS = frozenset(FIXED) | {"spoken"}
-# Ops whose `text` is room speech (other people's words): the only text that hash mode removes.
-ROOM_TEXT_OPS = frozenset({"heard"})
+# op -> the field holding room speech (other people's words): the only text that hash mode removes.
+ROOM_TEXT = {"heard": "text", "ask": "question"}
+ROOM_TEXT_OPS = frozenset(ROOM_TEXT)
 # Fields a caller may pass; everything else is dropped (no free-form keys reach the journal).
 FIELDS = frozenset({"seq", "t", "text", "played", "cut_at", "id", "rev", "cid", "yes", "reason", "question",
                     "work_id", "due", "goal_sha256", "started_by", "commitments"})
@@ -61,16 +63,16 @@ def speaker_of(op, fields):
     return FIXED[op]
 
 
-def _stored_text(op, text, text_mode):
-    """The one place heard text is stored (C8)."""
+def _stored_text(op, field, text, text_mode):
+    """The one place room words are stored (C8): `field` of `op` is kept verbatim, or only hashed in hash mode."""
     if text is None:
         return {}
     if not isinstance(text, str):
-        raise JournalError("text must be a string")
-    if op in ROOM_TEXT_OPS and text_mode == "hash":
+        raise JournalError("%s must be a string" % field)
+    if ROOM_TEXT.get(op) == field and text_mode == "hash":
         data = text.encode("utf-8")
-        return {"text_bytes": len(data), "text_sha256": hashlib.sha256(data).hexdigest()}
-    return {"text": text}
+        return {field + "_bytes": len(data), field + "_sha256": hashlib.sha256(data).hexdigest()}
+    return {field: text}
 
 
 def append(home, meeting_id, op, fields=None, text_mode="full", now=None, guard=None):
@@ -82,8 +84,9 @@ def append(home, meeting_id, op, fields=None, text_mode="full", now=None, guard=
         raise JournalError("text_mode is full or hash")
     fields = dict(fields or {})
     speaker = speaker_of(op, fields)
-    record = {k: v for k, v in fields.items() if k in FIELDS and k != "text"}
-    record.update(_stored_text(op, fields.get("text"), text_mode))
+    record = {k: v for k, v in fields.items() if k in FIELDS and k not in ("text", "question")}
+    record.update(_stored_text(op, "text", fields.get("text"), text_mode))
+    record.update(_stored_text(op, "question", fields.get("question"), text_mode))
     target = path(home, meeting_id)
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd = os.open(str(target), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)

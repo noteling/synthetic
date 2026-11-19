@@ -38,7 +38,8 @@ class ToolsTest(unittest.TestCase):
             out = floortools.call(home, "m1", "floor_commit", {"ask": "a1", "text": "I'll send it Friday"})
             self.assertTrue(out["cid"].startswith("cid-"))
             floortools.call(home, "m1", "floor_note", {"text": "date corrected"})
-            self.assertEqual(m.finish("a1", "x")[0]["type"], "stale")
+            answer = m.finish("a1", "x")[0]   # #76 r1 L4: the session's own floor_note doesn't stale its answer
+            self.assertEqual((answer["type"], [c["cid"] for c in answer["commitments"]]), ("answer", [out["cid"]]))
             self.assertEqual([l["speaker"] for l in fj.lines(home, "m1")][-3:], [fj.ISSUED, fj.FLOOR, fj.FLOOR])
             with self.assertRaises(LineError):
                 floortools.call(home, "m1", "floor_commit", {"ask": "a1", "text": "late promise"})
@@ -70,6 +71,17 @@ class ServerAllowListTest(unittest.TestCase):
     def test_tools_list_is_the_allow_list(self):
         listed = self.server.respond({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]
         self.assertEqual({t["name"] for t in listed}, floortools.MEETING_TOOLS)
+
+    def test_click_tools_stay_out_of_a_meeting_run_even_when_opted_in(self):
+        """Rebase onto #73 (click): a home with click.json enabled still offers a meeting run only MEETING_TOOLS."""
+        import json as _json
+        from synthetics import click
+        (self.home / click.OPT_IN).write_text(_json.dumps({"enabled": True}), encoding="utf-8")
+        listed = self.server.respond({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]
+        self.assertEqual({t["name"] for t in listed}, floortools.MEETING_TOOLS)
+        for name in sorted(click.NAMES):
+            with self.assertRaisesRegex(ValueError, "Unknown tool", msg=name):
+                self.server.call(name, {"request": "click-x"} if name == "screen_click" else {"name": "Save", "why": "x"})
 
     def test_writes_and_other_tools_refused_floor_tools_work(self):
         for name, args in (("work_put", {"title": "x"}), ("memory_put", {"subject": "x", "predicate": "p",

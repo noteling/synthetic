@@ -68,6 +68,10 @@ F1 accepts only `begin` and `end`; other lines get `unsupported`. F2 adds `heard
 6. **End.** `end` or EOF releases the hold (audited `floor.ended`); ordinary work resumes.
 
 A pending meeting nobody attaches to lapses after its grace plus 5 min.
+If the yield target isn't recorded as ended within grace + 60 s, attach exits with `busy` and drops the pending
+meeting itself (audited `floor.ended`, reason `busy`), so ordinary work isn't held for nobody (#74 L3). The
+worker's stop is retried every second until it reaches a running CLI process; a CLI not yet spawned when the
+deadline passes is stopped as soon as it is (#74 L2).
 
 ### Without a meeting
 
@@ -96,7 +100,7 @@ A `begin` line with `goal` (the human's brief for this meeting) runs the meeting
          {"type": "cancel", "id"}   {"type": "confirm", "cid", "yes"}   {"type": "end"} or EOF
     out: {"type": "ready", "meeting", "run", "name", "role", "persona", "aliases", "brief_sha256", ...}
          {"type": "answer", "id", "rev", "text", "commitments": [{"cid", "text"}]}
-         {"type": "stale", "id", "reason"}             a correction arrived after the ask's rev; not spoken
+         {"type": "stale", "id", "reason"}             a panel note arrived after the ask's rev; not spoken
          {"type": "error", "code", "message", "id"?}   bad_line, conflict, invalid_state, no_answer, session_failed
          {"type": "ended", "meeting", "reason", "head", "wrap_event"}
 
@@ -108,7 +112,14 @@ A `begin` line with `goal` (the human's brief for this meeting) runs the meeting
   `floortools.MEETING_TOOLS`; its MCP server offers only those tools for a meeting run, in code (C5). Asks are
   answered one at a time, in order. Cancelling the ask in flight restarts the process with the journal tail.
 - **Journal.** `HOME/meetings/<id>/journal.jsonl`, hash-chained, speaker class fixed by the line type.
-  `text_mode: hash` stores only a hash of heard room text (C8).
+  `text_mode: hash` stores only the size and sha256 of room words: a `heard` line's text and an `ask` line's
+  question (C8). Panel notes and the employee's own answers are kept. The session itself still sees the question in
+  memory while it answers, and a restarted session's journal tail then has no question text.
+- **Stale (§4).** Only a panel `note` journaled after an ask makes that ask's answer `stale`. A `floor_note` the
+  session writes never does: it answers asks in order, so the answer already accounts for its own correction, which
+  the prompt asks it to say aloud (#76 r1 L4).
+- **Memory (E3).** `memory_search` is one of the read-only meeting tools, so anything in the employee's memory can
+  be spoken in the room. That is approved (E3); keep it in mind when a meeting has outside guests.
 - **End.** `end`, EOF, the 90 min cap, a lost hold or a dead session: stop emitting, stop the session, journal
   still-open asks as `late`, close the journal, finish the run (with its cost), feed one wrap event through the
   stand channel (source `stand:meeting`, sender `stand`, body = pointer facts and the chain head, no text, no

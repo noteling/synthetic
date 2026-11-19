@@ -48,10 +48,13 @@ class MeetingTest(unittest.TestCase):
         self.m.handle({"type": "ask", "id": "a2", "rev": 4, "question": "q"})   # a later ask is not stale
         self.assertEqual(self.m.finish("a2", "Monday")[0]["type"], "answer")
 
-    def test_floor_note_correction_also_stales(self):
+    def test_own_floor_note_correction_is_spoken_not_stale(self):
+        """#76 r1 L4 (Rowan): the session journals its correction with floor_note and says it in the same turn; that
+        answer is the correction, so it must be voiced. Only a panel note stales."""
         self.m.handle({"type": "ask", "id": "a1", "rev": 1, "question": "q"})
-        self.m.floor_note("the date in my notes was wrong")
-        self.assertEqual(self.m.finish("a1", "x")[0]["type"], "stale")
+        self.m.floor_note("Correction: the review is Monday, not Friday")
+        out = self.m.finish("a1", "One correction: the review is Monday.")
+        self.assertEqual(out[0]["type"], "answer")
 
     def test_cancel_discards_answer_and_stops_turn(self):
         self.m.handle({"type": "ask", "id": "a1", "rev": 1, "question": "q"})

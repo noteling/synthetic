@@ -131,6 +131,10 @@ def attach(home, key_file, stdin=None, stdout=None, renew_seconds=None, sleep=ti
                     last_renew = time.monotonic()
             if hold is None:
                 if time.monotonic() > limit:
+                    # #74 L3: nobody will attach, so drop the pending row now (audited floor.ended, reason busy)
+                    # instead of leaving it to block runs until it expires.
+                    with Store(home) as store:
+                        store.meeting_end(meeting, reason="busy")
                     _emit(stdout, dict(type="error", code="busy", message="the running session was not recorded "
                                                                           "as ended in time"))
                     return 2

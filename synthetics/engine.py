@@ -319,10 +319,13 @@ class Engine:
                     continue
                 yielded.update(meeting=pending["meeting"], grace=pending.get("grace_seconds"))
                 if pending.get("deadline") and pending["deadline"] <= timestamp():
-                    yielded["stopped"] = True
                     stop = getattr(self.brain, "yield_stop", None)
-                    if stop is not None:
-                        stop()
+                    # #74 L2: keep polling until the stop actually hits a live process. A brain whose yield_stop
+                    # returns False has nothing running yet (the CLI isn't spawned); one returning None predates
+                    # the bool and counts as stopped.
+                    if stop is not None and stop() is False:
+                        continue
+                    yielded["stopped"] = True
                     return
 
         watcher = threading.Thread(target=watch, name="floor-yield-watch", daemon=True)

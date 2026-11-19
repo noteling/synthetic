@@ -69,6 +69,18 @@ class JournalTest(unittest.TestCase):
         self.assertEqual(len(first["text_sha256"]), 64)
         self.assertEqual(second["text"], "panel words")
 
+    def test_hash_mode_keeps_no_asked_question_words(self):
+        """#76 r1 C8 (Rowan F1): an ask's question is room words too; hash mode keeps only its size and sha256."""
+        fj.append(self.home, "m1", "ask", {"id": "a1", "rev": 1, "question": "SECRETASK budget?"}, text_mode="hash")
+        fj.append(self.home, "m1", "ask", {"id": "a2", "rev": 2, "question": "kept words"}, text_mode="full")
+        raw = fj.path(self.home, "m1").read_text(encoding="utf-8")
+        self.assertNotIn("SECRETASK", raw)
+        first, second = fj.lines(self.home, "m1")
+        self.assertNotIn("question", first)
+        self.assertEqual(first["question_bytes"], len("SECRETASK budget?"))
+        self.assertEqual(len(first["question_sha256"]), 64)
+        self.assertEqual(second["question"], "kept words")
+
     def test_files_are_private(self):
         fj.append(self.home, "m1", "begin", {})
         p = fj.path(self.home, "m1")
