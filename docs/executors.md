@@ -6,7 +6,8 @@ executor does not provision a new employee or complete unfinished work.
 
 Claude CLI remains the default. Codex CLI is an explicitly selected alternative for ordinary
 `run` and `serve` sessions. There is no automatic fallback between providers, and installing this
-version does not switch existing workers.
+version does not switch existing workers. This increment of issue #12 supports ordinary bounded
+employee sessions; it does not migrate the live team or supply persistent meeting conversations.
 
 ## Select an executor
 
@@ -30,10 +31,11 @@ For a macOS background worker, the owner can select the executor at installation
 synthetics --home EMPLOYEE_HOME worker install --brain codex --codex /absolute/path/to/codex
 ```
 
-Workers using `--runtime-config` retain their executor choice in the runtime settings. Older
-runtime files without a `brain` field continue to select Claude. Changing the provider or the
-Codex executable is an owner-controlled operation, not a model's implicit fallback. Stop or
-restart through the supported worker lifecycle rather than editing an active process.
+Codex `serve` automatically uses private runtime state so other components can identify the active
+executor; Claude workers opt into it with `--runtime-config`. Older runtime files without a `brain`
+field continue to select Claude. Changing the provider or the Codex executable is an owner-controlled
+operation, not a model's implicit fallback. Stop or restart through the supported worker lifecycle
+rather than editing an active process.
 
 Plain `serve --brain codex` also publishes private runtime state, but treats Codex as an explicit
 choice: it refuses to start if an existing runtime file or last-good fallback selects Claude.
@@ -77,6 +79,20 @@ The adapter supplies the same recorded role profile, current employee snapshot a
 server that the employee would receive with Claude. The MCP server is scoped to the employee home
 and run ID, so the existing transactional run fence and authority checks still govern tool writes.
 Only that MCP server is configured by the adapter, and startup fails if it cannot initialize.
+
+The adapter sets `approval_mode = "approve"` separately for each named tool in the Synthetics
+catalog, using the raw server tool name. This lets those tools operate without an interactive
+approval prompt while keeping the existing run fence and delegated-authority checks. It does not
+persist changes to host approval settings or grant a tool additional authority. Both the MCP process
+environment and Codex's shell environment carry the employee home and current run ID, so normal shell
+calls invoking Synthetics retain their session actor identity. This is defense in depth under the
+shared OS account, not an external security boundary.
+
+This integration was exercised with Codex CLI `0.165.0-alpha.1.2`: successive sessions used the same
+fresh employee home, wrote and retrieved a sourced memory, queued messages, and retained the correct
+run-bound identity in a shell check. Per-tool `auto` still required approval for writes on that
+version; explicit per-tool `approve` succeeded. This is local ordinary-session acceptance, not proof
+of live-team migration, second-computer installation or live meeting support.
 
 Codex is started with user configuration and execution rules excluded, ephemeral session history,
 application integrations disabled, and project-instruction loading disabled. This avoids inheriting
