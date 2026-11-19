@@ -43,6 +43,8 @@ It does not silently run the old executor. If you deliberately pass `--runtime-c
 the existing runtime precedence applies instead: launch flags are the baseline, while a valid saved
 selection wins. This explicit mode supports owner-provisioned runtime switches between executors;
 the target executable and model must be in the worker's configured allow-lists.
+`--allow-model=` permits the Codex CLI's default model in a worker allow-list; it does not
+permit other explicitly named models.
 
 ## Capabilities and limits
 

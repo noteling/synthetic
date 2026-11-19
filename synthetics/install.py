@@ -107,7 +107,9 @@ def worker_argv(home, claude, model, budget, timeout, poll=2.0, daily_limit=75.0
     if runtime_config:
         argv += ["--runtime-config", str(Path(home) / "runtime.json")]
     for item in allow_model:
-        argv += ["--allow-model", item]
+        # The CLI's default model is recorded as an empty string, but launch-agent
+        # argv forbids empty elements. argparse's assignment form preserves it.
+        argv += ["--allow-model="] if item == "" else ["--allow-model", item]
     for item in allow_claude:
         argv += ["--allow-claude", item]
     for item in allow_codex:

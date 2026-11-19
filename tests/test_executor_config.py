@@ -25,6 +25,15 @@ def baseline(**changes):
 
 
 class ExecutorRuntimeTests(unittest.TestCase):
+    def test_default_codex_model_allowance_survives_nonempty_worker_argv(self):
+        with tempfile.TemporaryDirectory() as folder:
+            argv = install.worker_argv(Path(folder), sys.executable, 'claude-opus-5-5',
+                                       100, 600, allow_model=['', 'claude-opus-5-5'],
+                                       allow_codex=[sys.executable])
+            self.assertTrue(all(isinstance(item, str) and item for item in argv))
+            args = parser().parse_args(argv[4:])
+            self.assertEqual(args.allow_model, ['', 'claude-opus-5-5'])
+
     def test_old_config_has_no_new_default_fields_or_digest_change(self):
         old = baseline()
         result = runtime.validate(old)
