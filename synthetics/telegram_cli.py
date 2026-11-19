@@ -74,6 +74,13 @@ def _start_if_needed(path):
 
 
 def handle(args, home):
+    if args.telegram_command != "status":
+        # Issue #8: init takes a credential, serve is an adapter process, and install/stop/restart write or drive
+        # launchd jobs (install --with-worker writes a worker plist with caller-chosen model, executable and
+        # budget). None of that is a model session's to do; delegated worker changes go through
+        # `synthetics worker` (M28 worker.manage). `status` stays readable.
+        from .cli import _refuse_in_session
+        _refuse_in_session("telegram " + args.telegram_command)
     home = Path(home).resolve()
     with Store(home) as store:
         identity = store.identity()

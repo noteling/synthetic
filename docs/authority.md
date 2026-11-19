@@ -328,6 +328,7 @@ Owner actions that name a target home: `authority.owner` there.
 | `work … --override` | evidence integrity: it closes work without citable evidence |
 | `handoff-codex` (history import) | fabricated provenance: writes events with chosen senders into a home |
 | `init` | defines who is human in a new home (humans.json) |
+| `telegram init`, `serve`, `install`, `stop`, `restart` (`status` is allowed) | `init` takes a bot token file, `serve` is the adapter process, and the others write or drive launchd jobs; `install --with-worker` writes a worker plist with caller-chosen model, executable and budget, which `worker.manage` (`synthetics worker`) bounds (issue #8) |
 | `limit raise` with a `--date` other than today | not yet implemented under delegation (`owner_only`). Above the `limit.ceiling` policy or `0` without `allow_disable` is not owner-only: it is the team policy refusal `exceeds_ceiling` (D13, D18-r2), changed with `authority policy limit.ceiling` |
 | `adapter install` of a new label/executable or changed ProgramArguments without `adapter.install` and an accepted `--review`, or with another executable, code outside the roots or differing from the reviewed sums | third-party or unreviewed executables stay with David (D13); replacing non-`com.synthetics.adapter.*` labels: not yet implemented under delegation |
 | `authority policy worker.defaults` with a model or executable no owner-installed worker publishes | an unreviewed executable or model stays with David (D13, D15): `bad_policy` |
