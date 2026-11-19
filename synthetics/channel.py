@@ -194,7 +194,8 @@ def run(args, home, stdin=None, stdout=None):
                                                             receipt=args.receipt, note=args.note, by=args.by)
                     _emit(stdout, dict(v=VERSION, message_id=args.message, result=result, state=state, error=None))
                 elif command == "event-status":
-                    _emit(stdout, store.channel_event_status(credential, args.event))
+                    _emit(stdout, store.channel_event_status(credential, args.event, source=args.source,
+                                                             external_id=args.external_id))
                 elif command == "question":
                     _emit(stdout, store.channel_question(credential, args.id))
                 else:
@@ -221,8 +222,11 @@ def add_parsers(channel_sub):
         return parser
 
     keyed("inbound", "stdin JSONL messages → stdout JSONL results (accepted|duplicate|rejected)")
-    status = keyed("event-status", "accepted vs processed for an event this channel delivered")
-    status.add_argument("--event", required=True)
+    status = keyed("event-status", "accepted vs processed for an event this channel delivered (IDs and state "
+                   "only), by --event or by this channel's own --source and --external-id")
+    status.add_argument("--event")
+    status.add_argument("--source", help="with --external-id: find an event this channel fed (#25 P2, audited)")
+    status.add_argument("--external-id", dest="external_id")
     question = keyed("question", "full text of one open question addressed to this home's default_human "
                      "(read-only, audited; #25 answer desk)")
     question.add_argument("--id", required=True)

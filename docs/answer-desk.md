@@ -70,10 +70,65 @@ is set, so an employee session can't pair or serve. The desk binds to `127.0.0.1
 
 | Path | What |
 |---|---|
-| `/` | Open questions across the homes, first line only (from `status.json`). |
-| `/q/<home>/<question>` | The full question via `channel question` (contract §3.2) and the answer form. Any question the contract refuses (not open, not addressed to that home's human, relayed elsewhere, unknown) is 404 with the same text. |
-| `POST /a/<home>/<question>` | Re-checks the question with `channel question`, then submits one `channel inbound` line: `external_id` `desk:<question>:<form nonce>`, `sender` = the question's `to` as the contract returned it (the home's `default_human`; a form `sender` field is ignored), `source` `lookout:desk`, `question_id`, the question's `thread`. `routed` is never set. The answer is 1 to 8192 bytes. Success is 303 to the status page. |
-| `/s/<home>/<event>?q=<question>` | Status in three steps (below). |
+| `/` | Open questions across the homes, first line only (from `status.json`), then any **unconfirmed submits** (below). |
+| `/q/<home>/<question>` | The full question via `channel question` (contract §3.2), its context (below) and the answer form. Any question the contract refuses (not open, not addressed to that home's human, relayed elsewhere, unknown) is 404 with the same text. |
+| `POST /a/<home>/<question>` | Submits one `channel inbound` line (below). The answer is 1 to 8192 bytes. Success is 303 to the status page. |
+| `/s/<home>/<event>` | Status in three steps (below). A `?q=` on older links is ignored. |
+
+### Question context (P2)
+
+Next to the question the page shows only what the home's `status.json` already exports (Lookout
+shows the same) and the desk's own journal: who asks (name, role); delivery (the Docket's `ack`, and
+when it was delivered elsewhere, its routes and a warning that only the first answer counts); each
+linked work's ID, title, status and priority ("no longer open" once it is done); the questions it
+carries onward and their askers; and earlier
+desk submits for this question (time, kind, state, event ID). It never shows other messages in the
+thread, other questions' bodies, work descriptions or notes, project log text or memories, and no
+contract command reads them.
+
+### Two buttons: the answer, or context that keeps the question open (P2 D1)
+
+One text box, two buttons:
+
+- **Send as the answer** ("This closes the question."): the line carries `question_id`. An accepted
+  line closes the question in the same transaction (contract §3).
+- **Send as context, keep the question open**: the same line *without* `question_id` and with
+  `in_reply_to` = the question ID (D3). It never answers: the question stays open and its works keep
+  waiting. The employee's session reads it and either records it as the answer (`question_resolve`)
+  or asks again for the rest. The desk never changes question state, never edits the text and never
+  decides whether an answer is complete.
+
+Both lines use `external_id` `desk:<question>:<form nonce>`, `sender` = the question's `to` as
+`channel question` returned it (the home's `default_human`; a form `sender` field is ignored),
+`source` `lookout:desk` and the question's `thread`. `routed` is never set.
+
+### Retry and the desk journal (P2 §3)
+
+`answer-desk/submissions.json` (0600, written under the desk lock) records each form sent: home,
+question ID, nonce, kind, sender, thread, linked work IDs, state (`pending`, `accepted`, `refused`),
+event ID, error code and time. It never holds the text, the cookie, the code or the form token.
+Entries older than 7 days, or past the newest 200, are dropped.
+
+- **First send of a form**: `channel question` must still return the question (else 409). The desk
+  writes a `pending` entry with the returned sender and thread, then calls `channel inbound`.
+- **The same form sent again** (same nonce): the desk first asks `channel event-status --source
+  lookout:desk --external-id desk:<question>:<nonce>` whether the store has this form's event. If not,
+  the earlier send never arrived and this one is a first send (open check included), so a resend can
+  never create an event the open check would have refused. If it does, the open check is skipped
+  and the journaled sender and thread are reused, so the line is byte-identical and the store's
+  idempotency decides:
+  `duplicate` → 303 to the original event; different text → 409 "already sent with different text";
+  a switched button → 409 before any contract call. This is what makes a retry after a lost
+  response safe: in P1 the retry hit the open check after the first send had already closed the
+  question, and David was told his answer failed when it had gone through.
+- **Answered elsewhere first** (for example on Telegram between the page load and the send): 409,
+  nothing recorded, and his text is shown for his own copy.
+- **Not confirmed** (timeout, no response or another refusal): 503 with the same form, the same nonce
+  and token, and his own text, plus "Send again: the same form can't be counted twice".
+- **Worker restart**: nothing to do. The event stays `accepted` until a session that read it finishes.
+- **Desk killed mid-send**: the entry stays `pending`, and `/` lists it as an unconfirmed submit. On
+  each load of `/` the desk asks `channel event-status --source lookout:desk --external-id …`
+  (contract §3, own events only); when the event exists the entry becomes `accepted`.
 
 The desk writes nothing to any store directly; its only write is `channel inbound`.
 
@@ -81,15 +136,18 @@ The desk writes nothing to any store directly; its only write is `channel inboun
 
 Each step comes from a record, never from the HTTP response alone:
 
-1. **Submitted**: `channel event-status` knows the event and it came through the desk's channel.
+1. **Submitted**: `channel event-status` knows the event and it came through the desk's channel. It
+   says "accepted as the answer to Q; the question closed in the same step" or "accepted as context
+   for Q; the question stays open". Q and the kind come from the event record (`question_id` or
+   `in_reply_to` in `event-status`), never from the URL.
 2. **Employee read it**: `event-status` is `processed`, meaning the session that captured the
    event has finished (with its run ID). A captured but unfinished event is not "read".
 3. **Outcome**: step 2 holds and the home's `status.json` no longer lists the question as open.
    Otherwise it says "still open"; a missing or unreadable `status.json` also counts as "still
    open". `status.json` is rewritten by the employee's tools, so this step can lag behind step 2.
    It says "no longer open", not "answered": a question that was withdrawn or answered by proxy
-   also leaves the list. The question ID for this step comes from the `?q=` link the desk
-   itself redirected to; P2 derives it from the event record instead.
+   also leaves the list. For an answer it then lists each linked work's status. For context, the
+   step only reports whether the question is still open once the employee has read it.
 
 ## Honest limit
 
@@ -99,7 +157,5 @@ Later hardening: WebAuthn/Touch ID presence per answer is the only option that a
 same-user process. It needs JavaScript and the `localhost` host, because WebAuthn refuses IP
 hosts.
 
-## Not in P1
-
-Context-only replies (no `question_id`), partial answers with a linked remaining question, and
-retry or restart recovery come in P2.
+A same-form retry needs the cookie that signed the form's token, so it is possible for at most the
+12-hour session; the journal's 7 days only matter for the unconfirmed-submits listing.
