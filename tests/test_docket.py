@@ -189,7 +189,7 @@ class DocketViewTests(_Base):
         self.assertEqual(set(view["items"][0]), {
             "question_id", "summary", "to", "to_id", "asked_at", "asked_age_minutes", "delivery", "delivered_at",
             "delivered_age_minutes", "age_from", "age_minutes", "ack", "routes", "stuck", "origin_work_id", "works",
-            "carries", "hop", "hop_since"})  # P1b: additive, v1 fields unchanged
+            "carries", "hop", "hop_since", "hop_via"})  # P1b, Docket links: additive, v1 fields unchanged
         self.assertEqual(view["home"], self.store.identity()["id"])
         # C5: a sibling home's questions and this home's private views never appear.
         other = Store(self.root / "rowan")

@@ -37,7 +37,7 @@ Lookout reads only these files. It never opens a SQLite database.
 | Board backlog and posts | `projects/<p>/log.jsonl` (`backlog`, `post`) | — |
 | Profiles, roles, aliases | `company/log.jsonl` (company fold) | Private views and self notes (`<home>/roster/`) |
 | Work title, status, priority, waiting_for, wake_at, waiting question IDs | `<home>/shared/status.json` | Work description and note |
-| Docket asks (first line, ages, ack, hop, blocked works) | `<home>/shared/status.json` | The rest of the question body |
+| Docket asks (first line, ages, ack, hop and the onward question it went via, carried question IDs and askers, blocked works) | `<home>/shared/status.json` | The rest of the question body |
 | Open questions: first line, recipient, age, hop and the onward question it went via (`hop_via`), the askers' questions it carries (`carries`: question ID and asker ID only) | `<home>/shared/status.json` | The rest of the question body; the body of a relayed question |
 | Session id, status, times, cost, event count, failed tool count | `<home>/shared/status.json` | Run summary, error text, transcripts (`<home>/runs/`) |
 | Screen glances (RW-1): time, run, status, Noteling's counts, the name/role asked, match kind, count, unique, visible/enabled per hit; `site` as its host only (no port, path, query or fragment) | `<home>/shared/status.json` (`glances`, from the home's `glances` table, already whitelisted by `synthetics/glance.py`) | Page text (never requested: no `--full`/`--contains`), hit labels and frames (the employee's tool result only; an alike label carries page words) |
@@ -93,3 +93,5 @@ When an employee asks someone else on behalf of a colleague (`question_ask relay
 sides. The carrier's open question reads "carries <asker's question> for <asker>"; the asker's open question reads
 "<hop> via <onward question>" once the hop notice has arrived. Each open question is an anchor `#q-<id>`, so the
 link jumps to the other home's block when that question is still open; otherwise it is just the ID.
+The Docket table uses the same links: its question cell links to that question's entry under open questions,
+and its "now" cell shows the hop with the question it went via and the questions it carries.
