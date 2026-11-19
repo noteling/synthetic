@@ -235,14 +235,14 @@ class Verify(HomeCase):
         code, text, err = run_cli("--home", str(self.home), "routine", "verify", run["id"], "--spill-bytes", "50000")
         self.assertEqual((code, json.loads(text)["verdict"]), (0, "consistent"), err)
 
-    def truncated_receipts(self, chunks):
+    def truncated_receipts(self, chunks, get_bytes=10):
         item = {"id": "event-" + "a" * 32, "created_at": ts(3), "body_len": 100}
         events = [self.page(EPOCH, ts(1), ts(9), False, truncated=[item])]
         memories = [self.page(EPOCH, ts(1), ts(8), False)]
         receipts = self.both(events, memories)
         for begin, size in chunks:
             receipts.append(("event_get", {"id": item["id"], "body_offset": begin},
-                             {"bytes": 10, "sha256": "0" * 64, "id": item["id"], "body_len": 100,
+                             {"bytes": get_bytes, "sha256": "0" * 64, "id": item["id"], "body_len": 100,
                               "body_offset": begin, "returned_chars": size}))
         return receipts
 
@@ -256,6 +256,30 @@ class Verify(HomeCase):
     def test_truncated_body_read_in_chunks_is_consistent(self):
         verdict, _ = self.dream(self.truncated_receipts([(0, 60), (60, 40)]), through=ts(50))
         self.assertEqual(verdict["verdict"], "consistent", verdict)
+
+    def test_g2_spilled_event_get_covers_nothing(self):
+        verdict, _ = self.dream(self.truncated_receipts([(0, 100)], get_bytes=90000), through=ts(50))
+        self.assertEqual(verdict["verdict"], "overclaimed", verdict)
+        self.assertEqual(verdict["first_unread"], ts(3))
+        self.assertEqual(verdict["spilled_event_get"], [{"id": "event-" + "a" * 32, "bytes": 90000}])
+
+    def test_g4_unread_from_printed_on_breaks_and_streams(self):
+        arguments, result = self.page(EPOCH, ts(1), ts(5), True, size=40000)
+        result["unread_from"] = ts(6)
+        memories = [self.page(EPOCH, ts(1), ts(8), False)]
+        verdict, _ = self.dream(self.both([(arguments, result)], memories), through=ts(1), omissions=(ts(1),))
+        self.assertEqual(verdict["verdict"], "consistent", verdict)
+        arguments2, result2 = self.page(EPOCH, ts(1), ts(5), True)
+        result2["unread_from"] = ts(6)
+        verdict2, _ = self.dream(self.both([(arguments2, result2)], memories), through=ts(5), omissions=(ts(6),))
+        self.assertEqual(verdict2["streams"]["events"]["unread_from"], ts(6))
+        spilled, _ = self.dream(self.both([(arguments, result)], memories), through=ts(50))
+        self.assertEqual(spilled["breaking"]["unread_from"], ts(6), spilled)
+
+    def test_g1_scope_is_this_runs_own_reads(self):
+        verdict, _ = self.dream(self.both([], [self.page(EPOCH, ts(1), ts(8), False)]), through=ts(50))
+        self.assertEqual(verdict["verdict"], "overclaimed", verdict)  # no event reads in this run
+        self.assertIn("own receipts only", verdict["scope"])
 
     def test_previous_checkpoint_is_the_start(self):
         events = [self.page(ts(10), ts(10), ts(20), False)]

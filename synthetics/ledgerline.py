@@ -345,6 +345,8 @@ EPOCH = "1970-01-01T00:00:00Z"
 SPILL_BYTES = 32000  # F2's MCP max_bytes default; the client's display threshold is predicted, not observed (C2)
 SPILL_NOTE = ("predicted, not observed: a page over %d bytes is assumed spilled by the client; only the executor "
               "stream (E4, not built) would show what the session displayed")
+SCOPE_NOTE = ("this run's own receipts only: reads made in another session (an earlier catch-up) never support "
+              "this dream's checkpoint; a dream re-reads what its checkpoint rests on")
 CHAIN_NOTE = ("the receipt file can be rewritten by a session; its head is anchored in the run record "
               "(receipt_chain), which a session could also rewrite by stripping its environment (authority.md §0)")
 
@@ -390,7 +392,8 @@ def verify_dream(home, run_id, spill_bytes=SPILL_BYTES):
         raise ValueError("run must be a run ID.")
     if not isinstance(spill_bytes, int) or isinstance(spill_bytes, bool) or spill_bytes < 1:
         raise ValueError("spill_bytes must be a positive integer.")
-    out = {"run": run_id, "spill_check": SPILL_NOTE % spill_bytes, "spill_bytes": spill_bytes, "chain_note": CHAIN_NOTE}
+    out = {"run": run_id, "spill_check": SPILL_NOTE % spill_bytes, "spill_bytes": spill_bytes, "chain_note": CHAIN_NOTE,
+           "scope": SCOPE_NOTE}
     conn = _connect(home)
     try:
         row = conn.execute("SELECT data FROM runs WHERE id=?", (run_id,)).fetchone()
@@ -417,11 +420,18 @@ def verify_dream(home, run_id, spill_bytes=SPILL_BYTES):
         return dict(out, verdict="no_evidence", reason="no receipt file for this run")
     receipts = [r for _, _, r in lines if r is not None and r.get("success")]
     chunks = {}
+    spilled_gets = []
     for r in receipts:
         facts = r.get("result") or {}
         if r.get("tool") == "event_get" and facts.get("id"):
+            if facts.get("bytes", 0) > spill_bytes:
+                # G2: a plain event_get of a large body can spill too; it covers nothing.
+                spilled_gets.append({"id": facts["id"], "bytes": facts.get("bytes")})
+                continue
             begin = facts.get("body_offset") or 0
             chunks.setdefault(facts["id"], []).append((begin, begin + (facts.get("returned_chars") or 0)))
+    if spilled_gets:
+        out["spilled_event_get"] = spilled_gets[:IDS_CAP]
     streams = {}
     breaks = []
     for tool, name in (("event_search", "events"), ("memory_search", "memories")):
@@ -487,7 +497,7 @@ def _chain(pages, start, cutoff, spill_bytes, chunks, breaks, name):
                 # The page wasn't seen. Items before its first one don't exist (oldest first, since inclusive).
                 end = max(end, first or end)
                 breaks.append({"stream": name, "line": number, "from": first, "why": "possibly_spilled",
-                               "bytes": facts.get("bytes")})
+                               "bytes": facts.get("bytes"), "unread_from": facts.get("unread_from")})
                 stopped = True
                 break
             page_end = _ts(facts.get("created_last")) if facts.get("capped") else cutoff
@@ -495,12 +505,14 @@ def _chain(pages, start, cutoff, spill_bytes, chunks, breaks, name):
                 if not _covered(chunks.get(item.get("id"), []), item.get("body_len")):
                     page_end = min(page_end or _ts(item.get("created_at")), _ts(item.get("created_at")))
                     breaks.append({"stream": name, "line": number, "from": _ts(item.get("created_at")),
-                                   "why": "unread_truncated", "id": item.get("id")})
+                                   "why": "unread_truncated", "id": item.get("id"),
+                                   "unread_from": facts.get("unread_from")})
                     stopped = True
                     break
             if page_end and page_end > end:
                 end = page_end
             last_cursor = facts.get("next_cursor")
+            stream["unread_from"] = facts.get("unread_from")  # G4: match against the omission's from
             changed = True
             if stopped or not facts.get("capped"):
                 stopped = True

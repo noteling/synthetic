@@ -57,7 +57,19 @@ receipts, and builds the contiguous read chain per stream (events, memories):
    `possibly_spilled`: the chain stops at its `created_first`. **This is predicted, not observed** (C2): only an
    executor stream (E4, not built) would show what the client displayed. The output says so in `spill_check`.
 3. A `truncated` item is unread unless `event_get` receipts for its ID cover `0..body_len`; the chain stops at its
-   `created_at`.
+   `created_at`. An `event_get` receipt covers only when its `result.bytes` is at or under the spill threshold: a
+   plain `event_get` of a large body can spill too (listed under `spilled_event_get`). For a plain `event_get`,
+   `body_len` and `returned_chars` come from the returned body.
+
+**Scope: a dream's own reads (G1).** Verify reads only this run's receipts. Reads made in another session (for
+example an ordinary catch-up session) never support this dream's checkpoint, so a dream that advances
+`covered_through` over material it did not read itself is `overclaimed`. The dream guidance says the same; the
+output carries it as `scope`.
+
+**What is verifiable (G3).** Only MCP reads leave receipts. Opening a spilled result's saved file with the
+client's own file tool leaves none, so it can't support a checkpoint: re-read with a smaller `max_bytes`, or
+read a large body with `event_get` chunks (`body_offset`). Each break and each stream also prints the page's
+`unread_from` (G4), to match against an omission's `from`.
 
 Verdict: `overclaimed` (with `first_unread`) when `through` is past the smaller chain end or an omission's `from`;
 `possibly_spilled` / `unread_truncated` when a break in the chain has no recorded omission at or before it;
