@@ -662,7 +662,7 @@ def parser():
     rseed.add_argument("--kinds", required=True, help="comma-separated: hourly-check, team-review")
     rseed.add_argument("--every", action="append", default=[], metavar="KIND=MIN",
                        help="cadence in minutes (default 60, minimum 5)")
-    rseed.add_argument("--dream-at", help="dream time HH:MM UTC (default 01:30; dream ships in P2)")
+    rseed.add_argument("--dream-at", help="dream time HH:MM UTC (default 01:30)")
     rseed.add_argument("--first", action="append", default=[], metavar="KIND=WHEN",
                        help="first wake for a newly created kind only: ISO-8601Z or +MIN, from now+1 min to now+every")
     rcad = rts_.add_parser("cadence", help="change one routine's every_minutes (from the next re-arm)")
@@ -761,8 +761,7 @@ def _routine_command(store, args):
         kinds = [k.strip() for k in args.kinds.split(",") if k.strip()]
         held = [k for k in kinds if k not in routines.SEED_KINDS]
         if held:
-            raise ValueError("cannot seed %s: P1 seeds %s (dream guidance ships in RTN P2)"
-                             % (", ".join(held), ", ".join(routines.SEED_KINDS)))
+            raise ValueError("cannot seed %s: kinds are %s" % (", ".join(held), ", ".join(routines.SEED_KINDS)))
         every = {}
         for item in args.every:
             kind, _, minutes = item.partition("=")

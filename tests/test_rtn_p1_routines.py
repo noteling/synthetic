@@ -384,6 +384,11 @@ class SessionFencing(unittest.TestCase):
             code = main(["--home", str(home), "routine", *argv])
         return code, out.getvalue(), err.getvalue()
 
+    def refusals(self, home):
+        with Store(home) as s:
+            return [json.loads(r["data"]) for r in
+                    s.db.execute("SELECT data FROM audit WHERE action='authority.refused' ORDER BY seq")]
+
     def routines_in(self, home):
         with Store(home) as s:
             return [(w["routine"]["kind"], w["status"]) for w in s.work_list() if w.get("routine")]
@@ -397,6 +402,12 @@ class SessionFencing(unittest.TestCase):
             self.assertNotEqual(code, 0, out)
             self.assertIn("owner_only", err)
         self.assertEqual(self.routines_in(self.b), before)
+        # n1 (P2): each refusal is audited in the session's own home (authority.py owner_only).
+        refused = self.refusals(self.a)
+        self.assertEqual(len(refused), 4)
+        for row in refused:
+            self.assertEqual((row["code"], row["run"]), ("owner_only", self.run))
+        self.assertEqual(self.refusals(self.b), [])
         code, out, err = self.cli(self.b, "list")
         self.assertNotEqual(code, 0, out)
         self.assertIn("own_home_only", err)
@@ -409,13 +420,14 @@ class SessionFencing(unittest.TestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(json.loads(out)["routines"], [])
 
-    def test_owner_seeds_and_dream_waits_for_p2(self):
+    def test_owner_seeds_team_review_and_dream(self):
         code, out, err = self.cli(self.b, "seed", "--kinds", "team-review", "--every", "team-review=30", session=False)
         self.assertEqual(code, 0, err)
         self.assertEqual(json.loads(out)["created"][0]["every_minutes"], 30)
+        # P2: the dream is seedable (P1 refused it until its guidance shipped).
         code, out, err = self.cli(self.b, "seed", "--kinds", "dream", session=False)
-        self.assertNotEqual(code, 0)
-        self.assertIn("P2", err)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["created"][0]["kind"], "dream")
 
 
 if __name__ == "__main__":
