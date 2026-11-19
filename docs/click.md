@@ -50,8 +50,10 @@ from the human through a registered channel key the session doesn't hold.
 - The answer is a message from the home's `default_human`, with non-null `auth`, and its role is `human`: operator
   and secretary channels (for example a desktop relay) never count, even when the sender field says the human
   (Codex C2).
-- The text, normalized (case, punctuation and spacing ignored), is exactly `yes <name>`. Anything else (`no`, a
-  bare `yes`, another name) **declines, finally**. A new click needs a new request.
+- The text reads `yes <name>`: case and spacing are ignored, and so is punctuation the human adds (`Yes, add to
+  cart!`), but every punctuation mark or symbol **in the name** must be typed, in order (`yes C` doesn't approve
+  `C++`; curly and straight quotes count as the same). Anything else (`no`, a bare `yes`, another name)
+  **declines, finally**. A new click needs a new request.
 - **Limits:** the answer came within **30 minutes** of the ask, and the fire starts within **10 minutes** of the
   answer. Most asks made while the human is away will therefore expire; v1 is meant for a human who is at the
   screen.
@@ -66,11 +68,11 @@ from the human through a registered channel key the session doesn't hold.
 | `refused` | checked and refused before any question (reason says why) |
 | `asked` | the question is out; `screen_click` says `waiting` until it is answered |
 | `declined` | answered with anything but `yes <name>` (`declined`), or the answer doesn't count (`not_approved`) |
-| `expired` | outside the 30/10-minute windows |
+| `expired` | outside the 30/10-minute windows. If its question is still open, it is withdrawn in the same transaction, so it leaves the human's Docket. An abandoned request (never fired) is settled the same way before the next request and at the start of every session |
 | `firing` | the one fire is in progress |
 | `done` | pressed (`result.pressed`, `result.changed` as Noteling saw it) |
 | `failed` | Noteling refused or couldn't start; nothing was pressed (`page_changed`, `not_front`, `busy`, ...) |
-| `unknown` | a fire started but never finished (timeout, crash, `firing` older than 2 minutes). **Never retried**: the employee tells the human and may glance |
+| `unknown` | a fire started but never finished (timeout, crash, any unexpected reader error, `firing` older than 2 minutes). **Never retried**: the employee tells the human and may glance |
 
 Every later `screen_click` on a used request answers `already_used`.
 

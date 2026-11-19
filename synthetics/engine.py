@@ -10,6 +10,7 @@ from pathlib import Path
 
 from . import board
 from . import capture
+from . import click
 from . import sharedstatus
 from .store import Store, WorkerHeld
 
@@ -255,6 +256,10 @@ class Engine:
         yielded = {}
         try:
             with Store(self.home) as store:
+                try:  # #73 L1: an abandoned click request's question leaves the human's Docket once it expired
+                    click.expire_stale(store)
+                except Exception:  # noqa: BLE001 - an older home without the table; never blocks a session
+                    pass
                 context = store.context(run_id=run["id"])
                 sharedstatus.write(store, paused=self._last_pause)  # VIS: session running
             # Inputs that arrive after this snapshot belong to the next session.

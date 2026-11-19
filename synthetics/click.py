@@ -116,11 +116,34 @@ def enabled(home):
     return isinstance(value, dict) and value.get("enabled") is True
 
 
+QUOTES = str.maketrans({"\u2018": "'", "\u2019": "'", "\u02bc": "'", "\u201c": '"', "\u201d": '"'})
+
+
+def _fold(text):
+    return unicodedata.normalize("NFKC", text or "").casefold().translate(QUOTES)
+
+
 def norm(text):
     """Case-folded words: NFKC, punctuation and quotes become spaces, whitespace collapsed."""
-    text = unicodedata.normalize("NFKC", text or "").casefold()
-    text = "".join(c if c.isalnum() else " " for c in text)
+    text = "".join(c if c.isalnum() else " " for c in _fold(text))
     return " ".join(text.split())
+
+
+def _marks(text):
+    """The punctuation and symbols of a text, in order (letters, digits and spaces dropped)."""
+    return [c for c in _fold(text) if not c.isalnum() and not c.isspace()]
+
+
+def _subsequence(needle, haystack):
+    rest = iter(haystack)
+    return all(c in rest for c in needle)
+
+
+def names_control(body, name):
+    """True when an answer reads "yes <name>": case and spacing are ignored and punctuation the human adds
+    ("Yes, add to cart!") is ignored, but every mark in the name itself must be typed, in order, so "yes C"
+    never approves "C++" (Vesper #73 n1)."""
+    return norm(body) == norm("yes " + name) and _subsequence(_marks(name), _marks(body))
 
 
 def denied(name):
@@ -243,6 +266,37 @@ def _save(store, record, action):
     return record
 
 
+def _finish(store, record, state, reason):
+    """Set a final state inside the caller's transaction. An expired request also withdraws its question if it is
+    still open, so it never sits in the human's Docket as a stale "Needs you" (#73 L1)."""
+    from .store import timestamp
+    record["state"], record["reason"] = state, reason
+    _save(store, record, "click." + state)
+    if state == "expired":
+        question = store._find("questions", record.get("question_id") or "")
+        if question is not None and question.get("click_id") == record["id"] and question.get("status") == "open":
+            store._question_withdraw(question, "click request expired", timestamp())
+    return record
+
+
+def expire_stale(store, now=None):
+    """Settle every asked request whose windows have passed as expired and withdraw its open question (#73 L1).
+    Runs before a new request and at each session start, so an abandoned request (never fired) is closed too.
+    Returns the IDs it expired."""
+    now = now or _now()
+    done = []
+    with store._tx():
+        for row in store.db.execute("SELECT data FROM clicks").fetchall():
+            record = json.loads(row["data"])
+            if record.get("state") != "asked":
+                continue
+            verdict, detail = approval(store, record, now)
+            if verdict == "final" and detail[0] == "expired":
+                _finish(store, record, *detail)
+                done.append(record["id"])
+    return done
+
+
 def _result(record, reason=None, **extra):
     out = dict(request=record["id"], state=record["state"], reason=reason or record.get("reason"),
                question_id=record.get("question_id"))
@@ -266,8 +320,10 @@ def screen_click_request(store, name, why, role=None, app=None, work_id=None):
         reason = "denied_word"
     elif not human:
         reason = "no_human"
-    elif _open_request(store) is not None:
-        reason = "request_open"
+    else:
+        expire_stale(store)
+        if _open_request(store) is not None:
+            reason = "request_open"
     if reason is not None:
         record["reason"] = reason
         with store._tx():
@@ -345,7 +401,7 @@ def approval(store, record, now):
             or event.get("sender") != cfg.get("default_human")
             or capture.role_of(event, "in", cfg) != "human"):
         return "final", ("declined", "not_approved")      # C2: relays/operators/unauthenticated never count
-    if norm(event.get("body")) != norm("yes " + record["name"]):
+    if not names_control(event.get("body"), record["name"]):
         return "final", ("declined", "declined")
     answered = _parse(event["created_at"])
     if answered - asked > ASK_WINDOW or now - answered > FIRE_WINDOW:
@@ -379,8 +435,7 @@ def screen_click(store, request):
         if verdict == "waiting":
             return _result(record, reason="waiting")
         if verdict == "final":
-            record["state"], record["reason"] = detail
-            _save(store, record, "click." + record["state"])
+            _finish(store, record, *detail)
             return _result(record)
         # Compare-and-set asked -> firing inside this BEGIN IMMEDIATE transaction: exactly one caller gets here.
         record.update(state="firing", reason=None, firing_at=timestamp(), firing_run=store.run_id)
@@ -403,6 +458,9 @@ def screen_click(store, request):
         final = ("failed", exc.reason) if exc.reason in NOT_LAUNCHED else ("unknown", "unknown")
         result = dict(pressed=False if exc.reason in NOT_LAUNCHED else None, changed=None, exit=None,
                       error=exc.reason)
+    except Exception as exc:  # noqa: BLE001 - #73 n2: any other reader failure is unknown at once, never retried
+        final = ("unknown", "unknown")
+        result = dict(pressed=None, changed=None, exit=None, error=type(exc).__name__)
     with store._tx():
         record = store._get("clicks", request)
         record.update(state=final[0], reason=final[1], result=result, finished_at=timestamp())

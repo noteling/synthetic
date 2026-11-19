@@ -2348,21 +2348,27 @@ class Store:
                              secondhand=True, unauthenticated=not auth, close_reason=reason,
                              closed_by_run=self.run_id)
                 return dict(question, work_unlinked=[], unlinked_from=[])
-            question.update(status="withdrawn", withdrawn_at=now, close_reason=reason, closed_by_run=self.run_id)
-            self._save("questions", question, "question.withdrawn")
-            self._queue_hops(question, "with-manager", now)  # Docket P1b: back with me, never "answered"
-            unlinked, unlinked_from = [], []
-            for work, linked in self._waiting_links():
-                if question_id not in linked:
-                    continue
-                rest = [qid for qid in linked if qid != question_id]
-                work.update(waiting_question_ids=rest, waiting_question_id=rest[-1] if rest else None,
-                            waiting_for=work["waiting_for"].replace(question_id, "(withdrawn)"), updated_at=now)
-                self._save("works", work, "work.question_unlinked")
-                unlinked_from.append(work["id"])  # Docket P1a (C3): every work the question was removed from
-                if not rest:
-                    unlinked.append(work["id"])
-            return dict(question, work_unlinked=unlinked, unlinked_from=unlinked_from)
+            return self._question_withdraw(question, reason, now)
+
+    def _question_withdraw(self, question, reason, now):
+        """Withdraw an open question inside the caller's transaction (question_close without event_id, and the
+        click engine when a request expires: #73 L1). Unlinks it from waiting works; never wakes them."""
+        question_id = question["id"]
+        question.update(status="withdrawn", withdrawn_at=now, close_reason=reason, closed_by_run=self.run_id)
+        self._save("questions", question, "question.withdrawn")
+        self._queue_hops(question, "with-manager", now)  # Docket P1b: back with me, never "answered"
+        unlinked, unlinked_from = [], []
+        for work, linked in self._waiting_links():
+            if question_id not in linked:
+                continue
+            rest = [qid for qid in linked if qid != question_id]
+            work.update(waiting_question_ids=rest, waiting_question_id=rest[-1] if rest else None,
+                        waiting_for=work["waiting_for"].replace(question_id, "(withdrawn)"), updated_at=now)
+            self._save("works", work, "work.question_unlinked")
+            unlinked_from.append(work["id"])  # Docket P1a (C3): every work the question was removed from
+            if not rest:
+                unlinked.append(work["id"])
+        return dict(question, work_unlinked=unlinked, unlinked_from=unlinked_from)
 
     def event_pending(self, limit=50):
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 10000:
