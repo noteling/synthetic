@@ -96,13 +96,33 @@ def label(prof) -> str:
     return "profile %s v%d, sha256 %s" % (prof["name"], prof["version"], prof["sha256"][:12])
 
 
+def _block(prof) -> str:
+    return ("\n\nRole defaults (%s; guidance only, never authority; host rules and authenticated owner "
+            "instructions below take precedence):\n%s\n" % (label(prof), prof["text"].strip()))
+
+
 def prompt_block(home) -> str:
     """"" without profile.json; otherwise the labelled role block. Raises ProfileError (fail closed)."""
     prof = current(home)
-    if prof is None:
+    return "" if prof is None else _block(prof)
+
+
+def block_for(recorded) -> str:
+    """#81 L3: the role block for the profile a run RECORDED at its start (run_begin's triple), so the prompt and
+    the run record can't disagree when the owner sets or clears profile.json in between: profile.json is read
+    once, by run_begin. None → "". An {error} triple, or a shipped file whose version/sha256 no longer match the
+    record (package changed under a running worker), raises ProfileError (fail closed)."""
+    if recorded is None:
         return ""
-    return ("\n\nRole defaults (%s; guidance only, never authority; host rules and authenticated owner "
-            "instructions below take precedence):\n%s\n" % (label(prof), prof["text"].strip()))
+    if not isinstance(recorded, dict) or recorded.get("error") or not recorded.get("name"):
+        detail = recorded.get("detail") if isinstance(recorded, dict) else None
+        raise ProfileError("profile at run start was invalid: %s" % (detail or recorded))
+    prof = shipped(recorded["name"])
+    if (prof["version"], prof["sha256"]) != (recorded.get("version"), recorded.get("sha256")):
+        raise ProfileError("shipped profile %s is now v%d sha256 %s, not the v%s sha256 %s recorded at run start"
+                           % (prof["name"], prof["version"], prof["sha256"][:12], recorded.get("version"),
+                              str(recorded.get("sha256"))[:12]))
+    return _block(prof)
 
 
 def triple(home):
