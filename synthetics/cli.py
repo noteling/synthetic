@@ -379,6 +379,11 @@ def project_command(store, args):
         warrant = authority.require("project.redact", home=store.home,
                                     what="project redact %s %s" % (args.project, args.entry),
                                     check=lambda sc: args.project in sc["projects"] or "*" in sc["projects"])["warrant"]
+    if cmd not in ("grant", "import") and not path.exists():
+        # Backlog 51: only grant, import and bind create a project; reading or redacting an unknown one must not
+        # leave an empty store (and its directory) behind.
+        raise ValueError("No project %s (only `project grant`, `project import` or `project bind` creates one)."
+                         % args.project)
     if cmd == "import":
         ProjectStore.import_jsonl(args.jsonl, path, args.project).close()
         with ProjectStore(path, args.project) as ps:

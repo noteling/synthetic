@@ -128,6 +128,8 @@ fairness guarantee yet.
   lessons by status, history, open Board backlog), rewritten after each write; a failed rewrite never fails the
   write. `synthetics project view P [--as-of N] [--out F | --write]` renders it; a session needs read access.
   Corrections go through the log, never into the view.
+  Only `project grant`, `project import` and `project bind` create a project; `project grants`, `export`, `view`
+  and `redact` on an unknown project refuse ("No project P") and leave nothing behind (backlog 51).
 - Message project tags (M21; VIS G3 delta): `message_send`/`question_ask(project=P)` tags a message for P when
   the sender holds a write grant on P (otherwise refused). With `project` omitted and `work_id` the sender's own
   work published to P, the message is tagged P with `project_by: "work"`; the recipient's `project_ref` shows
