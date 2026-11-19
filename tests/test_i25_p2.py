@@ -170,6 +170,107 @@ class ReviewF1Tests(P2Base):
         self.assertEqual(headers["Location"], "/s/rowan/%s" % entry["event_id"])
 
 
+class DoubleClickRaceTests(P2Base):
+    """Codex's t3 flake ([303, 409, 303, 303], py3.14): a concurrent send A of the same form commits between
+    send B's journal/lookup read and B's open check. Forced here by running A's real inbound inside B's
+    `question` call, so the bad interleaving happens every time (lesson pm-9b6ac46c)."""
+
+    def a_commits_during_the_open_check(self, nonce, claim=False, kind="answer"):
+        real = answer_desk.contract
+        qid = self.question["id"]
+        done = []
+
+        def racing(home, key_file, command, *args, lines=None):
+            if command == "question" and not done:
+                if claim:  # A claims after B's journal_find saw nothing
+                    answer_desk.journal_claim(self.root, "rowan", qid, nonce, kind, "david", None)
+                done.append(real(home, key_file, "inbound", lines=[dict(
+                    v=1, kind="message", external_id=answer_desk.external_id(qid, nonce), sender="david",
+                    body=ANSWER, source=answer_desk.SOURCE, question_id=qid)]))
+            return real(home, key_file, command, *args, lines=lines)
+        patch = mock.patch.object(answer_desk, "contract", racing)
+        patch.start()
+        self.addCleanup(patch.stop)
+        return done
+
+    def test_pending_entry_lookup_missed_then_a_commits(self):
+        """B finds A's pending entry, the lookup says not_routed (A in flight), A commits, B's open check fails."""
+        _, cookie = self.paired()
+        _, nonce, token = self.form(cookie)
+        answer_desk.journal_claim(self.root, "rowan", self.question["id"], nonce, "answer", "david", None)
+        done = self.a_commits_during_the_open_check(nonce)
+        status, headers, _ = self.post(cookie, nonce, token)
+        self.assertEqual(status, 303)
+        self.assertEqual(headers["Location"], "/s/rowan/%s" % done[0]["event_id"])
+        self.assertEqual(len(self.desk_events()), 1)
+        entry = answer_desk.journal_find(self.root, "rowan", self.question["id"], nonce)
+        self.assertEqual((entry["state"], entry["event_id"]), ("accepted", done[0]["event_id"]))
+
+    def test_no_entry_yet_then_a_claims_and_commits(self):
+        """B's journal_find ran before A's claim; A claims and commits before B's open check reads the store."""
+        _, cookie = self.paired()
+        _, nonce, token = self.form(cookie)
+        done = self.a_commits_during_the_open_check(nonce, claim=True)
+        status, headers, _ = self.post(cookie, nonce, token)
+        self.assertEqual(status, 303)
+        self.assertEqual(headers["Location"], "/s/rowan/%s" % done[0]["event_id"])
+        self.assertEqual(len(self.desk_events()), 1)
+
+    def test_edited_text_in_the_race_is_still_a_conflict(self):
+        _, cookie = self.paired()
+        _, nonce, token = self.form(cookie)
+        self.a_commits_during_the_open_check(nonce, claim=True)
+        status, _, text = self.post(cookie, nonce, token, answer=ANSWER + " edited")
+        self.assertEqual(status, 409)
+        self.assertIn("already sent with different text", text)
+        self.assertEqual(len(self.desk_events()), 1)
+
+    def test_other_kind_claimed_in_the_race_is_refused(self):
+        """A pending entry of the other button never turns B's failed open check into a send."""
+        _, cookie = self.paired()
+        _, nonce, token = self.form(cookie)
+        self.a_commits_during_the_open_check(nonce, claim=True, kind="context")
+        status, _, _ = self.post(cookie, nonce, token)
+        self.assertEqual(status, 409)
+        self.assertEqual(len(self.desk_events()), 1)
+
+    def test_closed_elsewhere_with_a_pending_entry_is_refused(self):
+        """Guard: the question closed on Telegram, the form's own send never arrived → still 409, nothing sent."""
+        _, cookie = self.paired()
+        _, nonce, token = self.form(cookie)
+        answer_desk.journal_claim(self.root, "rowan", self.question["id"], nonce, "answer", "david", None)
+        with Store(self.home) as store:
+            store.feed("david", "answered on telegram", source="manual", external_id="tg1",
+                       reply_to=self.question["id"])
+        status, _, _ = self.post(cookie, nonce, token)
+        self.assertEqual(status, 409)
+        self.assertEqual(self.desk_events(), [])
+
+    def test_refused_lookup_after_a_failed_open_check_sends_nothing(self):
+        """Vesper's #72 F1 holds in the fallback too: a lookup that couldn't ask (`unknown`) is no event, so
+        nothing is sent on a guess."""
+        _, cookie = self.paired()
+        _, nonce, token = self.form(cookie)
+        answer_desk.journal_claim(self.root, "rowan", self.question["id"], nonce, "answer", "david", None)
+        with Store(self.home) as store:
+            store.feed("david", "answered on telegram", source="manual", external_id="tg1",
+                       reply_to=self.question["id"])
+        real = answer_desk.contract
+        commands = []
+
+        def refusing(home, key_file, command, *args, lines=None):
+            commands.append(command)
+            if command == "event-status":
+                return dict(result="rejected", error=dict(code="auth_failed", message="key rotated"))
+            return real(home, key_file, command, *args, lines=lines)
+        with mock.patch.object(answer_desk, "contract", refusing):
+            status, _, text = self.post(cookie, nonce, token)
+        self.assertEqual(status, 409)
+        self.assertIn("not open for you any more", text)
+        self.assertNotIn("inbound", commands)
+        self.assertEqual(self.desk_events(), [])
+
+
 class ContextTests(P2Base):
     def test_t6_context_keeps_the_question_open(self):
         _, cookie = self.paired()

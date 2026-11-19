@@ -689,11 +689,26 @@ def make_handler(root, key_file):
                         "kept below.</p>%s") % answer_form(slug, qid, cookie, nonce=nonce, text=answer,
                                                           kinds=(kind,))))
                 if not question or question.get("error"):
-                    raise Refused(409, "That question is not open for you any more.")
-                # C1: the sender is the question's recipient as the contract returned it (the home's
-                # default_human). The journal keeps it so the same form sent again is the same line (P2 §3).
-                entry = journal_claim(root, slug, qid, nonce, kind, question["to"], question.get("thread"),
-                                      question.get("work_ids"))
+                    # A concurrent send of this same form (a double click) may have closed the question between
+                    # our journal/lookup read and this check: its journal entry and stored event say so. Then
+                    # this is that send again (the inbound below answers `duplicate`), not a refusal. Only a
+                    # found event counts (Vesper's P2 F1); anything else stays a 409.
+                    entry = journal_find(root, slug, qid, nonce)
+                    found = None
+                    if entry is not None and entry.get("kind") == kind:
+                        found = entry.get("event_id") or lookup(home, key_file, qid, nonce)
+                    if found == "no_response":
+                        return self._send(503, page("Not confirmed", (
+                            "<p>The desk could not check whether this form arrived (no response). Your text is "
+                            "kept below.</p>%s") % answer_form(slug, qid, cookie, nonce=nonce, text=answer,
+                                                              kinds=(kind,))))
+                    if not (isinstance(found, str) and EID.match(found)):
+                        raise Refused(409, "That question is not open for you any more.")
+                else:
+                    # C1: the sender is the question's recipient as the contract returned it (the home's
+                    # default_human). The journal keeps it so the same form sent again is the same line (P2 §3).
+                    entry = journal_claim(root, slug, qid, nonce, kind, question["to"], question.get("thread"),
+                                          question.get("work_ids"))
             line = dict(v=1, kind="message", external_id=external_id(qid, nonce), sender=entry["sender"],
                         body=answer, source=SOURCE, thread=entry.get("thread"))
             if kind == "answer":
