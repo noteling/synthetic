@@ -101,7 +101,9 @@ def _m28_gate(args, home):
         # RTN P1 (E3; G2 ruled owner-only, Codex event-d14945da): seed/cadence/restore/teardown are owner-only,
         # like the other provisioning commands; a session proves and re-arms its own routine with MCP
         # routine_rearm. list reads only the caller's own home.
-        if args.routine_command != "list":
+        if args.routine_command == "verify":
+            pass  # i17 E3: read-only, fenced like doctor (_doctor_gate) before anything is read
+        elif args.routine_command != "list":
             authority.owner_only("routine " + args.routine_command)
         else:
             a = authority.actor()
@@ -127,27 +129,28 @@ DOCTOR_HOST_FLAGS = (("key_file", "--key-file"), ("collector_plist", "--collecto
                      ("collector_dir", "--collector-dir"), ("label", "--label"))
 
 
-def _doctor_gate(args, home):
+def _doctor_gate(args, home, what="doctor"):
     """G4: the owner is unchanged. A session runs doctor on its own home; on another home H only while it holds
     an active worker.manage / adapter.manage / runtime.request delegation whose homes cover H (audited
-    authority.used with the delegation ID). Host-path flags stay own-home only. Every refusal is audited."""
+    authority.used with the delegation ID). Host-path flags stay own-home only. Every refusal is audited.
+    i17 C5: `export runs` and `routine verify` use the same fence; `what` names the command in audit rows."""
     from . import authority, roster
     a = authority.actor()
     if a["owner"] or authority.same_home(home, a["home"]):
         return
     target = str(Path(home).expanduser().resolve())
-    row = {"what": "doctor", "target": target, "actor": a["id"], "run": a["run"]}
+    row = {"what": what, "target": target, "actor": a["id"], "run": a["run"]}
 
     def refuse(code, message, **extra):
         authority.audit(a["home"], "authority.refused", dict(row, code=code, **extra))
-        raise authority.AuthorityError(code, message, what="doctor")
+        raise authority.AuthorityError(code, message, what=what)
 
     used = [flag for attr, flag in DOCTOR_HOST_FLAGS if getattr(args, attr, None)]
     if getattr(args, "relay_channel", "fieldpost") != "fieldpost":
         used.append("--relay-channel")
     if used:
-        refuse("own_home_only", "doctor %s in a session reads only its own home (%s), not %s"
-               % (" ".join(used), a["home"], target), flags=used)
+        refuse("own_home_only", "%s %s in a session reads only its own home (%s), not %s"
+               % (what, " ".join(used), a["home"], target), flags=used)
     state = roster.company_state_for_home(a["home"])
     for action in DOCTOR_DELEGATIONS:
         d = authority.covering(state, a["id"], action,
@@ -155,8 +158,8 @@ def _doctor_gate(args, home):
         if d is not None:
             authority.audit(a["home"], "authority.used", dict(row, action=action, delegation=d["id"]))
             return
-    refuse("own_home_only", "doctor in a session reads only its own home (%s), not %s, unless a %s delegation "
-           "covers it" % (a["home"], target, " / ".join(DOCTOR_DELEGATIONS)))
+    refuse("own_home_only", "%s in a session reads only its own home (%s), not %s, unless a %s delegation "
+           "covers it" % (what, a["home"], target, " / ".join(DOCTOR_DELEGATIONS)))
 
 
 def _delegated_runtime_request(store, home, args, runtime):
@@ -717,6 +720,19 @@ def parser():
     rtd.add_argument("--all", action="store_true")
     rtd.add_argument("--reason", default="routine teardown")
     rts_.add_parser("list", help="routines, their flags and the manager route")
+    rver = rts_.add_parser("verify", help="Ledgerline (i17 E3): check a dream run's covered_through against its "
+                           "since= pages and event_get chunks; read-only")
+    rver.add_argument("run")
+    rver.add_argument("--spill-bytes", type=int, default=None,
+                      help="predicted client display threshold in bytes (default 32000, F2 max_bytes)")
+    exp = sub.add_parser("export", help="Ledgerline (i17 E2): read-only JSON-lines export, allow-listed, no bodies")
+    exps = exp.add_subparsers(dest="export_command", required=True)
+    expr = exps.add_parser("runs", help="runs, their MCP receipts (E1 facts) and, with --audit, audit rows")
+    which = expr.add_mutually_exclusive_group()
+    which.add_argument("--run")
+    which.add_argument("--since", help="runs started at or after this ISO timestamp")
+    expr.add_argument("--audit", action="store_true", help="also export audit rows (allow-listed fields + data_sha256)")
+    expr.add_argument("--out", help="write to this file (0600) instead of stdout")
     proj = sub.add_parser("project", help="project memory (M21): bindings, capture, grants, redaction, export")
     ps = proj.add_subparsers(dest="project_command", required=True)
     pbind = ps.add_parser("bind", help="capture a thread/source into project P from now on (allowed in a session; "
@@ -793,6 +809,25 @@ def parser():
                                 help="how a runtime request restarts the job: launchctl kickstart -k, or exit 75 "
                                      "for KeepAlive{SuccessfulExit:false} to relaunch")
     return p
+
+
+def _export_runs(home, args, ledgerline):
+    if not (Path(home) / "state.sqlite3").is_file():
+        raise ValueError("No Synthetics home at %s." % home)
+    lines = ledgerline.export_runs(home, run=args.run, since=args.since, audit=args.audit)
+    if args.out:
+        descriptor = os.open(args.out, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            count = 0
+            for line in lines:
+                handle.write(json.dumps(line, ensure_ascii=False, sort_keys=True) + "\n")
+                count += 1
+        output({"out": args.out, "lines": count})
+    else:
+        for line in lines:
+            sys.stdout.write(json.dumps(line, ensure_ascii=False, sort_keys=True) + "\n")
+    return 0
 
 
 def _routine_command(store, args):
@@ -937,6 +972,16 @@ def main(argv=None):
             except KeyboardInterrupt:
                 pass
             return 0
+        if args.command == "export" or (args.command == "routine" and args.routine_command == "verify"):
+            # i17 Ledgerline: read-only (sqlro, never a Store), fenced exactly like doctor (C5).
+            what = "export runs" if args.command == "export" else "routine verify"
+            _doctor_gate(args, home, what=what)
+            from . import ledgerline
+            if args.command == "routine":
+                spill = args.spill_bytes if args.spill_bytes is not None else ledgerline.SPILL_BYTES
+                output(ledgerline.verify_dream(home, args.run, spill_bytes=spill))
+                return 0
+            return _export_runs(home, args, ledgerline)
         if args.command == "channel" and args.channel_command == "provision":
             _refuse_in_session("channel provision")
             output(channel_provision(args.name, args.source_prefixes, args.homes, args.key_dir, args.by, args.routes))

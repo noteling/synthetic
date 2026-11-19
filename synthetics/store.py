@@ -12,6 +12,7 @@ from pathlib import Path
 
 from . import board
 from . import capture
+from . import ledgerline
 from . import roster
 
 
@@ -3042,6 +3043,7 @@ class Store:
             if run["status"] != "running":
                 raise ValueError("Only an active run can finish.")
             run.update(status="finished", summary=summary, cost=cost, finished_at=timestamp())
+            run["receipt_chain"] = self._receipt_chain(run_id)
             for event_id in run["event_ids"]:
                 self.db.execute("UPDATE events SET processed_run=? WHERE id=? AND processed_run IS NULL", (run_id, event_id))
             self._quarantine_left_ready(run, "finished")
@@ -3056,6 +3058,7 @@ class Store:
             if run["status"] != "running":
                 raise ValueError("Only an active run can fail.")
             run.update(status="failed", error=str(error), cost=cost, finished_at=timestamp())
+            run["receipt_chain"] = self._receipt_chain(run_id)
             self._quarantine_left_ready(run, "failed")
             return self._save("runs", run, "run.failed")
 
@@ -3112,6 +3115,16 @@ class Store:
             recent.append(entry)
         return {"timezone": "UTC", "today": recent[0], "recent": recent}
 
+    def _receipt_chain(self, run_id):
+        """i17 E1: anchor the head of runs/<run>.mcp.jsonl in the run record (and so in its run.finished /
+        run.failed / run.interrupted audit row), outside runs/. Never fails the run transition."""
+        if not isinstance(run_id, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", run_id):
+            return None
+        try:
+            return ledgerline.chain_head(self.home / "runs" / (run_id + ".mcp.jsonl")) or {"head_sha256": None, "lines": 0}
+        except Exception as exc:  # noqa: BLE001
+            return {"error": type(exc).__name__}
+
     def recover_runs(self):
         count = 0
         with self._tx():
@@ -3119,6 +3132,7 @@ class Store:
                 if run["status"] == "running":
                     run.update(status="interrupted", error="Worker stopped before completing this run; inspect existing effects before retrying.",
                                finished_at=timestamp())
+                    run["receipt_chain"] = self._receipt_chain(run["id"])
                     self._quarantine_left_ready(run, "interrupted")
                     self._save("runs", run, "run.interrupted")
                     count += 1

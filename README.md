@@ -189,8 +189,9 @@ are therefore asynchronous. The service must be running for timers to execute; d
 timers are reconciled on restart. On macOS, `worker install` can run it as a launchd
 agent (see the [channel contract](docs/channel-contract.md)).
 
-The runtime records durable state changes, MCP call receipts, and model summaries.
-Built-in shell/file tool outcomes are not independently journaled. Model judgment,
+The runtime records durable state changes, MCP call receipts (with result sizes, hashes and read IDs, hash-chained
+and anchored in the run record; `export runs` and `routine verify`, [docs/ledgerline.md](docs/ledgerline.md)), and
+model summaries. Built-in shell/file tool outcomes are not independently journaled. Model judgment,
 truthful reporting, and useful prioritization are capabilities to evaluate through actual work. Database
 recovery cannot prove that an arbitrary Bash or external effect happened exactly once.
 
