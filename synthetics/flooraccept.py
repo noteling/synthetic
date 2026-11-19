@@ -13,10 +13,13 @@ documented here and in docs/floor.md:
   ref/note contains the meeting ID as a whole token (not inside a longer run of ID characters [A-Za-z0-9_.:-]),
   the journal path segment ``meetings/<id>``, or the wrap event ID (in full, or ``event-`` plus 8 or more of its
   hex characters).
+- The wrap event is the one whose auth stamp names the ``stand`` channel (F3-lows L2): a ``floor:<id>:wrap`` row
+  written by any other channel is ignored, never taken as the wrap.
 - Such a work_put is *attributed* (no violation) when its target work is one floor_accept created or extended for
   this meeting (audit rows ``floor.accepted``), or when its evidence cites a question that is answered (status
   ``answered``, not proxy, not withdrawn), was addressed to this home's default human, and whose answer event has
-  a non-null auth (Codex Q2). Any other citing work_put is ``unattributed_meeting_work``.
+  a non-null auth (Codex Q2), and that was created at or after the meeting's journal ``begin`` line (F3-lows L1:
+  an older answered question is not about this meeting). Any other citing work_put is ``unattributed_meeting_work``.
 - A memory_put receipt with ``replaces`` whose source cites the meeting and names ``line N`` (or ``lines N``,
   ``line #N``) where journal line N is ``room-unidentified`` is ``room_correction_replaces``.
 """
@@ -24,12 +27,14 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime, timezone
 
 from . import floorjournal as fj
 from . import ledgerline
 
 ORIGIN = "meeting"
 WRAP_SOURCE_SUFFIX = ":meeting"
+WRAP_CHANNEL = "stand"      # floor.CHANNEL: only the provisioned stand channel writes a meeting's wrap (L2)
 CODES = ("unknown_cid", "declined", "meeting_running", "chain_broken", "no_wrap", "unknown_work", "work_closed",
          "bad_meeting")
 _ID_CHARS = "A-Za-z0-9_.:-"
@@ -48,11 +53,16 @@ def wrap_external_id(meeting):
 
 def wrap_event(rows, meeting):
     """The wrap event for `meeting` among event rows (dicts): external_id floor:<id>:wrap, source <prefix>:meeting,
-    an authenticated channel stamp, and a JSON body naming the meeting with a chain head. None otherwise."""
+    an auth stamp from the stand channel, and a JSON body naming the meeting with a chain head. None otherwise.
+    F3-lows L2: a row stamped by any other channel is skipped (ignored), so an impostor planted before the real
+    wrap neither stands in for it nor breaks the chain check."""
     for event in rows:
         if event.get("external_id") != wrap_external_id(meeting):
             continue
-        if not str(event.get("source") or "").endswith(WRAP_SOURCE_SUFFIX) or not event.get("auth"):
+        if not str(event.get("source") or "").endswith(WRAP_SOURCE_SUFFIX):
+            continue
+        auth = event.get("auth")
+        if not isinstance(auth, dict) or auth.get("channel") != WRAP_CHANNEL:
             continue
         try:
             body = json.loads(event.get("body") or "")
@@ -129,9 +139,30 @@ def _work_texts(arguments):
     return out
 
 
-def _answered_by_human(conn, ref, human):
-    """Codex Q2: an answered (not proxy, not withdrawn) question to the default human with an authenticated answer."""
-    if not isinstance(ref, str) or not ref.startswith("question-") or not human:
+def _instant(value):
+    """An ISO timestamp (trailing Z allowed, Python 3.9 too) as an aware datetime, or None. Compared as instants,
+    never as strings: '...:00Z' sorts after '...:00.5Z' as text."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        moment = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
+
+
+def begun_at(lines):
+    """The meeting's start: the `at` of its journal `begin` line, or None."""
+    for _, line in lines:
+        if line.get("op") == "begin":
+            return line.get("at") if isinstance(line.get("at"), str) else None
+    return None
+
+
+def _answered_by_human(conn, ref, human, since=None):
+    """Codex Q2: an answered (not proxy, not withdrawn) question to the default human with an authenticated answer,
+    created at or after `since` (the meeting's begin; F3-lows L1). No `since` → never exempt."""
+    if not isinstance(ref, str) or not ref.startswith("question-") or not human or not since:
         return False
     row = conn.execute("SELECT data FROM questions WHERE id=?", (ref,)).fetchone()
     if row is None:
@@ -140,6 +171,9 @@ def _answered_by_human(conn, ref, human):
     if question.get("status") != "answered" or not question.get("answer_event_id"):
         return False
     if (question.get("to_id") or question.get("to")) != human:
+        return False
+    created, start = _instant(question.get("created_at")), _instant(since)
+    if created is None or start is None or created < start:
         return False
     answer = conn.execute("SELECT data FROM events WHERE id=?", (question["answer_event_id"],)).fetchone()
     return bool(answer and json.loads(answer["data"]).get("auth"))
@@ -190,6 +224,7 @@ def verify(home, run_id):
         for event, body in wraps:
             meeting = body["meeting"]
             lines = numbered(home, meeting)
+            begun = begun_at(lines)
             chain = fj.verify(home, meeting, anchor=body["head"]).get("chain")
             accepted = _accepted(conn, meeting)
             accepted_works = set(w for w in accepted.values() if w)
@@ -203,7 +238,7 @@ def verify(home, run_id):
                     if args.get("id") in accepted_works:
                         continue
                     refs = [i.get("ref") for i in args.get("evidence") or [] if isinstance(i, dict)]
-                    if any(_answered_by_human(conn, ref, human) for ref in refs):
+                    if any(_answered_by_human(conn, ref, human, begun) for ref in refs):
                         continue
                     violations.append(dict(kind="unattributed_meeting_work", meeting=meeting, receipt_line=number,
                                            work=args.get("id")))

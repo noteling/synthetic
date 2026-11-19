@@ -13,7 +13,7 @@ from unittest import mock
 from synthetics import floor, floormeeting
 from synthetics import floorjournal as fj
 from synthetics import mcp
-from synthetics.store import SESSION_ENV, Store
+from synthetics.store import SESSION_ENV, Store, timestamp
 from tests import test_authority as _warrant  # module import: a bare WarrantTest name would be collected here
 
 try:
@@ -385,7 +385,7 @@ class G2Verify(Base):
         result = flooraccept.verify(self.home, run)
         self.assertEqual([v["receipt_line"] for v in result["violations"]], [2, 3, 4])
 
-    def _question(self, status, to, auth):
+    def _question(self, status, to, auth, created_at=None):
         import uuid
         from synthetics.capture import write_humans
         write_humans(self.home, {"default_human": "david", "senders": ["david"]})
@@ -394,7 +394,7 @@ class G2Verify(Base):
             store.db.execute("INSERT INTO events(id, data, processed_run) VALUES (?,?,?)",
                              (eid, json.dumps(dict(id=eid, sender=to, body="yes", auth=auth, kind="message")), "x"))
             store._save("questions", dict(id=qid, to=to, to_id=to, status=status, answer_event_id=eid, body="ok?",
-                                          created_at="2026-01-01T00:00:00Z"), "question.test")
+                                          created_at=created_at or timestamp()), "question.test")
         return qid
 
     def test_no_evidence_without_a_wrap_event(self):
