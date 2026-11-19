@@ -10,7 +10,9 @@ Entry kinds (every body carries ``source`` and ``certainty``; the author is the 
 - ``alias`` {alias, id} / ``unalias`` {alias}: aliases are unique host-wide after case folding and
   whitespace collapsing. A person's ID and name are implicit aliases.
 - ``retire`` {id, reason}: the profile stays readable, marked retired.
-- ``retract`` {target}: as in project memory. A non-owner may retract only a delegation child it wrote.
+- ``retract`` {target}: as in project memory. A non-owner may retract only a delegation child it wrote, never a
+  ``retract`` or ``retire`` entry, and a ``person`` entry only under the role rules (A3/A4) and never removing a
+  profile (issue #2). ``authority.recheck`` reads the same fold, so fenced writes and ``covering`` agree.
 - ``delegation`` (M28 Warrant) {grantee, actions, scope, sources|parent, note?}: a ROOT cites authenticated
   human events ({event, excerpt, auth} each, verified by authority.verify_sources) and is written by the owner
   only; a CHILD names ``parent`` (an active root), narrows it and cannot hold delegation.grant.
@@ -336,6 +338,28 @@ class CompanyStore(ProjectStore):
                     # P1c: a session retracts a policy entry only while it holds the action that writes it.
                     self._validate_policy(state, dict(target["body"]), where, author=author, operator=False,
                                           shape=False)
+                if target["kind"] in ("retract", "retire") and not operator:
+                    # Issue #2: un-retracting restores the inner target (a revoked delegation, a policy, a role, a
+                    # retirement), and un-retiring restores a home; only the owner may do either.
+                    raise ProjectError("owner_only", f"{where}: only the owner may retract a {target['kind']} "
+                                       "entry")
+                if target["kind"] == "person" and not operator:
+                    # Issue #2: a retract that changes a role is a role change (A3/A4); removing a profile is owner-only.
+                    after = company_fold(sim + [{"seq": seq + 1, "id": eid, "batch": "", "kind": kind,
+                                                 "author": author, "run": None, "at": "", "body": body}])
+                    me = resolve(state, author)["id"] or author
+                    for pid, before in state["people"].items():
+                        now = after["people"].get(pid)
+                        if now is None:
+                            raise ProjectError("owner_only", f"{where}: only the owner may remove the profile "
+                                               f"{pid}")
+                        if now["role"] != before["role"]:
+                            if pid in (author, me):
+                                raise ProjectError("own_role", f"{where}: an employee cannot change its own "
+                                                   "company role, including by retracting an entry")
+                            if not body.get("auth"):
+                                raise ProjectError("unauthenticated_role", f"{where}: a retract that changes a "
+                                                   "role needs a source with non-null auth, or the operator CLI")
             seq += 1
             sim.append({"seq": seq, "id": eid, "batch": "", "kind": kind, "author": author, "run": None,
                         "at": "", "body": body})

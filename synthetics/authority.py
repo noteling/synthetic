@@ -701,9 +701,14 @@ def recheck(db, warrant, *, company_is_main=False) -> None:
     if row is None or json.loads(row[0]).get("status") != "running":
         raise AuthorityError("run_inactive", "run %s finished before the write" % warrant["run"], run=warrant["run"])
     co = "main" if company_is_main else "w_co"
-    for (body,) in db.execute("SELECT body FROM %s.entries WHERE kind='retract'" % co).fetchall():
-        target = json.loads(body).get("target")
-        if target in warrant["chain"]:
+    # Issue #2: one rule with covering(): a chain delegation is in effect iff the company fold keeps it active
+    # (a retract that is itself retracted no longer counts; a child whose root is gone is gone).
+    from .roster import company_fold
+    rows = db.execute("SELECT seq,id,batch,kind,author,run,at,body FROM %s.entries ORDER BY seq" % co).fetchall()
+    active = company_fold([{"seq": r[0], "id": r[1], "batch": r[2], "kind": r[3], "author": r[4], "run": r[5],
+                            "at": r[6], "body": json.loads(r[7])} for r in rows])["delegations"]
+    for target in warrant["chain"]:
+        if target not in active:
             raise AuthorityError("delegation_retracted", "delegation %s was retracted before the write" % target,
                                  delegation=target)
 
