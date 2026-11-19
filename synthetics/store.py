@@ -54,6 +54,16 @@ def _text(value, name):
     return value.strip()
 
 
+def _search_text(value):
+    """The values of a record as one text, without its key names (issue #7: a query word that is only a
+    key name such as "subject" or "source" must not match every record)."""
+    if isinstance(value, dict):
+        return "\n".join(_search_text(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return "\n".join(_search_text(item) for item in value)
+    return "" if value is None else str(value)
+
+
 def _json(value):
     try:
         return json.dumps(value, sort_keys=True, ensure_ascii=False, allow_nan=False)
@@ -596,7 +606,7 @@ class Store:
                                            "created_at": old.get("created_at", now), "updated_at": now}, "entity.put")
 
     def entities(self, query=""):
-        return [item for item in self._all("entities") if query.casefold() in _json(item).casefold()]
+        return [item for item in self._all("entities") if query.casefold() in _search_text(item).casefold()]
 
     def memory_put(self, subject, predicate, value, kind="fact", source="", key=None, replaces=None):
         subject, predicate = _text(subject, "subject"), _text(predicate, "predicate")
@@ -659,7 +669,7 @@ class Store:
         candidates = [memory for memory in reversed(self._all("memories"))
                       if (subjects is None or roster.fold_alias(memory["subject"]) in subjects)
                       and (include_superseded or not memory.get("superseded_by"))]
-        out = [memory for memory in candidates if all(word in _json(memory).casefold() for word in words)]
+        out = [memory for memory in candidates if all(word in _search_text(memory).casefold() for word in words)]
         # Fetch by ID: an exact memory ID (or a prefix of 15+ characters) puts
         # that memory ahead of memories that only cite it.
         probe = query.strip().casefold()
@@ -2073,7 +2083,7 @@ class Store:
             event = json.loads(row["data"])
             if thread is not None and event.get("thread") != thread:
                 continue
-            if all(word in _json(event).casefold() for word in words):
+            if all(word in _search_text(event).casefold() for word in words):
                 found.append(self._with_auth(event))
                 if len(found) >= limit:
                     break
