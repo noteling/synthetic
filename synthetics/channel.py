@@ -195,6 +195,8 @@ def run(args, home, stdin=None, stdout=None):
                     _emit(stdout, dict(v=VERSION, message_id=args.message, result=result, state=state, error=None))
                 elif command == "event-status":
                     _emit(stdout, store.channel_event_status(credential, args.event))
+                elif command == "question":
+                    _emit(stdout, store.channel_question(credential, args.id))
                 else:
                     raise UsageFailure("bad_line", "unknown channel command %s" % command)
             except ChannelError as exc:
@@ -221,6 +223,9 @@ def add_parsers(channel_sub):
     keyed("inbound", "stdin JSONL messages → stdout JSONL results (accepted|duplicate|rejected)")
     status = keyed("event-status", "accepted vs processed for an event this channel delivered")
     status.add_argument("--event", required=True)
+    question = keyed("question", "full text of one open question addressed to this home's default_human "
+                     "(read-only, audited; #25 answer desk)")
+    question.add_argument("--id", required=True)
     pending = keyed("pending", "outbox messages routed to this channel and pending on it")
     pending.add_argument("--limit", type=int, default=50)
     claim = keyed("claim", "claim a pending message before any external side effect")
