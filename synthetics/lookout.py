@@ -21,7 +21,7 @@ import subprocess
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import quote, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from . import projectlog, projectview, roster, sharedstatus
 
@@ -32,6 +32,7 @@ ADAPTER_LABELS = re.compile(r"^com\.synthetics\.(adapter\..+|fieldpost.*|fieldst
 HEADER = re.compile(r"^([a-z][a-z0-9-]*): (.*)$")
 PROJECT_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 HOME_FILES = ("runtime.state.json", "worker.lock")
+THREAD_PAGE = 50  # VIS G10: messages per thread page
 
 
 # ---------------------------------------------------------------- reading the allowed records
@@ -309,10 +310,54 @@ def _age(ts, now):
     at = _parse(ts)
     if at is None:
         return ""
-    minutes = max(0, int((now - at).total_seconds() // 60))
+    return _span(max(0, int((now - at).total_seconds() // 60)))
+
+
+def _span(minutes):
     hours, mins = divmod(minutes, 60)
     days, hours = divmod(hours, 24)
     return "%dd %dh" % (days, hours) if days else ("%dh %dm" % (hours, mins) if hours else "%dm" % mins)
+
+
+def _rel(ts, now):
+    """VIS G9: a relative time ("5m ago", "in 2h 3m", "just now") with the stored timestamp as its tooltip.
+    A value that is not a timestamp is shown as it is."""
+    if ts is None or ts == "":
+        return ""
+    at = _parse(ts)
+    if at is None:
+        return _v(ts)
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    seconds = (now - at).total_seconds()
+    minutes = int(abs(seconds) // 60)
+    text = "just now" if minutes == 0 else (_span(minutes) + " ago" if seconds > 0 else "in " + _span(minutes))
+    return "<time datetime='%s' title='%s'>%s</time>" % (E(str(ts)), E(str(ts)), E(text))
+
+
+def _who(people, pid):
+    """VIS G6: a person's name with the raw ID as its tooltip; an address with no profile shows as itself."""
+    if not pid:
+        return "?"
+    name = (people.get(pid) or {}).get("name")
+    if not name:
+        return "<code>%s</code>" % E(str(pid))
+    return "<span title='%s'>%s</span>" % (E(str(pid)), E(name))
+
+
+def work_titles(root, entries=()):
+    """VIS G-a1/G6: {work_id: title} from the given project entries' backlog rows (published works), then from each
+    home's status.json works (open works; the Team page already shows those titles). The backlog wins."""
+    titles = {}
+    for home in homes(root):
+        for w in (sharedstatus.read(home) or {}).get("works") or []:
+            if isinstance(w, dict) and w.get("id") and w.get("title"):
+                titles[w["id"]] = w["title"]
+    if entries:
+        for row in projectlog.fold(entries)["backlog"].values():
+            if row.get("work_id") and row.get("title"):
+                titles[row["work_id"]] = row["title"]
+    return titles
 
 
 def _anchor(qid):
@@ -391,30 +436,31 @@ def team_page(root, agents=None, now=None):
             svc_text += " <span class='bad'>mismatch: %s</span>" % E(svc["mismatch"])
         sess_text = E(sess["state"])
         if sess.get("run"):
-            sess_text += " — %s since %s (%s)" % (E(sess["run"]), _v(sess["started_at"]), _age(sess["started_at"], now))
+            sess_text += " — %s since %s" % (E(sess["run"]), _rel(sess["started_at"], now))
         if sess["state"] == "suspect":
             sess_text = "<span class='bad'>%s</span> — longer than the timeout (%ss) plus %ss" % (
                 sess_text, _v(sess.get("timeout_s")), SUSPECT_MARGIN)
         if sess.get("paused"):
             sess_text += " — paused: %s" % E(json.dumps(sess["paused"], sort_keys=True))
         if sess.get("written_at"):
-            sess_text += " <span class='muted'>(status.json written %s)</span>" % E(sess["written_at"])
+            sess_text += " <span class='muted'>(status.json written %s)</span>" % _rel(sess["written_at"], now)
         out.append("<table><tr><th>1. Service</th><td>%s</td></tr><tr><th>2. Session</th><td>%s</td></tr>"
                    % (svc_text, sess_text))
         works = status.get("works") or []
         waiting = [w for w in works if w.get("status") == "waiting"]
         out.append("<tr><th>3. Waiting on</th><td>%s</td></tr></table>" % ("<br>".join(
             "%s — %s%s%s" % (E(w.get("title") or w["id"]), E(w.get("waiting_for") or "?"),
-                             " (wake %s)" % E(w["wake_at"]) if w.get("wake_at") else "",
+                             " (wake %s)" % _rel(w["wake_at"], now) if w.get("wake_at") else "",
                              " [%s]" % E(", ".join(w.get("waiting_question_ids") or [])) if w.get("waiting_question_ids") else "")
             for w in waiting) or "nothing"))
         if works:
             out.append("<p><b>Work</b></p><table><tr><th>status</th><th>pri</th><th>title</th><th>waiting for</th>"
-                       "<th>published</th><th>id</th></tr>")
-            for w in works:
-                out.append("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td><code>%s</code></td></tr>" % (
-                    _v(w.get("status")), _v(w.get("priority")), _v(w.get("title")), _v(w.get("waiting_for")),
-                    _v(w.get("published")), _v(w.get("id"))))
+                       "<th>published</th><th>updated</th><th>id</th></tr>")
+            for w in works:  # VIS G7: "updated" = age of the work's last change (status.json updated_at)
+                out.append("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td><code>%s</code></td>"
+                           "</tr>" % (_v(w.get("status")), _v(w.get("priority")), _v(w.get("title")),
+                                      _v(w.get("waiting_for")), _v(w.get("published")), _rel(w.get("updated_at"), now),
+                                      _v(w.get("id"))))
             out.append("</table>")
         dock = status.get("docket")
         if dock:
@@ -424,17 +470,17 @@ def team_page(root, agents=None, now=None):
                 for item in dock["items"]:
                     # Docket links: the question links to its open-question anchor in this block, and "now" shows
                     # the hop with the onward question it went via and the carried questions, linked like G3.
-                    out.append("<tr><td>%s %s</td><td>%s (%s)</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
-                        _qlink(item.get("question_id")), _v(item.get("summary")), _v(item.get("asked_at")),
-                        _age(item.get("asked_at"), now), _v(item.get("ack")),
+                    out.append("<tr><td>%s %s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
+                        _qlink(item.get("question_id")), _v(item.get("summary")), _rel(item.get("asked_at"), now),
+                        _v(item.get("ack")),
                         "; ".join(_relay_parts(people, item)),
                         E("; ".join(w.get("title") or w.get("id") for w in item.get("works") or []))))
                 out.append("</table>")
         questions = status.get("questions_open") or []
         if questions:
             out.append("<p><b>Open questions</b></p><ul>" + "".join(
-                "<li id='%s'><code>%s</code> to %s, %s ago: %s%s</li>" % (
-                    _anchor(q.get("id")), _v(q.get("id")), E(_name(people, q.get("to"))), _age(q.get("asked_at"), now),
+                "<li id='%s'><code>%s</code> to %s, %s: %s%s</li>" % (
+                    _anchor(q.get("id")), _v(q.get("id")), _who(people, q.get("to")), _rel(q.get("asked_at"), now),
                     _v(q.get("first_line")), _relay_links(people, q)) for q in questions) + "</ul>")
         runs = (status.get("runs") or [])[:5]
         if runs:
@@ -443,7 +489,8 @@ def team_page(root, agents=None, now=None):
             for r in runs:
                 cost = "$%.2f" % r["cost"] if isinstance(r.get("cost"), (int, float)) else "?"
                 out.append("<tr><td><code>%s</code></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
-                           % (_v(r.get("id")), _v(r.get("status")), _v(r.get("started_at")), _v(r.get("finished_at")),
+                           % (_v(r.get("id")), _v(r.get("status")), _rel(r.get("started_at"), now),
+                              _rel(r.get("finished_at"), now),
                               E(cost), _v(r.get("events")), _v(r.get("failed_tool_count"))))
             out.append("</table>")
         glances = (status.get("glances") or [])[:5]
@@ -457,11 +504,27 @@ def team_page(root, agents=None, now=None):
                 find_text = ("“%s”%s → %s ×%s" % (find.get("name"), " (%s)" % find["role"] if find.get("role") else "",
                                                    find.get("match"), find.get("count"))) if find else ""
                 out.append("<tr><td>%s</td><td><code>%s</code></td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>"
-                           % (_v(g.get("at")), _v(g.get("run_id")), _v(g.get("status")), _v(counts.get("site")),
+                           % (_rel(g.get("at"), now), _v(g.get("run_id")), _v(g.get("status")), _v(counts.get("site")),
                               E(seen_text), E(find_text)))
             out.append("</table>")
-        if (status.get("outbox_stuck") or {}).get("count"):
-            out.append("<p class='bad'>Outbox: %d message(s) stuck over 10 minutes.</p>" % status["outbox_stuck"]["count"])
+        stuck = status.get("outbox_stuck") or {}
+        if stuck.get("count"):
+            out.append("<p class='bad'>Outbox: %d message(s) stuck over 10 minutes.</p>" % stuck["count"])
+            items = [i for i in stuck.get("items") or [] if isinstance(i, dict)]
+            if items:  # VIS G8: drill-down; status.json carries no message body
+                out.append("<details><summary>Stuck messages (newest %d of %d)</summary><table><tr><th>message</th>"
+                           "<th>to</th><th>kind</th><th>state</th><th>route</th><th>age</th></tr>" % (len(items), stuck["count"]))
+                for i in items:
+                    routes = i.get("routed_by") or []
+                    out.append("<tr><td><code>%s</code>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td></tr>" % (
+                        _v(i.get("id")), " (question %s)" % _qlink(i["question_id"]) if i.get("question_id") else "",
+                        _who(people, i.get("to")), _v(i.get("kind")), _v(i.get("state")),
+                        E(", ".join(str(r) for r in routes)) if routes else "<span class='bad'>no channel routes this address</span>",
+                        E(_span(i["age_minutes"])) if isinstance(i.get("age_minutes"), int) else ""))
+                out.append("</table></details>")
+        if stuck.get("older_than_48h"):
+            out.append("<p class='muted'>Outbox: %d older message(s) still undelivered (over 48 h, counted only).</p>"
+                       % stuck["older_than_48h"])
     others = [pid for pid, p in sorted(people.items()) if pid not in seen and p.get("kind") != "system"]
     if others:
         out.append("<h2>People</h2><table><tr><th>name</th><th>kind</th><th>role</th><th>projects</th><th>about</th></tr>")
@@ -478,50 +541,93 @@ def team_page(root, agents=None, now=None):
     return page("Team", "\n".join(out), plist)
 
 
-def threads_page(root, project):
+def _about(key, titles):
+    """The "about" text of a thread key (VIS G-a1): its works' titles, its thread ID, or "(no work id)"."""
+    if key.startswith("w:"):
+        return ", ".join(titles.get(w) or w for w in key.split(":", 2)[-1].split("+"))
+    if key.startswith("t:"):
+        return key[2:]
+    return "(no work id)"
+
+
+def threads_page(root, project, now=None):
+    now = now or datetime.now(timezone.utc)
     entries, texts = project_entries(root, project)
+    people = company(root).get("people", {})
     groups = threads(messages(entries, texts, canonical(company(root))))
     if not groups:
         return page("%s: threads" % project, "<p class='muted'>No captured messages in this project.</p>", projects(root))
+    titles = work_titles(root, entries)
     rows = sorted(groups.items(), key=lambda kv: kv[1][-1]["at"] or "", reverse=True)
     out = ["<table><tr><th>last</th><th>messages</th><th>between</th><th>about</th></tr>"]
     for key, msgs in rows:
-        people = sorted({str(m["sender"]) for m in msgs} | {str(m["to"]) for m in msgs if m["to"]})
-        about = key.split(":", 2)[-1] if not key.startswith("p:") else ""
-        out.append("<tr><td>%s</td><td>%d</td><td>%s</td><td><a href='/p/%s/thread/%s'>%s</a></td></tr>" % (
-            _v(msgs[-1]["at"]), len(msgs), E(", ".join(people)), quote(project), quote(key, safe=""),
-            E(about or "(no work id)")))
+        ids = sorted({str(m["sender"]) for m in msgs} | {str(m["to"]) for m in msgs if m["to"]},
+                     key=lambda pid: (_name(people, pid).lower(), pid))
+        out.append("<tr><td>%s</td><td>%d</td><td>%s</td><td><a href='/p/%s/thread/%s' title='%s'>%s</a></td></tr>" % (
+            _rel(msgs[-1]["at"], now), len(msgs), ", ".join(_who(people, pid) for pid in ids), quote(project),
+            quote(key, safe=""), E(key), E(_about(key, titles))))
     out.append("</table>")
     return page("%s: threads" % project, "\n".join(out), projects(root))
 
 
-def thread_page(root, project, key):
+def _page_number(value, last):
+    """VIS G10: the requested page (1 = oldest messages), clamped to 1..last; the newest page by default."""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return last
+    return min(max(number, 1), last)
+
+
+def thread_page(root, project, key, page_no=None, now=None):
+    now = now or datetime.now(timezone.utc)
     entries, texts = project_entries(root, project)
     msgs = threads(messages(entries, texts, canonical(company(root)))).get(key)
     if msgs is None:
         return None
-    out = []
-    for m in msgs:
+    people = company(root).get("people", {})
+    titles = work_titles(root, entries)
+    last = max(1, -(-len(msgs) // THREAD_PAGE))
+    number = _page_number(page_no, last)
+    shown = msgs[(number - 1) * THREAD_PAGE:number * THREAD_PAGE]
+    base = "/p/%s/thread/%s" % (quote(project), quote(key, safe=""))
+
+    def link(n, text):
+        return "<a href='%s?page=%d'>%s</a>" % (base, n, E(text))
+    nav = ""
+    if last > 1:  # VIS G10: big conversations are paged, newest page first
+        nav = "<p>Page %d of %d (%d messages, %d per page) — %s</p>" % (
+            number, last, len(msgs), THREAD_PAGE, " ".join(filter(None, (
+                link(1, "oldest") if number > 1 else "", link(number - 1, "older") if number > 1 else "",
+                link(number + 1, "newer") if number < last else "", link(last, "newest") if number < last else ""))))
+    out = ["<p>About: %s</p>" % E(_about(key, titles)), nav]
+    for m in shown:
         out.append("<div class='%s'><p><b>%s</b> → %s — %s — auth %s — via %s — captured by %s%s</p>%s</div>" % (
-            "in" if m["role"] != "out" else "out", _v(m["sender"]), _v(m["to"] or "?"), _v(m["at"]), _v(m["auth"]),
-            _v(m["source"]), _v(m["captured_by"]), " — question %s" % E(m["question"]) if m["question"] else "",
+            "in" if m["role"] != "out" else "out", _who(people, m["sender"]), _who(people, m["to"]) if m["to"] else "?",
+            _rel(m["at"], now), _v(m["auth"]), _v(m["source"]), _v(m["captured_by"]),
+            " — question %s" % E(m["question"]) if m["question"] else "",
             "<p class='muted'>(redacted)</p>" if m["text"] is None else "<pre>%s</pre>" % E(m["text"])))
+    out.append(nav)
     return page("%s: thread %s" % (project, key), "\n".join(out), projects(root))
 
 
-def board_page(root, project):
+def board_page(root, project, now=None):
+    now = now or datetime.now(timezone.utc)
     entries, _ = project_entries(root, project)
+    people = company(root).get("people", {})
     state = projectlog.fold(entries)
     bodies = {e["id"]: (e.get("body") or {}) for e in entries if e["kind"] == "post"}
     out = ["<h2>Backlog</h2>"]
     backlog = sorted(state["backlog"].values(), key=lambda r: (r.get("priority") or 99, r["seq"]))
     if backlog:
         out.append("<table><tr><th>owner</th><th>status</th><th>pri</th><th>title</th><th>waiting for</th>"
-                   "<th>blocked by</th><th>work</th></tr>")
+                   "<th>blocked by</th><th>updated</th><th>work</th></tr>")
         for r in backlog:
-            out.append("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td><code>%s</code></td></tr>" % (
-                _v(r.get("owner")), _v(r.get("status")), _v(r.get("priority")), _v(r.get("title")),
-                _v(r.get("waiting_for")), E("; ".join(r.get("blocked_by") or [])), _v(r.get("work_id"))))
+            out.append("<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
+                       "<td><code>%s</code></td></tr>" % (
+                           _who(people, r.get("owner")), _v(r.get("status")), _v(r.get("priority")), _v(r.get("title")),
+                           _v(r.get("waiting_for")), E("; ".join(r.get("blocked_by") or [])), _rel(r.get("at"), now),
+                           _v(r.get("work_id"))))
         out.append("</table>")
     else:
         out.append("<p class='muted'>Empty.</p>")
@@ -530,7 +636,7 @@ def board_page(root, project):
     for p in posts:
         text = "(redacted)" if p["redacted"] else (bodies.get(p["id"]) or {}).get("body", "")
         out.append("<div><p><b>%s</b> — %s — %s%s</p><pre>%s</pre></div>" % (
-            _v(p["topic"]), _v(p["author"]), _v(p["at"]), " (reply to %s)" % E(p["reply_to"]) if p.get("reply_to") else "",
+            _v(p["topic"]), _who(people, p["author"]), _rel(p["at"], now), " (reply to %s)" % E(p["reply_to"]) if p.get("reply_to") else "",
             E(text)))
     if not posts:
         out.append("<p class='muted'>None.</p>")
@@ -592,6 +698,8 @@ def sources_table(root, project, entries, texts):
     Same set as projectview's count (projectlog.fold over active entries). Shows provenance and coverage only; the
     text stays on the thread page, where a redacted source reads "(redacted)"."""
     state = projectlog.fold(entries)
+    people = company(root).get("people", {})
+    now = datetime.now(timezone.utc)
     canon = canonical(company(root))
     where = {}
     for key, msgs in threads(messages(entries, texts, canon)).items():
@@ -614,7 +722,8 @@ def sources_table(root, project, entries, texts):
         out.append("<tr id='%s'><td><code>%s</code>%s</td><td>%d</td><td>%s</td><td>%s</td><td>%s</td><td>%s</td>"
                    "<td>%s</td><td>%s</td></tr>" % (
                        E(s["id"]), E(s["id"]), " <span class='muted'>(redacted)</span>" if s["redacted"] else "",
-                       s["seq"], _v(origin.get("occurred_at")), _v(canon(origin.get("sender"))), _v(s["role"]),
+                       s["seq"], _rel(origin.get("occurred_at"), now), _who(people, canon(origin.get("sender"))),
+                       _v(s["role"]),
                        _v((s.get("auth") or {}).get("channel")),
                        "considered ×%d" % n if n else "<span class='bad'>not considered</span>", link))
     out.append("</table>")
@@ -626,7 +735,8 @@ def sources_table(root, project, entries, texts):
 
 def route(root, path, agents=None):
     """(status, html) for one GET path."""
-    parts = [unquote(p) for p in urlsplit(path).path.split("/") if p]
+    split = urlsplit(path)
+    parts = [unquote(p) for p in split.path.split("/") if p]
     if not parts:
         return 200, team_page(root, agents)
     if len(parts) >= 3 and parts[0] == "p" and PROJECT_NAME.match(parts[1]) and parts[1] in projects(root):
@@ -634,7 +744,7 @@ def route(root, path, agents=None):
         if what == "threads" and len(parts) == 3:
             return 200, threads_page(root, project)
         if what == "thread" and len(parts) == 4:
-            body = thread_page(root, project, parts[3])
+            body = thread_page(root, project, parts[3], (parse_qs(split.query).get("page") or [None])[-1])
             if body is not None:
                 return 200, body
         if what == "work" and len(parts) == 3:
