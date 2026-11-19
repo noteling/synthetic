@@ -18,13 +18,29 @@ pages need no JavaScript, and a Content-Security-Policy forbids scripts.
 | Path | Shows |
 |---|---|
 | `/` | Team: one block per employee home with the three liveness states, work (title, status, priority, waiting_for, published), waiting-on-David asks (Docket), open questions (first line; relay hops linked on both sides, G3), last 5 sessions (id, status, times, cost, failed tool count), last 5 screen glances (RW-1: time, run, status, element counts, find name → match ×count). Then other people from the company log, then loaded adapters. |
-| `/p/<project>/threads` | Captured conversations, newest first. |
-| `/p/<project>/thread/<key>` | One conversation, both directions in time order, with sender, recipient, time, auth, channel and which home captured it. |
+| `/p/<project>/threads` | Captured conversations, newest first. "About" shows the titles of the conversation's works (G-a1), else its thread ID. |
+| `/p/<project>/thread/<key>` | One conversation, both directions in time order, with sender, recipient, time, auth, channel and which home captured it. Paged at 50 messages (G10): the newest page by default, `?page=N` (1 = oldest) for the others; an out-of-range or malformed N shows the nearest page. |
 | `/p/<project>/work` | Open work (VIS G1): the project's published works that are ready or waiting, grouped by owner name, with status, priority, title, waiting_for, blocked_by, the age of the owner's latest projection, and the count of closed rows (done/cancelled) left to the board. Built from the same backlog rows as the board; unpublished work shows only on the Team page. |
 | `/p/<project>/board` | Board backlog (with blocked_by) and posts. |
 | `/p/<project>/memory` | The M21 project memory view (projectview.render), then its sources (VIS G5): every source the view counts, newest first, with seq, time, sender, role, auth channel, coverage (considered ×N / not considered), a redacted mark, and a link to the thread that shows it. Two captures of one message link to the same thread. Text is never in the table; it stays on the thread page. |
 
 A project with no `log.jsonl` (for example an empty `noteling` store) renders as empty.
+
+## Names, titles and times (VIS lows)
+
+- **Names (G6).** Senders, recipients, thread participants, board owners and post authors, open-question
+  recipients and stuck-message recipients show the company profile name; the raw ID is the tooltip. An address
+  with no profile is shown as it is.
+- **Work titles (G-a1).** A work ID is shown by its title: first from the project's backlog (published works), else
+  from a home's `status.json` works (open works, already shown on the Team page). An unknown work stays an ID.
+- **Times (G9).** Timestamps read "5m ago", "in 2h 3m" or "just now", with the stored timestamp as the tooltip
+  (`<time datetime=…>`). The open-work page's "updated" column keeps its plain age.
+- **Updated (G7).** The Team page work table and the board backlog have an "updated" column: the work's
+  `updated_at` from status.json, and the backlog row's latest projection time.
+- **Stuck outbox (G8).** Under the stuck count, a collapsed table lists the newest stuck messages (as many as the
+  employee's own snapshot shows): message ID, linked question, recipient, kind, state, the channels that route it
+  (or "no channel routes this address") and age. Messages older than 48 hours are counted only. No body is shown or
+  exported.
 
 ## Boundary
 
@@ -36,7 +52,8 @@ Lookout reads only these files. It never opens a SQLite database.
 | Intents, lessons, history, provenance flags | `projects/<p>/log.jsonl` via projectview.render | — |
 | Board backlog and posts | `projects/<p>/log.jsonl` (`backlog`, `post`) | — |
 | Profiles, roles, aliases | `company/log.jsonl` (company fold) | Private views and self notes (`<home>/roster/`) |
-| Work title, status, priority, waiting_for, wake_at, waiting question IDs | `<home>/shared/status.json` | Work description and note |
+| Work title, status, priority, waiting_for, wake_at, waiting question IDs, updated_at | `<home>/shared/status.json` | Work description and note |
+| Stuck outbox items: message ID, recipient, kind, question ID, state, age, routing channel IDs (G8) | `<home>/shared/status.json` (`outbox_stuck.items`) | The message body |
 | Docket asks (first line, ages, ack, hop and the onward question it went via, carried question IDs and askers, blocked works) | `<home>/shared/status.json` | The rest of the question body |
 | Open questions: first line, recipient, age, hop and the onward question it went via (`hop_via`), the askers' questions it carries (`carries`: question ID and asker ID only) | `<home>/shared/status.json` | The rest of the question body; the body of a relayed question |
 | Session id, status, times, cost, event count, failed tool count | `<home>/shared/status.json` | Run summary, error text, transcripts (`<home>/runs/`) |
@@ -59,8 +76,8 @@ from the home's own database (`synthetics/sharedstatus.py`), replacing it atomic
 
 A failed write never fails the operation that triggered it; the next trigger rewrites the file.
 Its fields (v1; fields are added, never renamed): `v, employee, name, role, written_at, pid,
-session {state, run, started_at, paused}, works[], docket, docket_error, questions_open[] (G3 adds hop_via, carries), runs[]
-(newest 10), outbox_stuck {count, older_than_48h}`.
+session {state, run, started_at, paused}, works[] (G7 adds updated_at), docket, docket_error, questions_open[] (G3 adds hop_via, carries), runs[]
+(newest 10), outbox_stuck {count, older_than_48h, items[] (G8)}`.
 
 ## Liveness: three states
 

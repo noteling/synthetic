@@ -101,7 +101,7 @@ class StatusExportTests(_Root):
         self.assertEqual(value["session"], {"state": "idle", "run": None, "started_at": None, "paused": None})
         self.assertEqual([x["id"] for x in value["works"]], [w["id"]])
         self.assertEqual(set(value["works"][0]), {"id", "title", "status", "priority", "waiting_for", "wake_at",
-                                                  "waiting_question_ids", "published"})
+                                                  "waiting_question_ids", "published", "updated_at"})  # G7
         self.assertEqual(value["questions_open"][0]["first_line"], "Should Lookout show summaries?")
         self.assertEqual([r["status"] for r in value["runs"]], ["failed", "finished"])
         self.assertEqual(set(value["runs"][0]), {"id", "status", "started_at", "finished_at", "cost", "events",

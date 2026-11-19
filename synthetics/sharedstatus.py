@@ -9,13 +9,15 @@ message bodies (docs/lookout.md has the boundary table). Docket items carry only
 Fields (v1; add, never rename):
   v, employee, name, role, written_at, pid,
   session {state running|idle, run, started_at, paused: null|{reason, ...}},
-  works [{id, title, status, priority, waiting_for, wake_at, waiting_question_ids, published}]   (not done/cancelled)
+  works [{id, title, status, priority, waiting_for, wake_at, waiting_question_ids, published, updated_at}]
+           (not done/cancelled; updated_at added by VIS G7)
   docket (docket.build JSON for the default human, or null with docket_error)
   questions_open [{id, to, first_line, asked_at, hop, hop_via, carries}]   (G3: hop_via = the onward question
            named by the latest hop notice; carries [{question_id, asker}] = the askers' questions this one relays.
            IDs only, never a relayed body)
   runs [{id, status, started_at, finished_at, cost, events, failed_tool_count}]   (newest 10)
-  outbox_stuck {count, older_than_48h}
+  outbox_stuck {count, older_than_48h, items [{id, to, kind, question_id, state, age_minutes, routed_by}]}
+           (VIS G8: the newest Store.STUCK_ITEMS stuck items, as in the employee's snapshot; never a body)
   glances [{id, run_id, at, ok, exit, status, counts, find, browser}]   (RW-1, newest 5; already whitelisted by
            glance.py: counts and find summary only, never page text, hit labels or frames)
 """
@@ -34,6 +36,7 @@ RUNS = 10
 FILENAME = "status.json"
 PAUSE_KEYS = ("reason", "day", "limit_usd", "cost_usd", "run_id")
 KEEP = object()
+STUCK_KEYS = ("id", "to", "kind", "question_id", "state", "age_minutes", "routed_by")  # VIS G8: never the body
 GLANCE_KEYS = ("id", "run_id", "at", "ok", "exit", "status", "counts", "find", "browser")
 
 
@@ -60,7 +63,7 @@ def build(store, paused=None, now=None):
                           priority=work.get("priority"), waiting_for=work.get("waiting_for") or "",
                           wake_at=work.get("wake_at"),
                           waiting_question_ids=list(work.get("waiting_question_ids") or []),
-                          published=work.get("publish") or None))
+                          published=work.get("publish") or None, updated_at=work.get("updated_at")))
     try:
         dock, dock_error = docket.build(store, now=now), None
     except Exception as exc:  # noqa: BLE001 - e.g. no default_human; the rest of the export still matters
@@ -90,7 +93,8 @@ def build(store, paused=None, now=None):
         session=dict(state="running" if active else "idle", run=active["id"] if active else None,
                      started_at=active.get("started_at") if active else None, paused=_pause(paused)),
         works=works, docket=dock, docket_error=dock_error, questions_open=questions, runs=run_rows,
-        outbox_stuck=dict(count=stuck.get("count", 0), older_than_48h=stuck.get("older_than_48h", 0)),
+        outbox_stuck=dict(count=stuck.get("count", 0), older_than_48h=stuck.get("older_than_48h", 0),
+                          items=[{k: item.get(k) for k in STUCK_KEYS} for item in stuck.get("items") or []]),
         glances=glances)
 
 
