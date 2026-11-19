@@ -138,6 +138,7 @@ class CodexBrain(ClaudeBrain):
         result_path = records / (record_id + ".codex.json")
         error_path = records / (record_id + ".stderr.txt")
         process, reader, feeder, timed_out = None, None, None, False
+        lifecycle_failed = False
         try:
             with tempfile.TemporaryDirectory(prefix=".codex-", dir=str(records)) as temporary:
                 instructions = Path(temporary) / "instructions.md"
@@ -175,10 +176,14 @@ class CodexBrain(ClaudeBrain):
                             process.stdout.close()
                         if process.stdin is not None and (feeder is None or feeder.ident is None):
                             process.stdin.close()
+        except BaseException:
+            lifecycle_failed = True
+            raise
         finally:
             result = reducer.finish()
             reducer.close()
-            outcome = ("timeout" if timed_out else "executor_exit" if process is not None and process.returncode
+            outcome = ("executor_error" if lifecycle_failed else "timeout" if timed_out
+                       else "executor_exit" if process is not None and process.returncode
                        else result.get("error_kind") or ("incomplete" if process is None else None))
             # No raw JSONL, reasoning, tool arguments/results, or provider error text.
             descriptor = os.open(result_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
