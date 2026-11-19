@@ -101,6 +101,15 @@ class BrainResult:
     raw: Optional[Dict[str, Any]] = None
 
 
+def recorded_profile(run):
+    """One profile handoff for every executor (the run record owns the selection).
+
+    Preserve the current record format here; the profile-seam migration also tightens
+    this shared function when it makes the profile key mandatory for recorded runs.
+    """
+    return run.get("profile") if run.get("id") else CURRENT
+
+
 class Brain(Protocol):
     """A replaceable executor; employee state and tool effects belong to Synthetics."""
 
@@ -328,7 +337,7 @@ class ClaudeBrain:
         )
         # #81 L3: the prompt carries the profile this run recorded at run_begin (absent key = none at start), so
         # it can't disagree with the run record; profile.json is read once. No run record → read it now.
-        profile = run.get("profile") if run.get("id") else CURRENT
+        profile = recorded_profile(run)
         command = self.command(run.get("id"), context.get("access_grants"), profile)
         if self.stream_output:
             process = self._run_stream(command, workspace, environment, user_message, output_path, error_path,

@@ -10,7 +10,7 @@ import tempfile
 import threading
 import uuid
 
-from .brain import BrainError, BrainResult, ClaudeBrain, CURRENT, system_prompt
+from .brain import BrainError, BrainResult, ClaudeBrain, CURRENT, recorded_profile, system_prompt
 
 
 def _toml(value):
@@ -128,7 +128,7 @@ class CodexBrain(ClaudeBrain):
         run = context.get("run") or {}
         candidate = str(run.get("id", ""))
         record_id = candidate if candidate and all(c.isalnum() or c in "-_" for c in candidate) else uuid.uuid4().hex
-        profile = run.get("profile") if run.get("id") else CURRENT
+        profile = recorded_profile(run)
         prompt = system_prompt(self.home, profile)
         message = ("Continue your work as the employee described in this snapshot. "
                    "Use Synthetics tools for durable memory, work, questions and communication. "
