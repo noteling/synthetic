@@ -435,5 +435,37 @@ class LaunchReaderTest(unittest.TestCase):
         self.assertFalse(os.path.exists(folders[0]))
 
 
+class ProcessesTest(unittest.TestCase):
+    """glance.processes() lists only this user's processes, so a timeout never targets another account's Noteling."""
+
+    def test_live_list_has_this_process_and_not_another_users(self):
+        rows = dict(glance.processes())
+        self.assertIn(os.getpid(), rows)
+        self.assertIn("python", rows[os.getpid()].lower())
+        if os.getuid() != 0:
+            self.assertNotIn(1, rows)   # launchd runs as root
+
+    def test_only_rows_whose_effective_uid_is_ours(self):
+        app = "/Applications/Noteling.app/Contents/MacOS/Noteling"
+        out = ("  4242   501 %s --read-page --json\n"
+               "  4243   502 %s --read-page --json\n"     # another account's glance
+               "  4244     0 /usr/bin/sudo -v\n"          # our real uid, root effective uid
+               "  4245   501 \n"                          # no args
+               "garbage line\n") % (app, app)
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append(argv)
+            return mock.Mock(stdout=out)
+        with mock.patch.object(glance.os, "getuid", return_value=501), \
+                mock.patch.object(glance.subprocess, "run", run):
+            rows = glance.processes()
+        self.assertEqual(rows, [(4242, app + " --read-page --json"), (4245, "")])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][:3], ["ps", "-U", "501"])
+        self.assertNotIn("-a", " ".join(calls[0]).split())
+        self.assertNotIn("-axo", calls[0])
+
+
 if __name__ == "__main__":
     unittest.main()
