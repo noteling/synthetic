@@ -357,7 +357,7 @@ synthetics --home H authority delegate --parent ROOT --grantee G --action A --sc
 synthetics --home H authority retract ID --reason R
 synthetics --home H authority show [--grantee G]
 synthetics --home H authority policy NAME --body JSON --reason R [--context-ref EVENT] [--by LABEL] [--key K]
-synthetics --home H system-prompt                          # read-only: shipped prompt + host rules for H
+synthetics --home H system-prompt                          # read-only: shipped prompt + role profile + host rules for H
 synthetics --home H authority check ACTION [--project P] [--mode M] [--target-home T] [--item X]
 synthetics --home H authority ops [--all]                  # D14 ledger (default: pending ops)
 synthetics --home H authority settle OP                    # D14 reconcile from evidence; executes nothing

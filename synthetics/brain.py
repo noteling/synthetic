@@ -43,9 +43,17 @@ def host_rules(home):
 
 
 def system_prompt(home):
-    """The shipped employee prompt plus the host rules in force for this home (``host_rules``), then the
-    Byline attribution block when the owner set ``attribution.json`` (#15; "" otherwise)."""
+    """The shipped employee prompt, then the role profile block when the owner set ``profile.json`` ("" otherwise;
+    guidance only, so it comes before the rules that take precedence), then the host rules in force for this home
+    (``host_rules``), then the Byline attribution block when the owner set ``attribution.json`` (#15; "" otherwise).
+
+    Fail closed: an invalid profile.json, or one naming a profile this package does not ship, raises BrainError."""
+    from . import profiles
     system = (Path(__file__).parent / "prompts" / "employee.md").read_text()
+    try:
+        system += profiles.prompt_block(home)
+    except profiles.ProfileError as exc:
+        raise BrainError("role profile unusable: %s" % exc)
     for label, text in host_rules(home):
         system += "\n\nHost rules (" + label + "):\n" + text + "\n"
     from . import byline

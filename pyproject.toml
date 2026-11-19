@@ -18,4 +18,4 @@ synthetics = "synthetics.cli:main"
 include = ["synthetics*"]
 
 [tool.setuptools.package-data]
-synthetics = ["prompts/*.md"]
+synthetics = ["prompts/*.md", "prompts/roles/*.md"]

@@ -157,7 +157,7 @@ ARG_TEXT = frozenset({
 AUDIT_FIELDS = (
     ("authority.", ("actor", "run", "delegation", "chain", "action", "code", "stage", "outcome", "op_id", "label",
                     "target", "what", "self_raise")),
-    ("run.", ("id", "status", "started_at", "finished_at", "cost", "event_ids", "receipt_chain")),
+    ("run.", ("id", "status", "started_at", "finished_at", "cost", "event_ids", "receipt_chain", "profile")),
     ("event.received", ("id", "kind", "sender", "source", "seq", "auth.channel")),
     ("work.", ("id", "status", "priority", "wake_at", "waiting_question_ids")),
     ("roster.view", ("person", "section", "seq")),
@@ -243,6 +243,17 @@ def _set(out, path, value):
     out[parts[-1]] = value
 
 
+PROFILE_KEYS = ("name", "version", "sha256", "error")
+
+
+def profile_fact(value):
+    """A run's role-profile triple for export: only shipped-profile name, version, sha256 (or the error class);
+    never the error detail text. None when absent or not a dict."""
+    if not isinstance(value, dict):
+        return None
+    return {k: value[k] for k in PROFILE_KEYS if k in value and isinstance(value[k], (str, int))}
+
+
 def export_audit(home_id, row):
     data = row["data"]
     line = {"kind": "audit", "home_id": home_id, "seq": row["seq"], "at": row["at"], "action": row["action"],
@@ -257,6 +268,8 @@ def export_audit(home_id, row):
             for name in names:
                 found, value = _pick(parsed, name)
                 chain = name == "receipt_chain" and isinstance(value, dict) and set(value) <= {"head_sha256", "lines", "error"}
+                if found and name == "profile":
+                    value, chain = profile_fact(value), True
                 if found and (_scalar_or_ids(value) or chain):
                     _set(fields, name, value)
             line["fields"] = fields
@@ -314,10 +327,13 @@ def export_runs(home, run=None, since=None, audit=False):
             runs = [r for r in runs if str(r.get("started_at") or "") >= since]
         for record in runs:
             run_id = record.get("id")
-            yield {"kind": "run", "home_id": home_id, "run_id": run_id, "status": record.get("status"),
-                   "started_at": record.get("started_at"), "finished_at": record.get("finished_at"),
-                   "cost": record.get("cost"), "event_ids": record.get("event_ids"),
-                   "receipt_chain": record.get("receipt_chain")}
+            line = {"kind": "run", "home_id": home_id, "run_id": run_id, "status": record.get("status"),
+                    "started_at": record.get("started_at"), "finished_at": record.get("finished_at"),
+                    "cost": record.get("cost"), "event_ids": record.get("event_ids"),
+                    "receipt_chain": record.get("receipt_chain")}
+            if "profile" in record:  # role profile the session started under; runs without one export as before
+                line["profile"] = profile_fact(record["profile"])
+            yield line
             if not isinstance(run_id, str) or not RUN_ID.fullmatch(run_id):
                 continue
             for number, raw, receipt in _receipt_lines(home / "runs" / (run_id + ".mcp.jsonl")) or []:

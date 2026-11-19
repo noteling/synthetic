@@ -181,6 +181,22 @@ def _byline(args, home):
     return 0
 
 
+def _profile(args, home):
+    """Role profiles. set/clear are owner-only (a session cannot choose or change its own defaults) and audited;
+    show is read-only. Never opens a Store."""
+    from . import authority, profiles
+    op = args.profile_command
+    if op == "show":
+        output(profiles.show(home))
+        return 0
+    authority.owner_only("profile " + op)
+    result = profiles.set_config(home, args.name) if op == "set" else profiles.clear_config(home)
+    authority.audit(str(home), "profile." + ("set" if op == "set" else "cleared"),
+                    {"what": "profile " + op, "actor": "owner", "from": result["from"], "to": result.get("to")})
+    output(result)
+    return 0
+
+
 def _doctor_gate(args, home, what="doctor"):
     """G4: the owner is unchanged. A session runs doctor on its own home; on another home H only while it holds
     an active worker.manage / adapter.manage / runtime.request delegation whose homes cover H (audited
@@ -568,6 +584,8 @@ def parser():
     init.add_argument("--human", help="write humans.json naming this human (sender and default_human) for a fresh home")
     init.add_argument("--human-channel", action="append", default=[], dest="human_channels", metavar="PREFIX",
                       help="source prefix of a channel that carries this human's words (repeatable; needs --human)")
+    init.add_argument("--profile", help="role profile for this home (writes profile.json; docs/profiles.md); "
+                      "default: none")
 
     feed = sub.add_parser("feed", help="deliver a message or other event")
     feed.add_argument("body")
@@ -635,8 +653,16 @@ def parser():
     docket_parser.add_argument("--person", help="person ID, name or alias (default: humans.json default_human)")
     docket_parser.add_argument("--format", choices=["text", "json"], default="text")
     sub.add_parser("system-prompt", help="read-only: print the system prompt a new session of this home gets "
-                   "(shipped prompt + host rules + Byline block if attribution.json is set)")
+                   "(shipped prompt + role profile if profile.json is set + host rules + Byline block if "
+                   "attribution.json is set)")
     sub.add_parser("inbox", help="read events awaiting attention")
+    prof = sub.add_parser("profile", help="role defaults: the owner-chosen shipped profile (profile.json) a session "
+                          "of this home starts with (docs/profiles.md)")
+    profs = prof.add_subparsers(dest="profile_command", required=True)
+    profs.add_parser("show", help="read-only: the home's profile (name, version, sha256) and the shipped profiles")
+    pset = profs.add_parser("set", help="owner-only: write <home>/profile.json naming a shipped profile")
+    pset.add_argument("name")
+    profs.add_parser("clear", help="owner-only: remove <home>/profile.json (no role defaults)")
     byl = sub.add_parser("byline", help="#15 Byline: owner-set attribution (attribution.json) on outbound artifacts "
                          "(docs/byline.md)")
     byls = byl.add_subparsers(dest="byline_command", required=True)
@@ -1140,7 +1166,12 @@ def main(argv=None):
         if args.command == "byline":
             # #15 Byline: never opens a Store (identity is read with sqlro).
             return _byline(args, home)
+        if args.command == "profile":
+            return _profile(args, home)
         if args.command == "init":
+            if args.profile is not None:
+                from . import profiles
+                profiles.shipped(args.profile)  # refuse an unknown profile before the home is created
             humans_written = _init_humans(home, args.human, args.human_channels)
             colleague = _human_or_fail(home, args.by or args.human, "--by")
         with Store(home) as store:
@@ -1152,8 +1183,14 @@ def main(argv=None):
                            "Welcome, %s. Your role is %s. %s Read your identity and current situation, introduce yourself through the outbox, and ask for onboarding information you need. Your workspace starts empty. Access to a working copy and company accounts will be provided separately."
                            % (args.name, args.role, args.purpose),
                            kind="onboarding", source="provisioning", external_id="welcome")
-                output({"identity": result, "home": str(home), "workspace": str(home / "workspace"),
-                        "humans": humans_written})
+                shown = {"identity": result, "home": str(home), "workspace": str(home / "workspace"),
+                         "humans": humans_written}
+                if args.profile is not None:
+                    from . import profiles
+                    shown["profile"] = profiles.set_config(home, args.profile)["to"]
+                    store.audit_note("profile.set", "init --profile", {"what": "init --profile", "actor": "owner",
+                                                                      "from": None, "to": shown["profile"]})
+                output(shown)
             else:
                 store.identity()
                 if args.command == "feed":

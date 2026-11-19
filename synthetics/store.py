@@ -3359,6 +3359,10 @@ class Store:
             record = dict(id="run-" + uuid.uuid4().hex, status="running", started_at=now, created_at=now,
                           event_ids=[e["id"] for e in events], events=events, history_sequence=history_sequence,
                           finished_at=None, summary="", error=None, cost=None)
+            from . import profiles
+            prof = profiles.triple(self.home)  # role profile the session starts under; absent without profile.json
+            if prof is not None:
+                record["profile"] = prof
             return self._save("runs", record, "run.started")
 
     def run_get(self, id):
