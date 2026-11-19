@@ -267,6 +267,28 @@ class Evidence(Base):
             started = [r for r in s.audit_list() if r.get("action") == "run.started"]
         self.assertEqual(started[-1]["data"].get("profile"), want)
 
+    def test_export_carries_triple_and_older_runs_export_as_before(self):
+        from synthetics import ledgerline
+        with Store(self.home) as s:
+            old = s.run_begin()
+            s.run_finish(old["id"], "ok")
+        self.write({"v": 1, "profile": "developer"})
+        with Store(self.home) as s:
+            new = s.run_begin()
+            s.run_finish(new["id"], "ok")
+        lines = {l["run_id"]: l for l in ledgerline.export_runs(self.home) if l["kind"] == "run"}
+        self.assertNotIn("profile", lines[old["id"]])
+        self.assertEqual(lines[new["id"]]["profile"]["name"], "developer")
+        self.assertEqual(len(lines[new["id"]]["profile"]["sha256"]), 64)
+        audit = [l for l in ledgerline.export_runs(self.home, audit=True)
+                 if l["kind"] == "audit" and l.get("action") == "run.finished" and l.get("record_id") == new["id"]]
+        self.assertEqual(audit[0]["fields"]["profile"]["name"], "developer")
+        self.write("{broken")
+        with Store(self.home) as s:
+            bad = s.run_begin()
+        line = [l for l in ledgerline.export_runs(self.home, run=bad["id"]) if l["kind"] == "run"][0]
+        self.assertEqual(line["profile"], {"error": "ProfileError"})  # never the detail text
+
     def test_invalid_profile_never_fails_run_begin(self):
         self.write("{broken")
         with Store(self.home) as s:
