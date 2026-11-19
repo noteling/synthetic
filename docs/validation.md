@@ -1,10 +1,63 @@
+# Validation record
+
+Sections from "First increment" down are a dated record of 2026-11-15. Their test counts
+(55, then 64) were true then and are kept as history; they are not the current suite.
+
+## Counting the suite now
+
+Don't copy a count into this file; it drifts with every merge. Count it from the checkout:
+
+```sh
+env -u SYNTHETICS_SESSION_RUN -u SYNTHETICS_HOME python3 -m unittest discover 2>&1 | tail -3
+ls tests/test_*.py | wc -l
+```
+
+Run it outside an employee session (or with those two variables cleared, as above), from the
+checkout root, on both supported interpreters. For orientation only: main `858fb04`
+(2026-11-19) ran 926 tests in 94 `test_*.py` modules on Python 3.9 and 3.14.
+
+## Milestone index
+
+Milestone IDs appear in `design.md`, `authority.md`, the docs below and test docstrings.
+Review evidence for each milestone lives outside source control, under
+`.synthetics/management/<ID>/` (the manager's) and the maintainer's `reviews/<ID>/`.
+"Live check" means a real Claude session, or a real worker or adapter, exercised the change;
+"offline" means only the unittest suite (temporary homes, fake model executables).
+
+| ID | Name | Primary doc | Test modules | Live check |
+|---|---|---|---|---|
+| M01 | Project documentation source in the working day (source-watcher) | `manager-loop.md` | — | Live: accepted after a real live check (`manager-loop.md`) |
+| M02 | Fieldpost: local colleague-message delivery | `manager-loop.md`, `openclaw-gap-review.md` (SG-03) | (Fieldpost's own suite, outside this repo) | Live: in daily use between employee homes |
+| M03 | Human conversation channel (Telegram) | `human-channel.md` | `test_telegram*.py` | Live: in daily use by David |
+| M04 | Telegram responsiveness hotfix | `human-channel.md` | `test_telegram.py` | Offline |
+| M14 | Work completion needs checkable evidence (SG-06) | `design.md` | `test_evidence.py`, `test_evidence_refs.py` | Live: closed live through MCP on Vesper's real home (a bare done refused, done with evidence accepted) |
+| M15 | Usage, daily soft limit, crash-loop guard, stop exit codes (SG-07) | `design.md` | `test_usage.py`, `test_telegram_cli.py` | Live: accepted with the M19 cutover; the daily soft limit is enforced on every running worker |
+| M16 | Absence claims cite a recorded search | `design.md` | `test_evidence.py` | Live: the evaluation ran over Rowan's real onboarding runs (frozen exports), not over unittest |
+| M18 | MG-03 failed tools in recent runs, MG-07 absence guidance | `design.md` | `test_mg03_mg07.py` | Live: audit rows, stuck-message delivery and live `question_resolve` (Vesper), plus the manager's own `question_resolve` |
+| M19 | Runtime requests, idle restart, probation and revert | `authority.md` (relation) | `test_runtime_lifecycle.py`, `test_service_recovery.py` | Live: worker restarts under probation are routine |
+| M21 | Project memory: shared log, capture, promotion, generated view | `design.md` | `test_project_*.py`, `test_projectlog_fold.py` | Live: phase 3 §8 scratch employees on a live-log copy, 12/12 |
+| M22 | Authenticated inputs and recorded deliveries as evidence | `human-channel.md` | `test_auth_channels.py`, `test_evidence.py` | Live: keys deployed; authenticated arrivals on fieldpost and codex-desktop |
+| M23 | Messages may name the recipient's work (MG-02) | `human-channel.md` | `test_work_refs.py` | Live: an authenticated for-work message woke the manager's waiting work |
+| M24 | Memory recall by ID / prefix | `design.md` | `test_memory_recall.py` | Live: Vesper's live check plus the manager's snapshot `memory_index` |
+| M25 | Transport-neutral channel contract, Postern, generic worker install | `channel-contract.md`, `postern.md` | `test_channel_contract.py`, `test_delivery_state.py`, `test_postern.py`, `test_humans_*.py`, `test_worker_install.py`, `test_doctor.py` | Live: P3 legs a-d (30 PASS) and f passed; only leg e, a natural Telegram round trip, is pending |
+| M26 | Roster: self, company profiles, private views | `roster.md` | `test_roster_*.py` | Live: accepted |
+| M27 | Board, stuck-outbox report, question close | `design.md`, `channel-contract.md` §5 | `test_board_*.py`, `test_outbox_stuck.py`, `test_question_close.py` | Live: Board acceptance on the real project log |
+| M28 | Delegated authority ("Warrant") | `authority.md` | `test_authority.py`, `test_worker_install.py` | Live: delegated limit/worker operations by the manager |
+| Docket | Waiting-on-David queue and relay hops | `channel-contract.md` §4.1 | `test_docket.py`, `test_docket_links.py`, `test_hops.py` | Live: deployed, Fieldpost carries hop notices |
+| VIS | Lookout read-only team page | `lookout.md` | `test_lookout.py`, `test_vis_g*.py` | Live: running as `com.synthetics.lookout` |
+| RW-1 | Glance (Noteling screen read) | `glance.md` | `test_glance.py` | Not yet: live P3 waits on a sitting with Noteling 0.10.5 |
+
+SG-01 to SG-09 are the standing gaps in `openclaw-gap-review.md`, not milestones; MG-xx are
+manager-loop gaps. GitHub issue fixes carry their own modules (`test_issue<N>_*.py`).
+Statuses change; the manager's tracker is authoritative for "accepted".
+
 # First increment: validation on 2026-11-15
 
 ## Offline checks
 
 Run `python3 -m unittest discover -v`. The suite uses temporary homes and fake model
 executables; it does not consume model usage or read an employee's actual memory.
-The final run for this increment passed 55 tests.
+The final run for this increment passed 55 tests (count at the time).
 
 It exercises persistent identity and sourced memory, supersession, self-memory under
 heavy project activity, acknowledged source retrieval, event timestamps and duplicate
@@ -85,7 +138,7 @@ Those require subsequent work and observation in the actual employee role.
 
 A subsequent change added durable operator-provisioned read/write scope and exposed
 it through CLI, employee context, and Claude directory configuration. The expanded
-suite passes 64 tests, including canonicalization, persistence, operator-only grants,
+suite passed 64 tests (count at the time), including canonicalization, persistence, operator-only grants,
 revocation, adapter directory arguments, and CLI provisioning.
 
 The new employee chose its own name, Vesper, in a tool-less bootstrap call. That
