@@ -2546,7 +2546,8 @@ class Store:
         # Only currently captured conversations belong in a fresh session. The
         # rest remain durable and can be retrieved explicitly when relevant.
         threads = {thread: self._thread_history(thread, limit=30, run=run) for thread in thread_ids}
-        active_count = sum(not memory.get("superseded_by") for memory in self._all("memories"))
+        active_ids = {memory["id"] for memory in self._all("memories") if not memory.get("superseded_by")}
+        active_count = len(active_ids)
         work, questions = self.work_list("open"), self.question_list("open")
         roster_sections = self._roster_sections(identity, events, work, questions)
         # C1: self_memories is gone from the snapshot. Self-subject memories listed as an ID+gist index
@@ -2556,10 +2557,12 @@ class Store:
         in_self = {m["id"] for m in self_index}
         memories = [m for m in self.memory_search(limit=min(500, 60 + len(in_self))) if m["id"] not in in_self][:60]
         memory_index, index_truncated = self._memory_index(memories + self_index)
+        # Issue #10: truncated means some active memory is in neither `memories` nor the self index.
+        hidden = active_ids - {m["id"] for m in memories} - in_self
         return dict(identity=identity, **roster_sections,
                     entities=self._snapshot_entities(), memories=memories,
                     access_grants=self.access_list(),
-                    memory_count=active_count, memory_context_truncated=active_count > 60,
+                    memory_count=active_count, memory_context_truncated=bool(hidden),
                     memory_index=memory_index, memory_index_truncated=index_truncated,
                     work=work, events=events, threads=threads, questions=questions,
                     recent_runs=[self._failed_tools(r) for r in self.run_list(5)], usage=self.usage(days=3),
