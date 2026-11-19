@@ -51,7 +51,7 @@ LOCK = None
 LOCK_NAME = "synthetics-glance.lock"
 # Unicode control (incl. DEL), format, line- and paragraph-separator categories: never part of a control's
 # name as a person says it (review L3).
-UNPRINTABLE = {"Cc", "Cf", "Zl", "Zp"}
+UNPRINTABLE = {"Cc", "Cf", "Cs", "Zl", "Zp"}
 ROLE = re.compile(r"[A-Za-z]{1,40}\Z")
 BUNDLE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]*(\.[A-Za-z0-9][A-Za-z0-9-]*)+\Z")
 

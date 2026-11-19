@@ -225,6 +225,17 @@ class GlanceToolTest(unittest.TestCase):
             with self.subTest(passes=find):
                 glance.check(find=find)
 
+    def test_a_lone_surrogate_in_find_is_refused_by_check_before_reading(self):
+        # Review N1 on #32: MCP JSON "Add\\ud800" decodes to a lone surrogate (category Cs).
+        # check() must refuse it with its own sentence, before any reader runs or anything is recorded.
+        glance.reader = Fake(report())
+        for find in ("Add\ud800", "\udfffcart"):
+            with self.subTest(find=ascii(find)):
+                with self.assertRaisesRegex(ValueError, "invisible format characters"):
+                    self.server.call("screen_glance", {"find": find})
+        self.assertEqual(glance.reader.calls, [])
+        self.assertEqual(glance.recent(self.store), [])
+
     def test_ordinary_names_roles_and_bundles_pass(self):
         result, fake = self.glance(report(find={"name": "Save - draft", "match": "none", "count": 0,
                                                 "unique": False, "hits": []}, exit_code=1, ok=False),
