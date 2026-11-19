@@ -8,6 +8,7 @@ import sys
 import threading
 import unittest
 from unittest import mock
+from pathlib import Path
 
 from synthetics import answer_desk, sharedstatus
 from synthetics.store import Store
@@ -359,6 +360,149 @@ class JournalBoundTests(P2Base):
                                       now=1000.0 + i)
         self.assertEqual(len(answer_desk.journal(self.root, now=1000.0 + 300)), answer_desk.JOURNAL_MAX)
         self.assertEqual(answer_desk.journal(self.root, now=1000.0 + 300 + answer_desk.JOURNAL_DAYS * 86400), [])
+
+
+
+class LowsTests(P2Base):
+    """Vesper's #71 review L1 (a pending entry that never reached the store cost one lookup + one audit row per
+    view of / for 7 days) and n1 (lookup arguments unbounded before the audit row)."""
+    cli = EventStatusContractTests.cli
+
+    def lookups(self):
+        with Store(self.home) as store:
+            return store.db.execute("SELECT COUNT(*) FROM audit WHERE action='channel.event_lookup'").fetchone()[0]
+
+    def old_pending(self, nonce, kind="answer"):
+        old = answer_desk.time.time() - getattr(answer_desk, "LOST_AFTER", 120) - 1  # getattr: fail-first on fff5085
+        answer_desk.journal_claim(self.root, "rowan", self.question["id"], nonce, kind, "david", None, now=old)
+
+    def test_l1_old_missing_pending_settles_lost_and_stops_looking(self):
+        _, cookie = self.paired()
+        _, nonce, _ = self.form(cookie)
+        self.old_pending(nonce)
+        for _ in range(3):
+            status, _, text = self.request("GET", "/", cookie=cookie)
+            self.assertEqual(status, 200)
+        self.assertEqual(self.lookups(), 1)
+        entry = answer_desk.journal_find(self.root, "rowan", self.question["id"], nonce)
+        self.assertEqual((entry["state"], entry["event_id"]), ("lost", None))
+        self.assertNotIn("Unconfirmed submits", text)
+        self.assertIn("Not received", text)
+
+    def test_l1_young_missing_pending_stays_pending(self):
+        _, cookie = self.paired()
+        _, nonce, _ = self.form(cookie)
+        answer_desk.journal_claim(self.root, "rowan", self.question["id"], nonce, "answer", "david", None)
+        _, _, text = self.request("GET", "/", cookie=cookie)
+        self.assertIn("Unconfirmed submits", text)
+        self.assertEqual(answer_desk.journal_find(self.root, "rowan", self.question["id"], nonce)["state"],
+                         "pending")
+
+    def test_l1_lost_entry_sent_again_is_a_first_send(self):
+        _, cookie = self.paired()
+        _, nonce, token = self.form(cookie)
+        self.old_pending(nonce)
+        self.request("GET", "/", cookie=cookie)
+        status, headers, _ = self.post(cookie, nonce, token)
+        self.assertEqual(status, 303)
+        self.assertEqual(self.stored(), ("answered", "ready", 1))
+        entry = answer_desk.journal_find(self.root, "rowan", self.question["id"], nonce)
+        self.assertEqual(entry["state"], "accepted")
+        self.assertEqual(headers["Location"], "/s/rowan/%s" % entry["event_id"])
+
+    def test_l1_lost_context_after_close_is_refused(self):
+        _, cookie = self.paired()
+        _, nonce, token = self.form(cookie)
+        self.old_pending(nonce, kind="context")
+        self.request("GET", "/", cookie=cookie)
+        with Store(self.home) as store:
+            store.feed("david", "answered on telegram", source="manual", external_id="tg1",
+                       reply_to=self.question["id"])
+        status, _, _ = self.post(cookie, nonce, token, answer=CONTEXT, kind="context")
+        self.assertEqual(status, 409)
+        self.assertEqual(self.desk_events(), [])
+
+    def test_l1_lost_then_found_on_resend_is_the_same_event(self):
+        """An orphaned inbound that landed after the entry settled lost: the resend's lookup finds it."""
+        _, cookie = self.paired()
+        _, nonce, token = self.form(cookie)
+        self.old_pending(nonce)
+        self.request("GET", "/", cookie=cookie)
+        row = answer_desk.contract(self.home, self.key, "inbound", lines=[dict(
+            v=1, kind="message", external_id=answer_desk.external_id(self.question["id"], nonce), sender="david",
+            body=ANSWER, source=answer_desk.SOURCE, question_id=self.question["id"])])
+        status, headers, _ = self.post(cookie, nonce, token)
+        self.assertEqual(status, 303)
+        self.assertEqual(headers["Location"], "/s/rowan/%s" % row["event_id"])
+        self.assertEqual(len(self.desk_events()), 1)
+
+    def test_r1_f1_refused_lookup_keeps_an_old_pending_entry_pending(self):
+        """Vesper's #72 F1: only `not_routed` means "no record"; auth_failed (a rotated key) must not settle lost."""
+        _, cookie = self.paired()
+        _, nonce, _ = self.form(cookie)
+        self.old_pending(nonce)
+        wrong = Path(self.tmp.name) / "wrong.key"
+        wrong.write_text("not-the-channel-key\n")
+        answer_desk.reconcile_pending(self.root, wrong)
+        entry = answer_desk.journal_find(self.root, "rowan", self.question["id"], nonce)
+        self.assertEqual(entry["state"], "pending")
+        answer_desk.reconcile_pending(self.root, self.key)  # the real key: the contract says not_routed
+        self.assertEqual(answer_desk.journal_find(self.root, "rowan", self.question["id"], nonce)["state"], "lost")
+
+    def test_r1_f1_lookup_maps_contract_codes(self):
+        calls = []
+        real = answer_desk.contract
+        for row, want in ((dict(result="rejected", error=dict(code="not_routed")), None),
+                          (dict(result="rejected", error=dict(code="auth_failed")), "unknown"),
+                          (dict(result="rejected", error=dict(code="bad_line")), "unknown"),
+                          (dict(result="rejected", error=dict(code="in_session")), "unknown"),
+                          (dict(v=1, event_id="not-an-event"), "unknown"),
+                          (dict(result="rejected", error=dict(code="no_response")), "no_response"),
+                          (dict(v=1, event_id="event-" + "a" * 32), "event-" + "a" * 32)):
+            answer_desk.contract = lambda *a, row=row, **k: calls.append(a) or row
+            try:
+                self.assertEqual(answer_desk.lookup(self.home, self.key, self.question["id"], "n"), want, row)
+            finally:
+                answer_desk.contract = real
+
+    def test_r1_l1_reconcile_settles_by_compare_and_set(self):
+        """Vesper's #72 L1: a same-form resend accepted (another tab) while reconcile's lookup runs stays accepted."""
+        _, cookie = self.paired()
+        _, nonce, _ = self.form(cookie)
+        self.old_pending(nonce)
+        real = answer_desk.lookup
+        accepted = "event-" + "b" * 32
+
+        def racing(home, key_file, qid, n):
+            answer_desk.journal_settle(self.root, "rowan", qid, n, "accepted", event_id=accepted)
+            return None  # this lookup ran before the resend's inbound landed
+
+        answer_desk.lookup = racing
+        try:
+            answer_desk.reconcile_pending(self.root, self.key)
+        finally:
+            answer_desk.lookup = real
+        entry = answer_desk.journal_find(self.root, "rowan", self.question["id"], nonce)
+        self.assertEqual((entry["state"], entry["event_id"]), ("accepted", accepted))
+
+    def test_r1_n1_resend_of_old_pending_refreshes_at(self):
+        _, cookie = self.paired()
+        _, nonce, _ = self.form(cookie)
+        self.old_pending(nonce)
+        before = answer_desk.journal_find(self.root, "rowan", self.question["id"], nonce)["at"]
+        again = answer_desk.journal_claim(self.root, "rowan", self.question["id"], nonce, "answer", "david", None)
+        self.assertGreater(again["at"], before)
+        self.assertEqual(again["state"], "pending")
+
+    def test_n1_lookup_arguments_are_bounded_before_the_audit(self):
+        cap = getattr(Store, "EVENT_LOOKUP_MAX", 256)  # getattr: fail-first on fff5085
+        for args in (["--source", "lookout:desk", "--external-id", "x" * (cap + 1)],
+                     ["--source", "s" * (cap + 1), "--external-id", "desk:x:1"]):
+            self.assertEqual(self.cli(*args)[1]["error"]["code"], "bad_line")
+        self.assertEqual(self.lookups(), 0)
+        self.assertEqual(self.cli("--source", "lookout:desk", "--external-id", "x" * cap)[1]["error"]["code"],
+                         "not_routed")
+        self.assertEqual(self.lookups(), 1)
 
 
 if __name__ == "__main__":
