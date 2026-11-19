@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 
-from . import capture, roster
+from . import capture, projectview, roster
 from .projects import ProjectError, ProjectStore
 
 PROJECT_NAME = re.compile(r"[a-z0-9][a-z0-9_-]*")
@@ -160,7 +160,7 @@ def _board_read(ps, thread=None, since=None):
             ({k: r.get(k) for k in ("owner", "work_id", "title", "origin", "status", "waiting_for", "priority",
                                     "blocked_by") if k != "blocked_by" or r.get("blocked_by")}
              for r in (st.get("backlog") or {}).values()),
-            key=lambda r: (r.get("priority") is None, r.get("priority") or 0, r["owner"], r["work_id"]))
+            key=lambda r: (projectview.priority_rank(r.get("priority")), r["owner"], r["work_id"]))
     return result
 
 
