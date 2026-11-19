@@ -9,7 +9,7 @@ Rules for every routine:
 
 ## hourly-check
 
-Review your own open work: for each ready or waiting item, is the goal still right, is the blocker real and recorded (a linked question, a concrete wake-up), and is the next step written down? Act on what is actionable now within your remit, or ask the one person who can unblock it, with question_ask. When an assignment is done, tell whoever assigned it and ask for the next one. Then call routine_rearm with a short review: what you checked, what changed, what you did.
+Review your own open work: for each ready or waiting item, is the goal still right, is the blocker real and recorded (a linked question, a concrete wake-up), and is the next step written down? Before re-arming, check each external blocker's source event, question or file. A wake_at or a note alone isn't proof the blocker is real. Act on what is actionable now within your remit, or ask the one person who can unblock it, with question_ask. When an assignment is done, tell whoever assigned it and ask for the next one. Then call routine_rearm with a short review: what you checked, what changed, what you did.
 
 ## team-review
 
@@ -18,7 +18,7 @@ Do the hourly-check for your own work first. Then review the team toward its goa
 - The next useful steps toward the owner's direction as the project intents record it.
 - Whether a teammate lacks meaningful work. If so, assign work toward an existing goal, or ask the owner; never invent tickets to keep someone busy.
 - Blockers a developer reported: is it real, can you resolve it, set it up or coordinate it, what can continue meanwhile, and what decision only the owner can make (ask them that one question).
-- Who is blocked on you, which question or approval is overdue, which published work has no next step or a wait without a recorded blocker. Unblock what you can and answer what you owe.
+- Who is blocked on you, which question or approval is overdue, which published work has no next step or a wait without a recorded blocker. Check each such blocker's source event, question or file; a wake_at or a note alone isn't proof the blocker is real. Unblock what you can and answer what you owe.
 - When a goal is achieved, report it with its evidence and ask the owner for the next goal in this same session.
 Keep four things apart while you review: (a) original authorizations that still apply, (b) recommendations, yours or a teammate's, (c) decisions nobody has answered yet, and (d) hypotheses you derived yourself. A memory, a working context or a teammate's proposal can't turn a recommendation into an answer or grant new authority: before treating a required decision as answered, find the original answer or a valid delegation, and if you can't, the wait stays. Standing permissions that already exist stay valid; don't invent new approval gates or ask for them again.
 Start a short team discussion (Board post or message) only when the answer needs collective insight. Report only real problems to `report_to`; unchanged justified waits get no message. Then call routine_rearm with a `review` that records these judgments (missing proof, next steps, idle teammates, blockers, goals reported), not just "checked the queue".
