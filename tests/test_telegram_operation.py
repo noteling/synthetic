@@ -166,16 +166,22 @@ print(json.dumps({'result':'Handled captured input through durable employee stat
             def await_idle():
                 # A delivered send happens inside the session; its inputs are marked processed only by run_finish
                 # after the brain exits. Stopping earlier interrupts the run and (by design) keeps them pending.
+                # Interrupted-run replay is the documented at-least-once contract, so wait for quiescence, never race it.
                 deadline = time.monotonic() + 15
+                pending, running, exited = [], [], []
                 while time.monotonic() < deadline:
                     with Store(home) as store:
-                        if not store.event_pending() and not any(
-                                run["status"] == "running" for run in store.run_list(limit=50)):
-                            return
-                    if any(process.poll() is not None for process in processes):
+                        pending = store.event_pending()
+                        running = [run["id"] for run in store.run_list(limit=50) if run["status"] == "running"]
+                    if not pending and not running:
+                        return
+                    exited = [(process.pid, process.returncode) for process in processes if process.poll() is not None]
+                    if exited:
                         break
                     time.sleep(0.05)
-                self.fail("Worker did not finish its pending inputs before stop")
+                self.fail("Worker not idle before stop (15 s bound): pending events %s; running runs %s; exited (pid, rc) %s" % (
+                    [(event.get("id"), event.get("kind"), (event.get("body") or "")[:80]) for event in pending],
+                    running, exited))
 
             self.addCleanup(stop)
             for_log_cleanup = lambda: [log.close() for log in logs]
