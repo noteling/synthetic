@@ -450,7 +450,7 @@ class Controller:
         last = store.run_list(1)
         record.update(status="restarting", proposed=proposed, proposed_sha=digest(proposed), old_sha=self.loaded["sha"],
                       label=self.label, pid=self.pid, mode=self.mode,
-                      checkpoint=dict(last_run=last[0]["id"] if last else None, pending_events=len(store.event_pending())))
+                      checkpoint=dict(last_run=last[0]["id"] if last else None, pending_events=store.event_pending_count()))
         # Committed before launchd is asked, so the replacement can reconcile it.
         store.runtime_record(record, "restarting")
         if self.mode == "exit":

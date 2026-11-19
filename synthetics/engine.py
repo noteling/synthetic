@@ -232,7 +232,10 @@ class Engine:
                     except (OSError, ValueError) as exc:  # malformed humans.json: nobody bypasses
                         print("synthetics: humans.json unreadable, no limit bypass: %s" % exc, file=sys.stderr)
                         humans_cfg = capture.empty_humans()
-                    allowed = [e["id"] for e in store.event_pending() if self._admissible_during_limit(e, humans_cfg)]
+                    # Issue #6: scan every pending event, not the 50 oldest, so held peer traffic can't hide an
+                    # admissible input; at most one ordinary batch (50) is admitted.
+                    allowed = [e["id"] for e in store.event_pending_select(
+                        lambda e: self._admissible_during_limit(e, humans_cfg))]
                 if not allowed:
                     return None
                 try:

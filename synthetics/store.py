@@ -2034,6 +2034,30 @@ class Store:
         rows = self.db.execute("SELECT data FROM events WHERE processed_run IS NULL ORDER BY seq LIMIT ?", (limit,))
         return [json.loads(row["data"]) for row in rows]
 
+    def event_pending_count(self):
+        """How many inputs are pending in total (event_pending returns at most its limit)."""
+        return self.db.execute("SELECT COUNT(*) AS n FROM events WHERE processed_run IS NULL").fetchone()["n"]
+
+    def event_pending_select(self, accept, limit=50, page=200):
+        """The oldest `limit` pending events for which accept(event) is true, scanning every pending event in seq
+        order (issue #6: a daily-limit pause must find an admissible input behind any number of held ones)."""
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 10000:
+            raise ValueError("Event limit must be from 1 to 10000.")
+        found, after = [], -1
+        while len(found) < limit:
+            rows = self.db.execute("SELECT seq, data FROM events WHERE processed_run IS NULL AND seq > ? "
+                                   "ORDER BY seq LIMIT ?", (after, page)).fetchall()
+            if not rows:
+                break
+            for row in rows:
+                event = json.loads(row["data"])
+                if accept(event):
+                    found.append(event)
+                    if len(found) == limit:
+                        break
+            after = rows[-1]["seq"]
+        return found
+
     def event_get(self, id):
         """Resolve source references even after an input has been acknowledged."""
         return self._with_auth(self._get("events", self._resolve(_text(id, "id"), "events")))
@@ -2359,10 +2383,19 @@ class Store:
                 raise WorkerHeld("worker.manage %s holds this home's idle boundary until %s"
                                  % (held.get("op"), held.get("expires_at")))
             now = timestamp()
-            events = self.event_pending()
-            if event_ids is not None:
-                wanted = set(event_ids)
-                events = [event for event in events if event["id"] in wanted]
+            if event_ids is None:
+                events = self.event_pending()
+            else:
+                # Exactly the named events that are still pending, in seq order, wherever they sit in the queue
+                # (issue #6: not only those inside the default 50-event window).
+                wanted = list(dict.fromkeys(event_ids))
+                events = []
+                for start in range(0, len(wanted), 500):
+                    chunk = wanted[start:start + 500]
+                    events.extend(self.db.execute(
+                        "SELECT seq, data FROM events WHERE processed_run IS NULL AND id IN (%s)"
+                        % ",".join("?" * len(chunk)), chunk).fetchall())
+                events = [json.loads(row["data"]) for row in sorted(events, key=lambda row: row["seq"])]
             history_sequence = self.db.execute("SELECT COALESCE(MAX(seq),0) AS seq FROM audit").fetchone()["seq"]
             record = dict(id="run-" + uuid.uuid4().hex, status="running", started_at=now, created_at=now,
                           event_ids=[e["id"] for e in events], events=events, history_sequence=history_sequence,
