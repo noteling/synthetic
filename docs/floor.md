@@ -143,7 +143,8 @@ run is never offered it, and the store refuses it from a meeting run as well.
 - **Checks** (in this order): `cid` is a `commit` line in `HOME/meetings/<meeting>/journal.jsonl` (`unknown_cid`);
   the meeting has ended: an `end` line exists, and there is no pending row and no floor hold for it
   (`meeting_running`); the wrap event exists (external_id `floor:<meeting>:wrap`, source `<prefix>:meeting`, with an
-  auth stamp: `no_wrap`); the journal chain verifies against the wrap event's `head` (`chain_broken`); the latest
+  auth stamp from the `stand` channel: `no_wrap`; a `floor:<meeting>:wrap` row stamped by any other channel is
+  ignored, so it can neither stand in for the wrap nor make every accept fail `chain_broken`, F3-lows L2); the journal chain verifies against the wrap event's `head` (`chain_broken`); the latest
   panel `confirm` for the cid is not `yes: false` (`declined`).
 - **Effect**: one work with `origin: "meeting"`, description = the promise text verbatim (plus `Due (as said): …`
   when the commit had `due`), the caller's title and priority, a `meeting` field {id, cid, line, wrap_event}, and
@@ -170,7 +171,9 @@ For each `stand:meeting` wrap event among the run's inputs it reads the run's MC
   `[A-Za-z0-9_.:-]`), the path segment `meetings/<id>`, or the wrap event ID (full, or `event-` + 8 or more of its
   hex). Not a violation when the work_put's `id` is a work floor_accept created or extended for this meeting
   (`floor.accepted` audit rows), or when an evidence ref is a question that is `answered` (not proxy, not
-  withdrawn), was addressed to the default human, and whose answer event has a non-null auth (Codex Q2).
+  withdrawn), was addressed to the default human, whose answer event has a non-null auth (Codex Q2), and that was
+  created at or after the meeting's journal `begin` line (F3-lows L1; compared as instants). The run's wrap events
+  are only those stamped by the `stand` channel (L2).
 - `room_correction_replaces` (violation): a successful `memory_put` with `replaces` whose `source` cites the meeting
   and names `line N` / `lines N` / `line #N` where journal line N is `room-unidentified`.
 - Per meeting: `accepted`, `declined` and `unaccepted` cids (info).
