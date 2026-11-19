@@ -973,6 +973,11 @@ class Store:
                     raise ValueError("%s is a %s routine: %s cannot change through work_put. Re-arm it with routine_rearm "
                                      "(after doing its review); close or restore it with `synthetics routine teardown|restore`."
                                      % (old["id"], old["routine"].get("kind"), " and ".join(changed)))
+                # P2-fix (3): waiting_for naming an open question would link it outside the guarded status/wake args.
+                if isinstance(supplied.get("waiting_for"), str) and re.search(r"\bquestion-[A-Za-z0-9_-]+",
+                                                                             supplied["waiting_for"]):
+                    raise ValueError(self.ROUTINE_LINK % (old["id"], old["routine"].get("kind"), "a question (waiting_for)",
+                                                          "question"))
             record = old.copy() if old else dict(id="work-" + uuid.uuid4().hex, title="", description="", status="ready",
                         waiting_for="", waiting_question_id=None, waiting_question_ids=[], wake_at=None, priority=0, note="", created_at=now)
             record.update(supplied)
@@ -1108,6 +1113,15 @@ class Store:
         """P3: the canonical recipient - the routed identity (to_id) when known, else the address asked."""
         return question.get("to_id") or question["to"]
 
+    @staticmethod
+    def _is_routine(work):
+        """RTN P2-fix: a dedicated routine work (docs/routines.md) moves only via routine_rearm, the engine quarantine
+        or the `routine` CLI; questions, reminders and work refs never change its status or wake_at."""
+        return bool(work) and isinstance(work.get("routine"), dict)
+
+    ROUTINE_LINK = ("%s is a %s routine: %s cannot be linked to it (it changes only through routine_rearm, the "
+                    "quarantine or `synthetics routine`). Link the %s to the real assignment work, or leave it unlinked.")
+
     def _work_view(self, work):
         work.setdefault("waiting_question_id", self._waiting_question(work))
         work.setdefault("waiting_question_ids", self._linked_ids(work))
@@ -1195,6 +1209,10 @@ class Store:
             work = works[0] if works else None
             if question and any(item["status"] in ("done", "cancelled") for item in works):
                 raise ValueError("Cannot block finished work with a question.")
+            for item in works:
+                if question and self._is_routine(item):
+                    raise ValueError(self.ROUTINE_LINK % (item["id"], item["routine"].get("kind"), "a question",
+                                                          "question"))
             links = [self._relay_source(item) for item in payload.get("relays") or []]
             # VIS G3 delta: with no explicit project (and no "" opt-out), a message linked to the sender's own
             # work published to P is tagged P, by "work". Never refuses the send: when P is gone or the sender
@@ -1704,6 +1722,10 @@ class Store:
             ref["reason"] = "unauthenticated"
         elif event["sender"] == self.identity()["id"]:
             ref["reason"] = "own message"
+        elif self._is_routine(work):
+            # P2-fix (4): received as usual; the routine's state is unchanged.
+            ref["reason"] = ("%s routine: changes only through routine_rearm, the quarantine or `synthetics routine`"
+                             % work["routine"].get("kind"))
         elif work["status"] != "waiting":
             ref["reason"] = "work is %s" % work["status"]
         elif work.get("waiting_question_ids"):
@@ -2076,7 +2098,13 @@ class Store:
         self._save("questions", question, action)
         self._queue_hops(question, "answered-pending-relay", answered_at)  # Docket P1b: tell each original asker
         for work, linked in waiting:
-            if question["id"] in linked:
+            if question["id"] in linked and self._is_routine(work):
+                # P2-fix (5): a routine that somehow holds a link loses only the link; status and wake_at stay.
+                rest = [qid for qid in linked if qid != question["id"]]
+                work.update(waiting_question_ids=rest, waiting_question_id=rest[-1] if rest else None,
+                            updated_at=question["answered_at"])
+                self._save("works", work, "work.routine_link_dropped")
+            elif question["id"] in linked:
                 # P2: any linked answer wakes the work; the rest stay open and visible for a cheap re-wait.
                 remaining = [qid for qid in linked if qid != question["id"]
                              and (self._find("questions", qid) or {}).get("status") == "open"]
@@ -2377,7 +2405,10 @@ class Store:
             if previous:
                 return self._get("reminders", previous)
             if work_id:
-                self.work_get(work_id)
+                linked = self.work_get(work_id)
+                if self._is_routine(linked):
+                    raise ValueError(self.ROUTINE_LINK % (work_id, linked["routine"].get("kind"), "a reminder",
+                                                          "reminder"))
             record = dict(payload, id="reminder-" + uuid.uuid4().hex, created_at=timestamp(), fired_at=None)
             self._save("reminders", record, "reminder.set")
             self._key("reminder", key, payload, record["id"])
@@ -2397,7 +2428,8 @@ class Store:
                 if reminder["work_id"]:
                     # Not work_get: its shared_with view field must never be saved into the record.
                     work = self._work_view(self._get("works", reminder["work_id"]))
-                    if work["status"] == "waiting":
+                    # P2-fix (2): a reminder linked before the refusal existed never wakes a routine.
+                    if work["status"] == "waiting" and not self._is_routine(work):
                         work.update(status="ready", waiting_for="", waiting_question_id=None, waiting_question_ids=[], wake_at=None, updated_at=now)
                         self._save("works", work, "work.awakened")
                 count += 1
@@ -2641,6 +2673,18 @@ class Store:
         """D1: inside the run-end transaction, a routine this run captured (its work_due event) that is still
         ready is quarantined: no wake, out of runnable_work, a failure entry that is never removed."""
         captured = {e.get("work_id") for e in run.get("events") or [] if e.get("kind") == "work_due" and e.get("work_id")}
+        # P2-fix (2): any wake kind. A routine this run captured any input for (reminder, work ref), or one that is
+        # ready with no pending input of its own left (nothing else will hand it to a session), counts as left ready.
+        for e in run.get("events") or []:
+            ref = e.get("work_ref") if isinstance(e.get("work_ref"), dict) else {}
+            for work_id in (e.get("work_id"), ref.get("id")):
+                if work_id:
+                    captured.add(work_id)
+        for work in self._routines():
+            if work["status"] != "ready" or work["routine"].get("quarantine") or work["id"] in captured:
+                continue
+            if not self._pending_for_work(work["id"]):
+                captured.add(work["id"])
         stamp = timestamp()
         for work_id in sorted(captured):
             work = self._find("works", work_id)
@@ -2652,6 +2696,12 @@ class Store:
             routine = dict(work["routine"], quarantine=dict(entry, notice=notice),
                            failures=list(work["routine"].get("failures") or []) + [entry])
             self._routine_save(work, routine, stamp, "routine.quarantined")
+
+    def _pending_for_work(self, work_id):
+        """Pending (unprocessed) inputs that name this work: work_due/reminder work_id or a work ref."""
+        row = self.db.execute("SELECT 1 FROM events WHERE processed_run IS NULL AND (json_extract(data,'$.work_id')=? "
+                              "OR json_extract(data,'$.work_ref.id')=?) LIMIT 1", (work_id, work_id)).fetchone()
+        return row is not None
 
     def _quarantine_notice(self, work, entry, stamp):
         """N3: inside the run-end transaction, queue ONE outbox notice per quarantined cycle to routine_route's
