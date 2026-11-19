@@ -267,7 +267,10 @@ provider prefixes or a literal name in the code:
 A home without `humans.json` has no humans. Operators map to secretary, never
 human. The daily-limit bypass needs an authenticated event from a listed sender
 on a listed channel, and the sender must also be allowed by the worker's
-runtime settings. `python3 -m synthetics --home HOME doctor` validates the
+runtime settings. While the limit holds, every pending event is checked (not
+only the oldest 50), so held peer traffic never hides an admissible message;
+one session takes at most the 50 oldest admissible ones (issue #6).
+`python3 -m synthetics --home HOME doctor` validates the
 file. It exits `0` when it found no `error`-level finding, even if it printed
 warnings such as `outbox_stuck`, and `1` when there is at least one error
 (`--json` prints the findings with their `level`); `doctor --compare-legacy FILE` checks that a migrated home behaves as the
