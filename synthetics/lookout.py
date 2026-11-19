@@ -661,8 +661,7 @@ def _by_priority(works):
     """The engine's order (design.md: higher priority first; store.work_list sorts by -priority): higher priority
     first, a missing or non-integer priority last, then the most recently updated first."""
     works = sorted(works, key=lambda w: str(w.get("updated_at") or ""), reverse=True)
-    return sorted(works, key=lambda w: (0, -w["priority"]) if isinstance(w.get("priority"), int)
-                  and not isinstance(w.get("priority"), bool) else (1, 0))
+    return sorted(works, key=lambda w: projectview.priority_rank(w.get("priority")))
 
 
 def _stuck_problems(stuck):
@@ -1017,7 +1016,7 @@ def board_page(root, project, now=None):
     state = projectlog.fold(entries)
     bodies = {e["id"]: (e.get("body") or {}) for e in entries if e["kind"] == "post"}
     out = [_tabs(project, "board"), "<h2>Backlog</h2>"]
-    backlog = sorted(state["backlog"].values(), key=lambda r: (r.get("priority") or 99, r["seq"]))
+    backlog = sorted(state["backlog"].values(), key=lambda r: (projectview.priority_rank(r.get("priority")), r["seq"]))
     if backlog:
         out.append("<table><tr><th>owner</th><th>status</th><th>pri</th><th>title</th><th>waiting for</th>"
                    "<th>blocked by</th><th>updated</th><th>work</th></tr>")
@@ -1068,8 +1067,7 @@ def work_page(root, project, now=None):
     if not open_rows:
         out.append("<p class='muted'>No open published work.</p>")
     for owner in sorted(groups, key=lambda o: (_name(people, o).lower(), o or "")):
-        mine = sorted(groups[owner], key=lambda r: (r.get("priority") if isinstance(r.get("priority"), int) else 99,
-                                                    r["seq"]))
+        mine = sorted(groups[owner], key=lambda r: (projectview.priority_rank(r.get("priority")), r["seq"]))
         out.append("<h2>%s (%d)</h2>" % (E(_name(people, owner)), len(mine)))
         out.append("<table><tr><th>status</th><th>pri</th><th>title</th><th>waiting for</th><th>blocked by</th>"
                    "<th>updated</th></tr>")
