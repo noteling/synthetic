@@ -39,7 +39,8 @@ TOOLS = [
     tool("event_search", "Search original source events across sessions, including processed events. Filter by thread when tracing an ongoing conversation. With since, read in time order with a capped flag (the dream's retrieval).", {
         "query": text_property(), "thread": text_property(),
         "limit": {"type": "integer", "minimum": 1, "maximum": 200},
-        "since": text_property("ISO timestamp with timezone. Only items created at or after it, oldest first, every query word required; the result is {events, since, capped, unread_from}. capped=true means the limit cut the page: unread_from is the created_at of the first item not returned (the next page's since, or an omission's from)."),
+        "since": text_property("ISO timestamp with timezone. Only items created at or after it, oldest first, every query word required; the result is {events, since, capped, unread_from, next_cursor}. capped=true means the limit cut the page: unread_from is the created_at of the first item not returned (an omission's from); pass next_cursor as cursor to read the next page."),
+        "cursor": text_property("next_cursor of the previous since= page: continues strictly after its last item, so items with the same created_at are neither repeated nor skipped."),
     }),
     tool("thread_history", "Read a conversation's incoming messages and your outgoing messages/questions, including processed history. Items are chronological; the first page contains the latest items. Use next_before as before to retrieve older pages. A bound work session excludes inputs outside its captured batch.", {
         "thread": text_property("Stable conversation ID from the incoming event or your outgoing message."),
@@ -50,7 +51,7 @@ TOOLS = [
         "id": text_property(), "name": text_property(), "kind": text_property(), "description": text_property(),
     }, ["id", "name", "kind"]),
     tool("entities", "Find known people, projects, organizations, and concepts.", {"query": text_property()}),
-    tool("memory_put", "Retain a sourced fact, belief, preference, or procedure about an entity. Correct older understanding with replaces. predicate working_context (subject: yourself) is the dream's one bounded working context, shown on its own in every snapshot; only a dream session writes it, replacing the active one.", {
+    tool("memory_put", "Retain a sourced fact, belief, preference, or procedure about an entity. Correct older understanding with replaces. predicate working_context (subject: yourself) is the dream's one bounded working context, shown on its own in every snapshot; only a dream session writes it, replacing the active one, with kind belief or procedure (a reflection, never fact).", {
         "subject": text_property("Existing entity ID, including your identity ID for yourself."),
         "predicate": text_property("What this memory says about the subject."),
         "value": text_property(),
@@ -64,7 +65,8 @@ TOOLS = [
         "include_superseded": {"type": "boolean"},
         "match": {"type": "string", "enum": ["any", "all"],
                   "description": "any (default): every-word matches first, then ranked matches on any distinctive word. all: every word must appear."},
-        "since": text_property("ISO timestamp with timezone. Only items created at or after it, oldest first, every query word required; the result is {memories, since, capped, unread_from}. capped=true means the limit cut the page: unread_from is the created_at of the first item not returned (the next page's since, or an omission's from)."),
+        "since": text_property("ISO timestamp with timezone. Only items created at or after it, oldest first, every query word required; the result is {memories, since, capped, unread_from, next_cursor}. capped=true means the limit cut the page: unread_from is the created_at of the first item not returned (an omission's from); pass next_cursor as cursor to read the next page."),
+        "cursor": text_property("next_cursor of the previous since= page: continues strictly after its last item, so items with the same created_at are neither repeated nor skipped."),
     }),
     tool("work_put", "Create or update ongoing work, including commitments and progress. Pass id to update; omitted fields retain their values. Waiting needs a blocker or future wake-up. A final summary alone does not update work. id, question IDs in waiting_for and evidence refs accept a unique prefix of 8+ hex characters; the full ID is stored.", {
         "title": text_property(), "description": text_property(), "id": text_property(),

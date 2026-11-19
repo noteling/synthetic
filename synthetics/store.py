@@ -633,9 +633,15 @@ class Store:
             previous = self._once("memory", key, payload)
             if previous:
                 return self._get("memories", previous)
-            if predicate == routines_mod().WORKING_CONTEXT:
-                self._check_working_context(subject, value, replaces)
             old = self._get("memories", replaces) if replaces else None
+            reserved = routines_mod().WORKING_CONTEXT
+            if old and old.get("predicate") == reserved and predicate != reserved:
+                # H1: the reserved record is replaced only by another working_context, so the dream guard below
+                # always applies and the pin can't be dropped by an ordinary memory_put(replaces=...).
+                raise ValueError("%s %s is the dream's working context: only a dream session replaces it, with "
+                                 "predicate %s." % (reserved, old["id"], reserved))
+            if predicate == reserved:
+                self._check_working_context(subject, value, replaces, kind)
             same = (lambda x: x == subject or (canonical and roster.fold_alias(x) in self._person_aliases(canonical)))
             if old and (not same(old["subject"]) or old.get("superseded_by")):
                 raise ValueError("Replace an active memory about the same subject.")
@@ -656,7 +662,7 @@ class Store:
                  and m.get("subject") == me and not m.get("superseded_by")]
         return found[-1] if found else None
 
-    def _check_working_context(self, subject, value, replaces):
+    def _check_working_context(self, subject, value, replaces, kind):
         """Addendum (b): working_context is written only by the employee's own dream session, through memory_put;
         one active record, bounded, each new one replacing the last."""
         r = routines_mod()
@@ -669,21 +675,46 @@ class Store:
         if not any(w["routine"]["kind"] == "dream" and r.due_state(w, moment) for w in self._routines()):
             raise ValueError("%s is written by a dream session: this session has no dream routine in "
                              "routines_due." % r.WORKING_CONTEXT)
+        if kind not in r.WORKING_CONTEXT_KINDS:
+            # H3: a reflection derived from reviewed material, never a new fact, evidence or authority.
+            raise ValueError("%s is a derived reflection: kind must be %s, not %s."
+                             % (r.WORKING_CONTEXT, " or ".join(r.WORKING_CONTEXT_KINDS), kind))
         if not isinstance(value, str) or len(value) > r.WORKING_CONTEXT_MAX:
             raise ValueError("%s is text of at most %d characters." % (r.WORKING_CONTEXT, r.WORKING_CONTEXT_MAX))
         current = self._working_context()
+        if replaces and not current:
+            raise ValueError("%s replaces only the active %s; there is none, so leave replaces out."
+                             % (r.WORKING_CONTEXT, r.WORKING_CONTEXT))
         if current and replaces != current["id"]:
             raise ValueError("%s %s is active: pass replaces=%s so only one stays active."
                              % (r.WORKING_CONTEXT, current["id"], current["id"]))
 
     @staticmethod
-    def _since_page(found, since, limit, name):
-        """E1 (P2): a since= retrieval in time order with an explicit capped flag. unread_from is the created_at
-        of the first item not returned: record it as an omission's `from`, or pass it as the next page's since."""
+    def _since_cursor(cursor, tag):
+        """H2: parse a since= page cursor `<tag>|<created_at>|<tie-break>` into (created_at, tie-break)."""
+        parts = cursor.split("|", 2) if isinstance(cursor, str) else []
+        if len(parts) != 3 or parts[0] != tag or not parts[2]:
+            raise ValueError("cursor must be the next_cursor of an earlier %s since= page."
+                             % ("memory_search" if tag == "m" else "event_search"))
+        moment = timestamp(parts[1])
+        if tag == "e":
+            if not parts[2].isdigit():
+                raise ValueError("cursor must be the next_cursor of an earlier event_search since= page.")
+            return moment, int(parts[2])
+        return moment, parts[2]
+
+    @staticmethod
+    def _since_page(found, since, limit, name, tag, tie):
+        """E1 (P2): a since= retrieval in (created_at, tie-break) order with an explicit capped flag. unread_from
+        is the created_at of the first item not returned: record it as an omission's `from`. H2: next_cursor
+        (after the last item returned) continues the read without repeating or skipping items whose created_at
+        ties."""
         page = found[:limit]
         capped = len(found) > limit
+        last = page[-1] if capped else None
         return {name: page, "since": since, "capped": capped,
-                "unread_from": found[limit].get("created_at") if capped else None}
+                "unread_from": found[limit].get("created_at") if capped else None,
+                "next_cursor": "%s|%s|%s" % (tag, last.get("created_at"), tie(last)) if capped else None}
 
     MEMORY_STOPWORDS = frozenset(
         "the and for are was were does did how what which who whom why when where with from that this these those "
@@ -699,13 +730,17 @@ class Store:
         return {token[:5] for token in re.findall(r"[a-z0-9]+", str(text).casefold())
                 if len(token) >= 3 and token not in cls.MEMORY_STOPWORDS}
 
-    def memory_search(self, query="", subject=None, limit=30, include_superseded=False, match="any", since=None):
+    def memory_search(self, query="", subject=None, limit=30, include_superseded=False, match="any", since=None,
+                      cursor=None):
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
             raise ValueError("Memory limit must be from 1 to 500.")
         if match not in ("all", "any"):
             raise ValueError('Memory match must be "all" or "any".')
+        after = self._since_cursor(cursor, "m") if cursor is not None else None
         if since is not None:
             since = timestamp(since)
+        elif after:
+            since = after[0]
         words = query.casefold().split()
         subjects = None
         if subject is not None:
@@ -719,9 +754,11 @@ class Store:
         if since is not None:
             # P2 since=: memories created at or after since, oldest first, every query word required (no ranked
             # any-word fill), so a capped page has a well-defined earliest unread item.
-            found = sorted((m for m in out if str(m.get("created_at", "")) >= since),
-                           key=lambda m: str(m.get("created_at", "")))
-            return self._since_page(found, since, limit, "memories")
+            # H2: ties on created_at are ordered by ID, and a cursor resumes strictly after (created_at, ID).
+            order = (lambda m: (str(m.get("created_at", "")), m["id"]))
+            found = sorted((m for m in out if str(m.get("created_at", "")) >= since
+                            and (after is None or order(m) > after)), key=order)
+            return self._since_page(found, since, limit, "memories", "m", lambda m: m["id"])
         # Fetch by ID: an exact memory ID (or a prefix of 15+ characters) puts
         # that memory ahead of memories that only cite it.
         probe = query.strip().casefold()
@@ -2189,29 +2226,33 @@ class Store:
         """Resolve source references even after an input has been acknowledged."""
         return self._with_auth(self._get("events", self._resolve(_text(id, "id"), "events")))
 
-    def event_search(self, query="", thread=None, limit=50, since=None):
+    def event_search(self, query="", thread=None, limit=50, since=None, cursor=None):
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
             raise ValueError("Event search limit must be from 1 to 500.")
         if not isinstance(query, str):
             raise ValueError("Event search query must be text.")
         words = query.casefold().split()
-        if since is not None:
+        after = self._since_cursor(cursor, "e") if cursor is not None else None
+        if since is not None or after:
             # P2 since=: events received at or after since (created_at), oldest first, with a capped flag.
-            since = timestamp(since)
+            # H2: ordered by (created_at, seq) in SQL, so ties have a stable order and the scan can stop at
+            # limit+1; a cursor resumes strictly after (created_at, seq).
+            since = timestamp(since) if since is not None else after[0]
             found = []
-            for row in self.db.execute("SELECT data FROM events ORDER BY seq"):
+            rows = self.db.execute("SELECT seq, data FROM events WHERE json_extract(data,'$.created_at') >= ? "
+                                   "ORDER BY json_extract(data,'$.created_at'), seq", (since,))
+            for row in rows:
                 event = json.loads(row["data"])
-                if str(event.get("created_at", "")) < since:
+                if after and (str(event.get("created_at", "")), row["seq"]) <= after:
                     continue
                 if thread is not None and event.get("thread") != thread:
                     continue
                 if all(word in _search_text(event).casefold() for word in words):
-                    found.append(event)
+                    found.append(dict(event, _seq=row["seq"]))
                     if len(found) > limit:
                         break
-            found.sort(key=lambda e: str(e.get("created_at", "")))
-            page = self._since_page(found, since, limit, "events")
-            page["events"] = [self._with_auth(e) for e in page["events"]]
+            page = self._since_page(found, since, limit, "events", "e", lambda e: e["_seq"])
+            page["events"] = [self._with_auth({k: v for k, v in e.items() if k != "_seq"}) for e in page["events"]]
             return page
         found = []
         for row in self.db.execute("SELECT data FROM events ORDER BY seq DESC"):
@@ -2627,13 +2668,14 @@ class Store:
         to = route.get("report_to") if route.get("resolved") else None
         if not to:
             return dict(key=key, sent=False, reason=route.get("reason") or "no report_to resolved")
-        body = routines.quarantine_notice(work["routine"]["kind"], work["id"], cycle, entry, self.home)
+        body = routines.quarantine_notice(work["routine"]["kind"], self.identity()["name"])
         payload = dict(to=to, body=body, work_id=work["id"])
         message = dict(payload, id="message-" + uuid.uuid4().hex, sender=self.identity()["id"], kind="message",
                        question_id=None, created_at=stamp)
         self._save("messages", message, "outbox.queued")
         self._key("message", key, payload, message["id"])
-        return dict(key=key, sent=True, message_id=message["id"], to=to)
+        return dict(key=key, sent=True, message_id=message["id"], to=to,
+                    recovery=routines.quarantine_recovery(work["routine"]["kind"], work["id"], self.home))
 
     def routines_due(self, run=None):
         """Every snapshot (A2-C2): routines fired, quarantined or due within 15 min, each with its ready-made
@@ -3006,8 +3048,9 @@ class Store:
         hidden = active_ids - {m["id"] for m in memories} - apart
         return dict(identity=identity, **roster_sections,
                     entities=self._snapshot_entities(), memories=memories,
-                    working_context=(dict(id=working["id"], value=working["value"], created_at=working["created_at"],
-                                          source=working.get("source"), replaces=working.get("replaces"))
+                    working_context=(dict(id=working["id"], kind=working["kind"], value=working["value"],
+                                          created_at=working["created_at"], source=working.get("source"),
+                                          replaces=working.get("replaces"))
                                      if working else None),
                     access_grants=self.access_list(),
                     memory_count=active_count, memory_context_truncated=bool(hidden),

@@ -5,6 +5,7 @@ session only, survives a new Store and 60+ newer memories), one quarantine notic
 `routine restore` consuming the held work_due (n3). The audit-row assertion for n1 lives in
 tests/test_rtn_p1_routines.py SessionFencing."""
 import json, tempfile, unittest
+from unittest import mock
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from types import SimpleNamespace
 from synthetics import routines
 from synthetics.engine import Engine
 from synthetics.mcp import METHODS, Server
+from synthetics import store as store_module
 from synthetics.store import Store, timestamp
 
 
@@ -138,7 +140,8 @@ class WorkingContext(Case):
     """(2) D3: written by the employee's own dream session through memory_put; its own snapshot key."""
 
     def write(self, sess, value, replaces=None):
-        return sess.memory_put(self.me, routines.WORKING_CONTEXT, value, source="dream review", replaces=replaces)
+        return sess.memory_put(self.me, routines.WORKING_CONTEXT, value, kind="belief", source="dream review",
+                               replaces=replaces)
 
     def test_survives_a_new_store_and_more_than_60_newer_memories(self):
         wid = self.dream()
@@ -185,14 +188,14 @@ class WorkingContext(Case):
         second = self.write(sess, "v2", replaces=first["id"])
         self.assertEqual(sess.context()["working_context"]["id"], second["id"])
         with self.assertRaisesRegex(ValueError, "your own"):
-            sess.memory_put("topic", routines.WORKING_CONTEXT, "v", source="s")
+            sess.memory_put("topic", routines.WORKING_CONTEXT, "v", kind="belief", source="s")
         due = [d for d in sess.context()["routines_due"] if d["kind"] == "dream"][0]
         sess.routine_rearm(wid, "dream done", cycle=due["cycle"])
         self.end(run, sess)
 
 
-class QuarantineNotice(Case):
-    """(8) N3: one notice per quarantined cycle via the report route; none repeated, none guessed."""
+class NoticeCase(Case):
+    """A home whose quarantine notices route to the manager alias boss."""
 
     def setUp(self):
         super().setUp()
@@ -212,6 +215,10 @@ class QuarantineNotice(Case):
         self.assertIn(wid, [e.get("work_id") for e in run["events"]])
         return run
 
+
+class QuarantineNotice(NoticeCase):
+    """(8) N3: one notice per quarantined cycle via the report route; none repeated, none guessed."""
+
     def test_finish_sends_once_and_polls_do_not_repeat(self):
         wid = self.seed()
         run = self.capture(wid)
@@ -219,8 +226,8 @@ class QuarantineNotice(Case):
         sent = self.notices(wid)
         self.assertEqual(len(sent), 1)
         self.assertEqual(sent[0]["to"], "boss")
-        self.assertIn("quarantined", sent[0]["body"])
-        self.assertIn("routine restore hourly-check", sent[0]["body"])
+        self.assertIn("needs recovery", sent[0]["body"])
+        self.assertIn("hourly check", sent[0]["body"])
         quarantine = self.s.work_get(wid)["routine"]["quarantine"]
         self.assertEqual(quarantine["notice"]["message_id"], sent[0]["id"])
         for _ in range(3):  # later polls: due_events, snapshot, list, an idle engine
@@ -316,6 +323,124 @@ class DreamSeedAndGuidance(Case):
             self.assertIn(needle, text)
         self.assertNotIn("without building a plan", text)
         self.assertNotRegex(text.lower(), r"(do not|don't|never) (make|build|write) (a )?plans?")
+
+
+class H1ReservedReplace(Case):
+    """H1: replacing the reserved working_context record goes through the dream guard; a predicate-changing
+    replaces= can't supersede it and drop the pin."""
+
+    def test_predicate_changing_replace_is_refused_everywhere(self):
+        wid = self.dream()
+        run, sess = self.session()
+        wc = sess.memory_put(self.me, routines.WORKING_CONTEXT, "v1", kind="belief", source="dream review")
+        with self.assertRaisesRegex(ValueError, "only a dream session replaces it"):
+            sess.memory_put(self.me, "other", "x", source="s", replaces=wc["id"])  # even inside the dream
+        due = [d for d in sess.context()["routines_due"] if d["kind"] == "dream"][0]
+        sess.routine_rearm(wid, "dream done", cycle=due["cycle"])
+        self.end(run, sess)
+        with self.assertRaisesRegex(ValueError, "only a dream session replaces it"):
+            self.s.memory_put(self.me, "other", "x", source="cli", replaces=wc["id"])  # CLI, no run
+        self.s.feed("someone", "hello", external_id="x-h1")
+        run, sess = self.session()  # a later ordinary session (no dream due)
+        with self.assertRaisesRegex(ValueError, "only a dream session replaces it"):
+            sess.memory_put(self.me, "other", "x", source="s", replaces=wc["id"])
+        with self.assertRaisesRegex(ValueError, "dream"):
+            sess.memory_put(self.me, routines.WORKING_CONTEXT, "v2", kind="belief", source="s", replaces=wc["id"])
+        self.end(run, sess)
+        self.assertIsNone(self.s.memory_search(query=wc["id"])[0]["superseded_by"])
+        self.assertEqual(self.s.context()["working_context"]["id"], wc["id"])
+
+    def test_working_context_cannot_supersede_an_ordinary_memory(self):
+        other = self.s.memory_put(self.me, "goal", "ship P2", source="s")
+        self.dream()
+        run, sess = self.session()
+        with self.assertRaisesRegex(ValueError, "none, so leave replaces out"):
+            sess.memory_put(self.me, routines.WORKING_CONTEXT, "v", kind="belief", source="s", replaces=other["id"])
+        self.end(run, sess)
+        self.assertIsNone(self.s.memory_search(query=other["id"])[0]["superseded_by"])
+
+
+class H2SinceTies(Case):
+    """H2: since= pages have a stable (created_at, tie-break) cursor; tied created_at values never loop."""
+
+    FIXED = "2026-11-19T11:30:00.000000Z"
+
+    def frozen(self):
+        real = store_module.timestamp
+        return mock.patch.object(store_module, "timestamp", lambda value=None: self.FIXED if value is None
+                                 else real(value))
+
+    def walk(self, search, name):
+        seen, page, pages = [], search(since="2000-01-01T00:00:00Z", limit=2), 0
+        while True:
+            pages += 1
+            self.assertLess(pages, 10, "since= paging did not terminate")
+            seen += [item["id"] for item in page[name]]
+            if not page["capped"]:
+                self.assertIsNone(page["next_cursor"])
+                return seen
+            self.assertEqual(page["unread_from"], self.FIXED)  # the omission bound is unchanged
+            page = search(cursor=page["next_cursor"], limit=2)
+
+    def test_tied_memories_and_events_are_each_read_exactly_once(self):
+        with self.frozen():
+            mems = [self.s.memory_put("topic", "tied %d" % i, "v", source="t")["id"] for i in range(3)]
+            evs = [self.s.feed("someone", "tied %d" % i, external_id="t-%d" % i)["id"] for i in range(3)]
+        got = self.walk(self.s.memory_search, "memories")
+        self.assertEqual(sorted(got), sorted(mems))
+        self.assertEqual(len(got), len(set(got)))
+        got = self.walk(self.s.event_search, "events")
+        self.assertEqual(got, evs)  # ties in arrival order
+        self.assertEqual(len(got), len(set(got)))
+
+    def test_cursor_is_checked_and_no_since_is_unchanged(self):
+        self.remember(3)
+        with self.assertRaisesRegex(ValueError, "next_cursor"):
+            self.s.memory_search(cursor="e|2026-11-19T11:30:00Z|1")
+        with self.assertRaisesRegex(ValueError, "next_cursor"):
+            self.s.event_search(cursor="nonsense")
+        self.assertIsInstance(self.s.memory_search(limit=2), list)
+        self.assertIsInstance(self.s.event_search(limit=2), list)
+        for name in ("memory_search", "event_search"):
+            self.assertIn("cursor", METHODS[name]["inputSchema"]["properties"])
+
+
+class H3WorkingContextKind(Case):
+    """H3: working_context is a derived reflection: kind belief/procedure, visible with its provenance."""
+
+    def test_fact_is_refused_and_kind_and_source_are_pinned(self):
+        wid = self.dream()
+        run, sess = self.session()
+        with self.assertRaisesRegex(ValueError, "belief or procedure"):
+            sess.memory_put(self.me, routines.WORKING_CONTEXT, "v", source="dream review")  # default fact
+        wc = sess.memory_put(self.me, routines.WORKING_CONTEXT, "v", kind="procedure",
+                             source="dream review of event-1, memory-2")
+        pinned = sess.context()["working_context"]
+        self.assertEqual(pinned["kind"], "procedure")
+        self.assertEqual(pinned["source"], "dream review of event-1, memory-2")
+        self.assertEqual(pinned["id"], wc["id"])
+        due = [d for d in sess.context()["routines_due"] if d["kind"] == "dream"][0]
+        sess.routine_rearm(wid, "dream done", cycle=due["cycle"])
+        self.end(run, sess)
+
+
+class H4BriefNotice(NoticeCase):
+    """H4: the quarantine notice is brief and owner-level; recovery steps live in structured metadata."""
+
+    def test_notice_is_brief_plain_and_recovery_is_metadata(self):
+        wid = self.seed()
+        self.s.run_finish(self.capture(wid)["id"], "done")
+        body = self.notices(wid)[0]["body"]
+        self.assertLessEqual(len(body), 200)
+        self.assertIn("hourly check", body)
+        self.assertIn("A's", body)
+        self.assertIn("Other work continues", body)
+        for leak in ("synthetics", "--home", "/", "routine_rearm", "restore", wid, str(self.home)):
+            self.assertNotIn(leak, body)
+        recovery = self.s.work_get(wid)["routine"]["quarantine"]["notice"]["recovery"]
+        self.assertIn("routine restore hourly-check", recovery["owner"])
+        self.assertIn(str(self.home), recovery["owner"])
+        self.assertIn(wid, recovery["session"])
 
 
 if __name__ == "__main__":

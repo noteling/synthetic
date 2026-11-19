@@ -23,6 +23,7 @@ FAILURE_WINDOW_DAYS = 7
 GUIDANCE_FILE = Path(__file__).with_name("prompts") / "routines.md"
 WORKING_CONTEXT = "working_context"  # D3: the memory predicate the dream writes; the snapshot shows it on its own
 WORKING_CONTEXT_MAX = 4000
+WORKING_CONTEXT_KINDS = ("belief", "procedure")  # H3: a derived reflection, never fact
 
 
 def quarantine_key(work_id, cycle):
@@ -31,12 +32,22 @@ def quarantine_key(work_id, cycle):
     return "routine-quarantine-%s-%s" % (work_id, cycle)
 
 
-def quarantine_notice(kind, work_id, cycle, entry, home):
-    """N3: the deterministic notice text (no model call)."""
-    return ("Routine %s (%s) was quarantined: %s (run %s at %s), cycle %s. It will not fire again until it is "
-            "repaired: the employee's next session re-arms it with routine_rearm after doing the review, or the "
-            "owner runs: synthetics --home %s routine restore %s. doctor shows routine_quarantined until then."
-            % (kind, work_id, entry.get("reason"), entry.get("run"), entry.get("at"), cycle, home, kind))
+LABELS = {"hourly-check": "hourly check", "team-review": "team review", "dream": "daily dream"}
+
+
+def quarantine_notice(kind, name):
+    """N3/H4: the brief owner-level notice (no model call, no commands or paths): which scheduled review failed,
+    that it needs recovery, and that other work continues. Recovery steps live in quarantine_recovery, doctor and
+    docs/routines.md."""
+    return ("%s's scheduled %s did not finish and needs recovery; it stays paused until then. Other work continues."
+            % (name, LABELS.get(kind, kind)))
+
+
+def quarantine_recovery(kind, work_id, home):
+    """H4: structured recovery metadata kept on quarantine.notice (not in the message body)."""
+    return {"session": "routine_rearm(work_id=%s, review, cycle) after doing the review" % work_id,
+            "owner": "synthetics --home %s routine restore %s" % (home, kind),
+            "doctor": "routine_quarantined", "docs": "docs/routines.md"}
 
 
 def parse(value):

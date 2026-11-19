@@ -50,12 +50,15 @@ scheduler and no new database.
 - **Quarantine is never silent (addendum (c)).** It shows in that home's `routines_due`, in `doctor`
   (`routine_quarantined`, `routine_failures`) and on Lookout's Routines block.
 - **One notice per quarantine (P2 N3).** In the same run-end transaction, the home queues one ordinary outbox
-  message from the employee to `report_to` (Manager routing below), naming the routine, the reason, the run and
-  `routine restore KIND`. It is keyed `routine-quarantine-<work id>-<anchor_at>`, so later polls, a worker
+  message from the employee to `report_to` (Manager routing below). It is brief and owner-level (H4): which
+  scheduled review did not finish, that it needs recovery, and that other work continues, e.g. "Rowan's scheduled
+  hourly check did not finish and needs recovery; it stays paused until then. Other work continues." It carries
+  no commands or paths; the recovery steps are in doctor (`routine_quarantined`), this page and
+  `quarantine.notice.recovery {session, owner, doctor, docs}`. It is keyed `routine-quarantine-<work id>-<anchor_at>`, so later polls, a worker
   restart or a second failure of the same cycle send nothing more; a repair (`routine_rearm` or `restore`) moves
   `anchor_at`, so only a fresh quarantine sends a new one. There is no model call and no re-arm. When no
   recipient resolves, nothing is sent and doctor warns `routine_no_manager`. `quarantine.notice` records
-  `{key, sent, message_id | reason}`.
+  `{key, sent, message_id, to, recovery | reason}`.
 - **working_context (addendum (b), D3).** Written only by the employee's own dream session through the normal
   memory path (`memory_put` with `replaces`), never by another home or the CLI. See "The dream" below.
 - **Cost.** A quiet session costs about the same as any single-input session ($0.5-1.7 measured on 11-19).
@@ -152,17 +155,22 @@ lives in the guidance and in the `from` bound.
 The `## dream` section of `synthetics/prompts/routines.md` is the guidance; the mechanics are:
 
 - **Retrieval in time order (since=).** MCP `memory_search(since=S)` and `event_search(since=S)` return
-  `{memories|events, since, capped, unread_from}`: items created at or after S (inclusive, by `created_at`),
-  oldest first, with every query word required (no ranked fill). `capped: true` means the limit cut the page,
-  and `unread_from` is the `created_at` of the first item not returned: the next page's `since`, or the `from`
-  of an omission if the dream stops there. Without `since` both tools behave and return exactly as before.
+  `{memories|events, since, capped, unread_from, next_cursor}`: items created at or after S (inclusive, by
+  `created_at`), oldest first, with every query word required (no ranked fill). Ties on `created_at` are
+  ordered by memory ID or event arrival (`seq`). `capped: true` means the limit cut the page; `unread_from` is
+  the `created_at` of the first item not returned (the `from` of an omission if the dream stops there), and
+  `next_cursor` continues strictly after the last item returned (`cursor=`), so items sharing a timestamp are
+  never repeated or skipped (H2). Without `since` or `cursor` both tools behave and return exactly as before.
 - **Checkpoint.** The dream passes `covered_through` (≤ `evidence_cutoff`, ≤ every omission's `from`) and its
-  omissions to `routine_rearm`, as in "Dream checkpoint" above. Paging from `unread_from` and the inclusive
-  `since` mean a T equal to an omission's `from` re-reads that one item next time and skips nothing.
-- **working_context (D3).** One memory, predicate `working_context`, subject the employee's own identity, at
-  most 4000 characters. `memory_put` accepts it only inside a session whose `routines_due` lists the dream,
-  and, while one is active, only with `replaces=<that id>`; the CLI (no run) is refused. Every snapshot carries
-  it as `working_context {id, value, created_at, source, replaces}` (null when none), outside `memories`,
+  omissions to `routine_rearm`, as in "Dream checkpoint" above. The inclusive `since` means a T equal to an
+  omission's `from` re-reads the items at that timestamp next time and skips nothing.
+- **working_context (D3).** One memory, predicate `working_context`, subject the employee's own identity, kind
+  `belief` or `procedure` (a derived reflection, never `fact`, evidence or authority; H3), at most 4000
+  characters. `memory_put` accepts it only inside a session whose `routines_due` lists the dream, and, while
+  one is active, only with `replaces=<that id>`; the CLI (no run) is refused. The active record can't be
+  superseded any other way: a `replaces=<its id>` with another predicate is refused in every session (H1), and
+  a working_context can't replace an ordinary memory. Every snapshot carries it as
+  `working_context {id, kind, value, created_at, source, replaces}` (null when none), outside `memories`,
   `memory_index` and `memory_context_truncated`, so it survives a worker restart and any number of newer
   memories. The full record also stays retrievable with `memory_search`.
 - **Seeding.** `routine seed --kinds dream [--dream-at HH:MM]` (default 01:30Z, just after the daily-limit
@@ -178,3 +186,7 @@ The `## dream` section of `synthetics/prompts/routines.md` is the guidance; the 
 | D3 working_context consumed by a later session | `test_rtn_p2_dream.WorkingContext` (new Store, 61 newer memories, a real Engine session) |
 | N3 one quarantine notice | `test_rtn_p2_dream.QuarantineNotice` (finish, fail + restart, interrupt + second failure, repair + re-quarantine) |
 | n3 restore consumes the held input | `test_rtn_p2_dream.RestoreConsumesHeldInput` |
+| H1 the reserved record is replaced only by the dream | `test_rtn_p2_dream.H1ReservedReplace` |
+| H2 since= paging with tied `created_at` | `test_rtn_p2_dream.H2SinceTies` |
+| H3 working_context kind and provenance | `test_rtn_p2_dream.H3WorkingContextKind` |
+| H4 brief owner-level quarantine notice | `test_rtn_p2_dream.H4BriefNotice` |
