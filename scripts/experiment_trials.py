@@ -55,6 +55,9 @@ version can be small while keeping the larger goal in view. A human colleague ma
 provide direction, missing history, or review; the employee should own its ongoing
 work and professional judgment.
 """
+# Issue #11: the grader enforces the same bounds the task states ("within ten seconds", "Five seconds").
+RECEIPT_TIMEOUT_SECONDS = 10
+DUPLICATE_WAIT_SECONDS = 5
 TASK = """Improve this Synthetics installation so project documentation reaches the employee
 responsible for it as part of ordinary ongoing work. At present a colleague can write
 a new document in the assigned documentation directory and the employee does not
@@ -268,7 +271,7 @@ def grade_artifact(artifact, destination):
     shutil.copytree(artifact / "workspace", destination / "workspace")
     command = ["/usr/bin/sandbox-exec", "-p", sandbox_profile(destination, grader=True),
                sys.executable, str(ROOT / "scripts" / "experiment_grade.py"), str(destination),
-               "--duplicate-wait", "5"]
+               "--timeout", str(RECEIPT_TIMEOUT_SECONDS), "--duplicate-wait", str(DUPLICATE_WAIT_SECONDS)]
     completed = subprocess.run(command, cwd=str(destination), text=True, capture_output=True, timeout=900)
     (destination / "grader.stdout.txt").write_text(completed.stdout)
     (destination / "grader.stderr.txt").write_text(completed.stderr)
