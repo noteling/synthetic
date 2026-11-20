@@ -229,22 +229,59 @@ def diagnose(home, label=None, compare=None, key_files=(), launchd=_launchd_pid,
                 add("warning", "limit_notify_unroutable", "runtime limit_notify %s is routed by no channel of this "
                     "home (channels: %s)" % (notify, ", ".join(sorted(c.get("id", "?") for c in channels))))
 
-        # An explicit file is inspected without starting a brain or resolving credentials. Otherwise
-        # inspect the persisted selection; malformed files never invent a legacy Claude fallback.
+        # A live worker can reject saved settings and use its pinned baseline. Attribute executor
+        # guarantees to its publication only while its kernel lock and PID still match. The mtime
+        # check also rejects a previous publication when a PID was reused for a new worker lock.
+        status = worker_status(home)
         selection = config
+        selection_source = "saved"
+        if brain_config is None and status["running"]:
+            state = runtime.read_state(home)
+            current_state = False
+            if (state and type(state.get("pid")) is int and state["pid"] == status["pid"]):
+                try:
+                    current_state = ((home / runtime.STATE_FILE).stat().st_mtime_ns
+                                     >= (home / "worker.lock").stat().st_mtime_ns)
+                except OSError:
+                    pass
+            if current_state:
+                try:
+                    selection = runtime.validate(state.get("effective"),
+                                                 allowed_config=state["policy"].get("allowed_config", {}))
+                except ValueError as error:
+                    selection = None
+                    add("error", "runtime_active_invalid", str(error))
+                else:
+                    selection_source = "worker"
+                    report["active_runtime"] = {k: selection.get(k) for k in runtime.FIELDS}
+                    for key in ("brain", "codex", "brain_config", "brain_config_sha256"):
+                        if selection.get(key) is not None:
+                            report["active_runtime"][key] = selection[key]
+                    if config is not None and runtime.digest(config) != runtime.digest(selection):
+                        add("warning", "runtime_saved_differs", "Saved runtime.json differs from the running "
+                            "worker; executor diagnostics describe the running worker's published settings.")
+            else:
+                add("warning", "executor_active_unknown", "The running worker has no matching current runtime "
+                    "publication; executor diagnostics, if present, describe saved settings only.")
+
+        # Explicit files are previews. Loading metadata never starts a brain or resolves credentials.
         configuration = None
         config_path = brain_config if brain_config is not None else (
-            (config or {}).get("brain_config") if (config or {}).get("brain") == "configured" else None)
+            (selection or {}).get("brain_config") if (selection or {}).get("brain") == "configured" else None)
         if config_path is not None:
             from . import brainconfig
             try:
                 configuration = brainconfig.load(config_path)
+                if (brain_config is None and configuration.fingerprint != selection.get("brain_config_sha256")):
+                    raise ValueError("brain_config changed during diagnosis; inspect it again.")
             except ValueError as error:
                 add("error", "brain_config_invalid", str(error))
                 selection = None
             else:
                 report["brain_config"] = configuration.metadata()
-                selection = dict(brain="configured", model=configuration.model)
+                if brain_config is not None:
+                    selection = dict(brain="configured", model=configuration.model)
+                    selection_source = "argument"
         if selection is not None:
             from .brain import executor_capabilities
             backend = selection.get("brain", "claude")
@@ -256,9 +293,10 @@ def diagnose(home, label=None, compare=None, key_files=(), launchd=_launchd_pid,
             else:
                 executable = selection.get("codex" if backend == "codex" else "claude")
                 report["executor"] = dict(executor_capabilities(backend), executable=executable)
+            report["executor"]["source"] = selection_source
             if not report["executor"]["session_budget_cap"]:
                 add("warning", "executor_budget_unsupported", "%s does not enforce the configured $%s session "
-                    "budget; the session timeout still applies." % (backend, (config or {}).get("budget", "unspecified")))
+                    "budget; the session timeout still applies." % (backend, selection.get("budget", "unspecified")))
             if not report["executor"]["usage_cost"]:
                 add("warning", "executor_cost_unavailable", "%s reports token usage, not USD cost. Cost is "
                     "unknown, not zero; the USD daily limit cannot measure these sessions." % backend)
@@ -302,7 +340,6 @@ def diagnose(home, label=None, compare=None, key_files=(), launchd=_launchd_pid,
                     "posts are never a human's words or a limit bypass): %s" % ", ".join(map(str, board_prefixes)))
 
         # worker process and launch agent
-        status = worker_status(home)
         report["worker"] = status
         if label:
             loaded, pid = launchd(label)
@@ -624,7 +661,7 @@ def render(report):
     lines = ["home %s: %s" % (report["home"], "ok" if report.get("ok") else "PROBLEMS")]
     for f in report["findings"]:
         lines.append("  %-7s %s%s" % (f["level"], f["code"], (": " + f["detail"]) if f.get("detail") else ""))
-    for key in ("identity", "profile", "runtime", "executor", "brain_config", "worker", "launch_agent", "relay", "outbox", "capture", "compare_legacy",
+    for key in ("identity", "profile", "runtime", "active_runtime", "executor", "brain_config", "worker", "launch_agent", "relay", "outbox", "capture", "compare_legacy",
                 "roster", "collector"):
         if key in report:
             lines.append("  %s: %s" % (key, json.dumps(report[key], sort_keys=True)))

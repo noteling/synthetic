@@ -6,6 +6,7 @@ Only temporary homes and inert executables are used; no model or launchd job is 
 import hashlib
 import io
 import json
+import os
 import plistlib
 import subprocess
 import sys
@@ -18,6 +19,7 @@ from unittest.mock import patch
 
 from synthetics import brainconfig, doctor, install, runtime
 from synthetics.cli import main, parser
+from synthetics.engine import WorkerLock
 from synthetics.store import Store
 
 
@@ -258,6 +260,67 @@ class ConfiguredControlTests(unittest.TestCase):
         self.assertFalse(report["ok"])
         self.assertNotIn("executor", report)
         self.assertIn("runtime_invalid", {finding["code"] for finding in report["findings"]})
+
+    def test_doctor_uses_running_pinned_selection_when_saved_backend_was_rejected(self):
+        runtime.write_atomic(self.home / runtime.CONFIG_FILE, baseline())
+        controller = runtime.Controller(self.home, self.config)
+        with WorkerLock(self.home):
+            with Store(self.home) as store:
+                controller.start(store)
+            report = self.diagnose()
+        self.assertEqual(report["runtime"]["brain"], "claude")
+        self.assertEqual(report["executor"]["backend"], "configured")
+        self.assertEqual(report["active_runtime"]["brain"], "configured")
+        self.assertEqual(report["executor"]["source"], "worker")
+        self.assertFalse(report["executor"]["live_meetings"])
+        self.assertIn("runtime_saved_differs", {finding["code"] for finding in report["findings"]})
+        self.assert_private(report)
+
+    def test_doctor_ignores_publication_after_worker_stops(self):
+        runtime.write_atomic(self.home / runtime.CONFIG_FILE, baseline())
+        with Store(self.home) as store:
+            runtime.Controller(self.home, self.config).start(store)
+        report = self.diagnose()
+        self.assertEqual(report["executor"]["backend"], "claude")
+        self.assertEqual(report["executor"]["source"], "saved")
+        self.assertNotIn("active_runtime", report)
+
+    def test_doctor_labels_saved_selection_when_running_publication_is_absent_or_stale(self):
+        runtime.write_atomic(self.home / runtime.CONFIG_FILE, baseline())
+        for stale in ("absent", "pid", "reused-pid"):
+            with self.subTest(stale=stale), WorkerLock(self.home):
+                state_path = self.home / runtime.STATE_FILE
+                if stale == "absent":
+                    if state_path.exists():
+                        state_path.unlink()
+                else:
+                    with Store(self.home) as store:
+                        runtime.Controller(self.home, self.config).start(store)
+                    if stale == "pid":
+                        state = runtime.read_state(self.home)
+                        state["pid"] += 1
+                        runtime.write_json(state_path, state)
+                    else:
+                        before_lock = (self.home / "worker.lock").stat().st_mtime_ns - 1000000000
+                        os.utime(state_path, ns=(before_lock, before_lock))
+                report = self.diagnose()
+                self.assertEqual(report["executor"]["backend"], "claude")
+                self.assertEqual(report["executor"]["source"], "saved")
+                self.assertNotIn("active_runtime", report)
+                self.assertIn("executor_active_unknown", {finding["code"] for finding in report["findings"]})
+
+    def test_doctor_invalid_active_pin_never_claims_saved_claude_is_running(self):
+        runtime.write_atomic(self.home / runtime.CONFIG_FILE, baseline())
+        with WorkerLock(self.home):
+            with Store(self.home) as store:
+                runtime.Controller(self.home, self.config).start(store)
+            state = runtime.read_state(self.home)
+            state["policy"]["allowed_config"]["sha256"] = "0" * 64
+            runtime.write_json(self.home / runtime.STATE_FILE, state)
+            report = self.diagnose()
+        self.assertNotIn("executor", report)
+        self.assertIn("runtime_active_invalid", {finding["code"] for finding in report["findings"]})
+        self.assert_private(report)
 
 
 if __name__ == "__main__":
