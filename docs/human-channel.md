@@ -241,21 +241,23 @@ The installed labels are `com.synthetics.telegram.c3467cce258dfd7e` and
 the optional `scripts/human_channel_model_check.py` separately exercises a real
 Claude session and consumes model allocation.
 
-## Several managers in one Telegram chat (#100 P2, not live yet)
+## Several managers in one Telegram chat (#100 P2 + P3, not live until P4)
 
 A config with a `homes` list (`"version": 2`) lets one bot and one `getUpdates` poller serve several employee
-homes. **Not enabled live until the chooser (P3) is merged as well** (Codex F8, R4): with P2 alone, a message
-that isn't a Reply goes to the primary home, so a second home would only receive Replies. Keep the live
-config single-home (today's v1 file, which still runs the unchanged single-home adapter) until then.
+homes. **Not enabled live until P2 and P3 are both merged and running together** (Codex F8, R4); the first
+live two-home config is the P4 check (secretary walk). Until then keep the live config single-home (today's v1
+file, which still runs the unchanged single-home adapter).
 
 ```json
 {"version": 2, "token_file": "token", "credential_file": "telegram.key",
  "state_file": "telegram.state.json", "lock_file": "telegram.lock",
  "homes": [
   {"key": "synthetics", "home": "/abs/manager", "employee_id": "employee-…", "colleague_id": "david",
-   "label": "🟦 Codex · Synthetics", "button": "Synthetics · Codex", "thread": "codex:<uuid>", "primary": true},
+   "label": "🟦 Codex · Synthetics", "button": "🟦 Synthetics · Codex", "shortcut": "c", "thread": "codex:<uuid>",
+   "primary": true},
   {"key": "noteling", "home": "/abs/quill", "employee_id": "employee-…", "colleague_id": "david",
-   "label": "🟨 Quill · Noteling", "button": "Noteling · Quill", "thread": null, "not_before": "<ISO>"}]}
+   "label": "🟨 Quill · Noteling", "button": "🟨 Noteling · Quill", "shortcut": "q", "thread": null,
+   "not_before": "<ISO>"}]}
 ```
 
 - Paths are relative to the config file. Exactly one entry is `primary`; key, home, employee_id, label and
@@ -279,8 +281,9 @@ config single-home (today's v1 file, which still runs the unchanged single-home 
   to a question's part answers that question; if that question is closed, the same
   line is fed again without `question_id`, as ordinary context. `in_reply_to` is the replied-to local message
   (or event) id, else `tg:<message_id>`. A Reply to an unknown target, to a pre-upgrade message that carried no
-  question, or to a home no longer configured is **held** (at most 20, durable) and never guessed; P3's chooser
-  releases held messages. With a single configured home there is nothing to choose, so it goes to that home.
+  question, or to a home no longer configured is **held** (at most 20, durable) and never guessed; the chooser
+  below releases held messages. With a single configured home there is nothing to choose, so it goes to that
+  home.
 - **Provider ids.** When `channel version` lists `inbound.provider`, each fed line carries `provider`
   (`message_id`, `chat_id`, `reply_to_message_id`); against an older Synthetics it is left out (C3).
 - **Upgrade.** The state file moves from schema 3 to 4 on first start: each old `question_map` entry becomes a
@@ -294,7 +297,52 @@ config single-home (today's v1 file, which still runs the unchanged single-home 
   (it was fed a message and has delivered nothing since). No status file: no typing.
 - `telegram install --with-worker --config F` installs the primary home's worker, notifying the primary
   entry's `colleague_id`.
-- `telegram status --config F` on the primary home shows the homes (key, label, primary), schema, held count
-  and route-map size.
+- `telegram status --config F` on the primary home shows the homes (key, label, primary), schema, held count,
+  the selected home's key and route-map size.
 - Limit: an accepted send whose `ack` failed is marked in the local journal (no `acked`) and its claim lapses to
   `uncertain` in that home; nothing is resent, and `channel reconcile` settles it.
+
+### The chooser (#100 P3)
+
+David never has to type a routing word. With two or more homes:
+
+- **Keyboard.** Every message the bot sends to the paired chat (a manager's message on its last part, every
+  `↪ Router` notice) carries a persistent reply keyboard (`is_persistent`, `one_time_keyboard: false`): one
+  button per home, in config order. The **saved selection** has a `✓ ` mark and sets the input placeholder
+  `To: <button>` (`Choose who to talk to` with none). A Quill message delivered while Codex is selected still
+  shows ✓ on Codex. A single-home v2 config sends no keyboard.
+- **Selecting.** Tapping a button sends its text as a message. The adapter treats a message as a selection only
+  when it passed the paired gate (private chat, not a bot, the paired user, the paired chat) and its whole text,
+  trimmed, is exactly a button's text (with or without `✓ `), with no caption, forward, `via_bot`, quote or
+  Reply. It is saved first, never fed to any home, journaled (`route_map` `kind: "select"`, no body), and one
+  Router notice `Talking to: <button>` confirms it. David typing the exact button text himself is the same
+  choice and is treated the same (stated limit).
+- **Plain messages** go to the saved selection. With none (or a selection whose home is gone or re-pinned) the
+  message is held.
+- **Reply** rules are unchanged and win over the selection; a Reply never changes the selection (F6).
+- **Held messages** get one Router notice each, `Held: not sent to any manager yet. Who should get this?`, with
+  inline buttons `sel:<key>:<gen>`. Tapping one, or a keyboard button, saves that selection and feeds every held
+  message to that home in arrival order; each held notice is then edited to `Sent to: <button>` (its buttons go).
+  Over 20 held, the new message is not kept and a distinct Router notice says so.
+- **C1.** A held message's body leaves the state file once it is fed or refused; `held_done` keeps only
+  `update_id`, home, event id, outcome and time (last 200).
+- **Callbacks (C2).** Accepted only from the paired user in the paired chat, not a bot, for a configured key, the
+  current generation (every release starts a new one, so older inline buttons are stale) and a callback id not
+  seen in the last 200. Beyond that window a replay can't arrive: callback updates share the `getUpdates`
+  `update_id` cursor (Telegram does not resend a confirmed update), and the adapter itself never processes an
+  update at or below its saved cursor. Refusals are recorded like other rejections and the button gets a short
+  "out of date" answer.
+- **Optional shortcuts.** A home may set `shortcut` (1-8 `[a-z0-9]`, unique). `for <shortcut>` at the very start
+  of a message (case-insensitive, leading space allowed), followed by end of text, a newline or one of
+  `: , . - —` (a plain space is **not** a separator, so `for quality` and `for c reasons` route nothing):
+  alone it selects like a tap; with content it selects that home and feeds the content with the directive
+  removed, and the line's `provider.directive` keeps the exact removed prefix (prefix + body = what David typed).
+  A Reply to one home with a directive naming another is held for the chooser; agreeing ones route normally.
+  Nothing tells David to use it.
+- **Config check.** A button that would read as a directive, a button equal to a shortcut, a button starting
+  with `✓` or `/`, or one too long for the 64-character placeholder stops the adapter at load with a clear
+  message; nothing is skipped silently.
+- `/to` re-sends the Router notice with the keyboard; `/to <shortcut|key|button>` selects. Optional; no text
+  ever tells David to type it.
+- **Restart** keeps the selection and held messages; the adapter sends nothing by itself on start, and the next
+  bot message refreshes the keyboard.

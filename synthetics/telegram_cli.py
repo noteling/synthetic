@@ -106,6 +106,7 @@ def _homes_status(data, state):
     return {"homes": [{"key": h.get("key"), "label": h.get("label"), "primary": bool(h.get("primary"))}
                       for h in data.get("homes") or [] if isinstance(h, dict)],
             "schema": state.get("schema"), "held": len(state.get("held") or []),
+            "selection": (state.get("selection") or {}).get("key"),
             "route_map": len(state.get("route_map") or {})}
 
 
