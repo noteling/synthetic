@@ -49,6 +49,12 @@ def add_commands(subparsers):
 def _configuration(args, home):
     path = Path(args.config).expanduser().resolve() if args.config else home / "telegram.json"
     data = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(data, dict) and "homes" in data:
+        # #100 P2: a v2 config belongs to its primary home (the --home that serves and installs it).
+        primary = [h for h in data.get("homes") or [] if isinstance(h, dict) and h.get("primary")]
+        if len(primary) != 1 or (path.parent / Path(str(primary[0].get("home"))).expanduser()).resolve() != home:
+            raise ValueError("Channel configuration belongs to another employee home.")
+        return path, data
     if Path(data["employee_home"]).expanduser().resolve() != home:
         raise ValueError("Channel configuration belongs to another employee home.")
     return path, data
@@ -71,6 +77,25 @@ def _start_if_needed(path):
     from .install import start_if_needed
 
     return start_if_needed(path)
+
+
+def _is_homes_config(path):
+    """#100 P2: a config with a ``homes`` list is v2; anything else keeps the single-home adapter unchanged."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and "homes" in data
+
+
+def _homes_status(data, state):
+    """#100 P2 extra status fields for a v2 config (labels and counts only, never bodies)."""
+    if not isinstance(data, dict) or "homes" not in data:
+        return {}
+    return {"homes": [{"key": h.get("key"), "label": h.get("label"), "primary": bool(h.get("primary"))}
+                      for h in data.get("homes") or [] if isinstance(h, dict)],
+            "schema": state.get("schema"), "held": len(state.get("held") or []),
+            "route_map": len(state.get("route_map") or {})}
 
 
 def handle(args, home):
@@ -119,6 +144,9 @@ def handle(args, home):
 
     path, data = _configuration(args, home)
     state_path = Path(data.get("state_file", home / "telegram_state.json")).expanduser().resolve()
+    if isinstance(data, dict) and "homes" in data and data.get("state_file"):
+        # #100 P2: a v2 config's paths are relative to the config file, as HomesAdapter reads them.
+        state_path = (Path(path).parent / Path(data["state_file"]).expanduser()).resolve()
     if args.telegram_command == "status":
         state = json.loads(state_path.read_text()) if state_path.exists() else {}
         counts = {}
@@ -132,12 +160,18 @@ def handle(args, home):
                 "delivery_counts": counts,
                 "feed_rejections": int(state.get("feed_rejections_total") or len(state.get("feed_rejections", []))),
                 "last_feed_rejection": (state.get("feed_rejections") or [None])[-1],
-                "accepted_means": "provider accepted; human reading is unknown"}
+                "accepted_means": "provider accepted; human reading is unknown",
+                **_homes_status(data, state)}
     if args.telegram_command == "serve":
         from .telegram import TelegramAdapter
 
         try:
-            TelegramAdapter(str(path)).run()
+            if _is_homes_config(path):
+                # #100 P2: a v2 config (`homes`) serves several homes through the channel contract.
+                from .telegram_homes import HomesAdapter
+                HomesAdapter(str(path)).run()
+            else:
+                TelegramAdapter(str(path)).run()
         except KeyboardInterrupt:
             return {"stopped": True}
         except Exception as error:
