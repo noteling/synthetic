@@ -33,6 +33,8 @@ class ClaudeBrainTests(unittest.TestCase):
             "args = sys.argv[1:]\n"
             "assert args[args.index('--setting-sources') + 1] == ''\n"
             "assert '--strict-mcp-config' in args\n"
+            "assert 'ToolSearch' in args[args.index('--tools') + 1].split(',')\n"
+            "assert 'ToolSearch' in args[args.index('--allowedTools') + 1].split(',')\n"
             "assert '--no-session-persistence' in args\n"
             "assert '--resume' not in args\n"
             "config = json.loads(args[args.index('--mcp-config') + 1])\n"

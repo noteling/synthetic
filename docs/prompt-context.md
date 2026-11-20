@@ -48,3 +48,9 @@ metadata differences, changed bodies, escaped pointer keys, small inputs and det
 
 Size measurements refer to serialized UTF-8 bytes. They are not a measured token or subscription
 quota saving; executor token telemetry must be compared separately.
+
+Ordinary Claude sessions also make the built-in `ToolSearch` available and permit it in headless
+mode. This lets supported Claude Code versions defer Synthetics tool definitions until needed;
+omitting it from `--tools` would force them to load up front. The strict MCP configuration,
+existing Synthetics tool permissions and run fence still apply. Meeting sessions keep their
+separate restricted tool surface. See [Claude Code tool search](https://code.claude.com/docs/en/mcp#configure-tool-search).

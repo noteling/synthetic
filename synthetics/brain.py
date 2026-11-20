@@ -197,8 +197,8 @@ class ClaudeBrain:
         command = [
             self.executable, "--print", "--output-format"] + output_format + [
             "--system-prompt", system,
-            "--tools", "Read,Write,Edit,Grep,Glob,Bash",
-            "--allowedTools", "Read,Write,Edit,Grep,Glob,Bash,mcp__synthetics__*",
+            "--tools", "Read,Write,Edit,Grep,Glob,Bash,ToolSearch",
+            "--allowedTools", "Read,Write,Edit,Grep,Glob,Bash,ToolSearch,mcp__synthetics__*",
             "--permission-mode", "dontAsk",
             "--setting-sources", "", "--strict-mcp-config",
             "--mcp-config", json.dumps(server),
