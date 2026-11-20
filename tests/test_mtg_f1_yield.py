@@ -84,6 +84,7 @@ class Base(unittest.TestCase):
             store.initialize("Vesper", "maintainer")
             store.channel_register("stand", Store.credential_hash(KEY), ["stand:"], "test")
             store.channel_register("other", Store.credential_hash(OTHER), ["other:"], "test")
+        (self.home / "floor.json").write_text('{"enabled": true}')  # F4: meetings are opt-in per home
         self.key_file = self._key(KEY, "stand.key")
         env = mock.patch.dict(os.environ)
         env.start()

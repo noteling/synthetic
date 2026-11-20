@@ -208,6 +208,14 @@ def diagnose(home, label=None, compare=None, key_files=(), launchd=_launchd_pid,
             add("error", "profile_invalid", "%s: sessions refuse to start until the owner fixes it "
                 "(synthetics profile set NAME, or profile clear)." % prof.get("detail"))
 
+        # MTG Floor opt-in (docs/floor.md F4): floor attach proceeds only when floor.json is enabled.
+        from . import floor
+        floor_state = floor.opt_in_state(home)
+        report["floor"] = {"floor_json": floor_state, "meetings": floor_state == "enabled"}
+        if floor_state == "unreadable":
+            add("warning", "floor_json_unreadable", "%s can't be read as a JSON object; floor attach refuses "
+                "(not_enabled) until the owner fixes or removes it." % floor.OPT_IN)
+
         # runtime.json: validate the selected executor (allowlists are the worker's argv; not checked here).
         config, problem = runtime._read(home / runtime.CONFIG_FILE, None, None)
         limit_allow = []
@@ -661,7 +669,7 @@ def render(report):
     lines = ["home %s: %s" % (report["home"], "ok" if report.get("ok") else "PROBLEMS")]
     for f in report["findings"]:
         lines.append("  %-7s %s%s" % (f["level"], f["code"], (": " + f["detail"]) if f.get("detail") else ""))
-    for key in ("identity", "profile", "runtime", "active_runtime", "executor", "brain_config", "worker", "launch_agent", "relay", "outbox", "capture", "compare_legacy",
+    for key in ("identity", "profile", "floor", "runtime", "active_runtime", "executor", "brain_config", "worker", "launch_agent", "relay", "outbox", "capture", "compare_legacy",
                 "roster", "collector"):
         if key in report:
             lines.append("  %s: %s" % (key, json.dumps(report[key], sort_keys=True)))

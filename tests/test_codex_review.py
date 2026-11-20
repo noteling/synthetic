@@ -168,6 +168,7 @@ class CodexReviewTests(unittest.TestCase):
         self.assert_attach_refused(key, run)
 
     def assert_attach_refused(self, key, run):
+        (self.home / 'floor.json').write_text('{"enabled":true}')
         output = io.StringIO()
         with patch.dict(os.environ):
             os.environ.pop(SESSION_ENV, None)

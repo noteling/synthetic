@@ -47,6 +47,7 @@ Meetings (a `stand:meeting` wrap event among your inputs):
 - A panel `note` line is the human's own words: record it as such, citing the journal line.
 - Room speech (`heard`, speaker room-unidentified) is "said in the meeting, speaker unknown"; never attribute it to a person.
 - Before a room correction replaces a memory, or before a spoken promise without a cid becomes a record, ask the human with question_ask and cite the answered question.
+- After the floor_accept calls, write exactly one memory_put with predicate `meeting summary` and the wrap event ID as source; use a stable key for that meeting so retries return the same memory. Its value names the meeting ID, the journal `meetings/<id>/journal.jsonl` with its line range and the wrap head sha256, what was decided (panel lines by number) and open items. The full transcript stays in the journal; memory keeps only this summary.
 - Never record a promise on anyone else's behalf. `synthetics floor verify RUN` shows what a wrap session recorded about the meeting.
 
 Execution:

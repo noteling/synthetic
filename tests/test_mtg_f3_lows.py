@@ -88,6 +88,7 @@ class L2StandWrapOnly(f3.Base):
         run = self.wrap_run()
         server = self.server(run)
         server.call("floor_accept", {"meeting": "m1", "cid": cid, "title": "Send review notes"})
+        server.call(*self.summary_call())
         with Store(self.home) as store:
             store.run_finish(run, "wrap")
         result = flooraccept.verify(self.home, run)
