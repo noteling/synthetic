@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 
 from . import __version__
@@ -19,7 +20,14 @@ from .store import SESSION_ENV, ChannelError, Store, read_credential_file
 VERSION = 1
 SUPPORTED = (1,)
 INBOUND_FIELDS = ("external_id", "occurred_at", "sender", "body", "source", "thread", "reply_to", "in_reply_to",
-                  "question_id", "recipient_work_id", "project", "kind", "routed")
+                  "question_id", "recipient_work_id", "project", "kind", "routed", "provider")
+# v1 additive features (#100 P1). An adapter sends `provider` or calls `identity` only when `channel version` lists
+# the feature, so it keeps working unchanged against an older Synthetics.
+FEATURES = ("inbound.provider", "identity")
+PROVIDER_MAX_BYTES = 256
+PROVIDER_MAX_KEYS = 8
+PROVIDER_TEXT_MAX = 64
+_PROVIDER_KEY = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 
 
 class UsageFailure(Exception):
@@ -65,12 +73,36 @@ def _opt_text(item, field):
     return value
 
 
+def _provider(item):
+    """#100 P1: optional provider references for the message (e.g. Telegram message_id, reply_to_message_id,
+    chat_id). Transport-neutral: a small flat object of short keys whose values are integers, short text or null.
+    Stored on the event as `provider`; never interpreted by the engine and never echoed by event-status."""
+    value = item.get("provider")
+    if value is None:
+        return None
+    if not isinstance(value, dict) or not value or len(value) > PROVIDER_MAX_KEYS:
+        raise ChannelError("bad_line", "provider must be a nonempty object of at most %d keys" % PROVIDER_MAX_KEYS)
+    for key, ref in value.items():
+        if not _PROVIDER_KEY.match(key):
+            raise ChannelError("bad_line", "provider key %r must match [a-z][a-z0-9_]{0,31}" % key)
+        if ref is None or (isinstance(ref, int) and not isinstance(ref, bool)):
+            continue
+        if isinstance(ref, str) and ref.strip() and len(ref) <= PROVIDER_TEXT_MAX:
+            continue
+        raise ChannelError("bad_line", "provider.%s must be an integer, nonempty text of at most %d characters, "
+                           "or null" % (key, PROVIDER_TEXT_MAX))
+    if len(json.dumps(value, sort_keys=True, ensure_ascii=False).encode("utf-8")) > PROVIDER_MAX_BYTES:
+        raise ChannelError("bad_line", "provider is over %d bytes" % PROVIDER_MAX_BYTES)
+    return value
+
+
 def _inbound_one(store, channel, credential, item):
     for field in ("external_id", "sender", "body", "source"):
         if not isinstance(item.get(field), str) or not item[field].strip():
             raise ChannelError("bad_line", "%s is required nonempty text" % field)
     for field in ("occurred_at", "thread", "reply_to", "in_reply_to", "question_id", "recipient_work_id", "project"):
         _opt_text(item, field)
+    provider = _provider(item)
     kind = item.get("kind") or "message"
     if kind != "message":
         raise ChannelError("bad_line", "kind must be \"message\" in contract v1")
@@ -108,7 +140,7 @@ def _inbound_one(store, channel, credential, item):
                            source=item["source"], external_id=item["external_id"],
                            occurred_at=item.get("occurred_at"), in_reply_to=in_reply_to, credential=credential,
                            recipient_work_id=item.get("recipient_work_id"), project=item.get("project"),
-                           route=route)
+                           route=route, provider=provider)
     except ChannelError:
         raise
     except ValueError as exc:
@@ -139,7 +171,7 @@ def run(args, home, stdin=None, stdout=None):
     stdin, stdout = stdin or sys.stdin, stdout or sys.stdout
     command = args.channel_command
     if command == "version":
-        _emit(stdout, dict(v=VERSION, supported=list(SUPPORTED), synthetics=__version__))
+        _emit(stdout, dict(v=VERSION, supported=list(SUPPORTED), synthetics=__version__, features=list(FEATURES)))
         return 0
     try:
         if os.environ.get(SESSION_ENV):
@@ -200,6 +232,14 @@ def run(args, home, stdin=None, stdout=None):
                     _emit(stdout, store.channel_event_reply(credential, args.event, args.index, args.offset, args.cursor))
                 elif command == "question":
                     _emit(stdout, store.channel_question(credential, args.id))
+                elif command == "identity":
+                    # #100 P1 (Codex F11): the employee this home belongs to, from the home's own identity row,
+                    # so an adapter can pin a configured home to its employee_id. Keyed, read-only.
+                    try:
+                        me = store.identity()
+                    except ValueError as exc:
+                        raise ChannelError("invalid_state", str(exc))
+                    _emit(stdout, dict(v=VERSION, employee_id=me["id"], name=me.get("name"), error=None))
                 else:
                     raise UsageFailure("bad_line", "unknown channel command %s" % command)
             except ChannelError as exc:
@@ -237,6 +277,7 @@ def add_parsers(channel_sub):
     question = keyed("question", "full text of one open question addressed to this home's default_human "
                      "(read-only, audited; #25 answer desk)")
     question.add_argument("--id", required=True)
+    keyed("identity", "employee_id and name of this home's employee (read-only; #100 adapter home pin)")
     pending = keyed("pending", "outbox messages routed to this channel and pending on it")
     pending.add_argument("--limit", type=int, default=50)
     claim = keyed("claim", "claim a pending message before any external side effect")

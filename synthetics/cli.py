@@ -439,7 +439,7 @@ def _delegated_adapter(home, args):
     return install.delegated_adapter(home, args, res["warrant"], refuse)
 
 
-CONTRACT_COMMANDS = ("version", "inbound", "event-status", "event-reply", "question", "pending", "claim", "ack", "reconcile", "uncertain")
+CONTRACT_COMMANDS = ("version", "inbound", "event-status", "event-reply", "question", "identity", "pending", "claim", "ack", "reconcile", "uncertain")
 
 
 def _refuse_in_session(what):

@@ -1705,7 +1705,7 @@ class Store:
 
     def feed(self, sender, body, kind="message", thread=None, reply_to=None, source="manual", external_id=None, occurred_at=None,
              in_reply_to=None, credential=None, recipient_work_id=None, project=None, project_by="feeder",
-             route=None):
+             route=None, provider=None):
         """route: the routed_by label of a relayed answer (channel C1). The question_routed stamp is then
         made inside this feed's transaction, so a rejected feed leaves no stamp (issue #9)."""
         sender, body, source = _text(sender, "sender"), _text(body, "body"), _text(source, "source")
@@ -1723,6 +1723,13 @@ class Store:
         if external_id is not None:
             external_id = _text(external_id, "external_id")
             payload["external_id"] = external_id
+        if provider is not None:
+            # #100 P1: provider message references (channel contract, validated there). Present only when supplied,
+            # so older feed keys still reconcile; part of the idempotency payload, so a redelivery with other refs
+            # is a conflict.
+            if not isinstance(provider, dict):
+                raise ValueError("provider must be an object.")
+            payload["provider"] = dict(provider)
         if recipient_work_id is not None:
             # Present only when supplied, so pre-M23 feed keys still reconcile.
             payload["recipient_work_id"] = _text(recipient_work_id, "recipient_work_id")
