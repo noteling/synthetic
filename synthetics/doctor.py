@@ -163,7 +163,7 @@ def relay_cross_check(home, identity_id, channels, relay_file, relay_channel="fi
 
 
 def diagnose(home, label=None, compare=None, key_files=(), launchd=_launchd_pid, now=None, collector_plists=(),
-             collector_dirs=(), relay_routes=None, relay_channel="fieldpost"):
+             collector_dirs=(), relay_routes=None, relay_channel="fieldpost", brain_config=None):
     from .store import Store
 
     home = Path(home).expanduser().resolve()
@@ -218,16 +218,47 @@ def diagnose(home, label=None, compare=None, key_files=(), launchd=_launchd_pid,
             limit_allow = list(config.get("limit_allow") or [])
             report["runtime"] = {k: config.get(k) for k in ("model", "budget", "timeout", "daily_limit",
                                                             "limit_notify", "limit_allow", "claude")}
+            report["runtime"]["brain"] = config.get("brain", "claude")
+            for key in ("codex", "brain_config", "brain_config_sha256"):
+                if config.get(key) is not None:
+                    report["runtime"][key] = config[key]
+            notify = config.get("limit_notify")
+            channels = _all(db, "channels")
+            if notify and channels and not any(notify in (c.get("routes") or []) for c in channels):
+                # backlog 25: limit/stop alerts and runtime notices to limit_notify would queue forever
+                add("warning", "limit_notify_unroutable", "runtime limit_notify %s is routed by no channel of this "
+                    "home (channels: %s)" % (notify, ", ".join(sorted(c.get("id", "?") for c in channels))))
+
+        # An explicit file is inspected without starting a brain or resolving credentials. Otherwise
+        # inspect the persisted selection; malformed files never invent a legacy Claude fallback.
+        selection = config
+        configuration = None
+        config_path = brain_config if brain_config is not None else (
+            (config or {}).get("brain_config") if (config or {}).get("brain") == "configured" else None)
+        if config_path is not None:
+            from . import brainconfig
+            try:
+                configuration = brainconfig.load(config_path)
+            except ValueError as error:
+                add("error", "brain_config_invalid", str(error))
+                selection = None
+            else:
+                report["brain_config"] = configuration.metadata()
+                selection = dict(brain="configured", model=configuration.model)
+        if selection is not None:
             from .brain import executor_capabilities
-            backend = config.get("brain", "claude")
-            executable = config.get("codex" if backend == "codex" else "claude")
-            report["runtime"].update(brain=backend)
-            if backend == "codex":
-                report["runtime"]["codex"] = executable
-            report["executor"] = dict(executor_capabilities(backend), executable=executable)
+            backend = selection.get("brain", "claude")
+            if configuration is not None:
+                adapter_backend = "codex" if configuration.adapter == "codex-cli" else "claude"
+                executable = configuration.executable
+                report["executor"] = dict(executor_capabilities(adapter_backend), executable=executable)
+                report["executor"].update(configuration.metadata(), backend="configured", live_meetings=False)
+            else:
+                executable = selection.get("codex" if backend == "codex" else "claude")
+                report["executor"] = dict(executor_capabilities(backend), executable=executable)
             if not report["executor"]["session_budget_cap"]:
                 add("warning", "executor_budget_unsupported", "%s does not enforce the configured $%s session "
-                    "budget; the session timeout still applies." % (backend, config.get("budget")))
+                    "budget; the session timeout still applies." % (backend, (config or {}).get("budget", "unspecified")))
             if not report["executor"]["usage_cost"]:
                 add("warning", "executor_cost_unavailable", "%s reports token usage, not USD cost. Cost is "
                     "unknown, not zero; the USD daily limit cannot measure these sessions." % backend)
@@ -239,12 +270,6 @@ def diagnose(home, label=None, compare=None, key_files=(), launchd=_launchd_pid,
                 add("info", "executor_live_meetings_unsupported", "%s supports bounded employee work, not the "
                     "persistent live meeting session. Meeting startup refuses before yielding ordinary work."
                     % backend)
-            notify = config.get("limit_notify")
-            channels = _all(db, "channels")
-            if notify and channels and not any(notify in (c.get("routes") or []) for c in channels):
-                # backlog 25: limit/stop alerts and runtime notices to limit_notify would queue forever
-                add("warning", "limit_notify_unroutable", "runtime limit_notify %s is routed by no channel of this "
-                    "home (channels: %s)" % (notify, ", ".join(sorted(c.get("id", "?") for c in channels))))
             if executable and not os.access(os.path.realpath(os.path.expanduser(executable)), os.X_OK):
                 add("error", backend + "_not_executable", executable)
 
@@ -599,7 +624,7 @@ def render(report):
     lines = ["home %s: %s" % (report["home"], "ok" if report.get("ok") else "PROBLEMS")]
     for f in report["findings"]:
         lines.append("  %-7s %s%s" % (f["level"], f["code"], (": " + f["detail"]) if f.get("detail") else ""))
-    for key in ("identity", "profile", "runtime", "worker", "launch_agent", "relay", "outbox", "capture", "compare_legacy",
+    for key in ("identity", "profile", "runtime", "executor", "brain_config", "worker", "launch_agent", "relay", "outbox", "capture", "compare_legacy",
                 "roster", "collector"):
         if key in report:
             lines.append("  %s: %s" % (key, json.dumps(report[key], sort_keys=True)))
@@ -608,6 +633,7 @@ def render(report):
 
 def add_command(sub):
     p = sub.add_parser("doctor", help="Read-only health check of this home (exit 1 on errors).")
+    p.add_argument("--brain-config", metavar="CONFIG_JSON", help="inspect a connection config without running it")
     p.add_argument("--label", help="Launch agent label to check (com.synthetics.worker.*).")
     p.add_argument("--key-file", action="append", default=[], help="Channel key file to check for 0600 (repeatable).")
     p.add_argument("--compare-legacy", metavar="LEGACY_JSON",

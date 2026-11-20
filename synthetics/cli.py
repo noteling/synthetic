@@ -893,6 +893,8 @@ def parser():
     for name, help_text in [("run", "work for a bounded number of sessions"),
                             ("serve", "stay available; act on events, work, and follow-ups")]:
         runner = sub.add_parser(name, help=help_text)
+        runner.add_argument("--brain-config", metavar="CONFIG_JSON",
+                            help="owner-provisioned executor and model connection JSON; pins selection for this worker")
         runner.add_argument("--brain", choices=["claude", "codex"], default="claude", help="reasoning executor")
         runner.add_argument("--claude", default="claude", help="Claude executable")
         runner.add_argument("--codex", default="codex", help="Codex executable")
@@ -1006,7 +1008,8 @@ def main(argv=None):
             from . import doctor
             report = doctor.diagnose(home, label=args.label, compare=args.compare_legacy, key_files=args.key_file,
                                      collector_plists=args.collector_plist, collector_dirs=args.collector_dir,
-                                     relay_routes=args.relay_routes, relay_channel=args.relay_channel)
+                                     relay_routes=args.relay_routes, relay_channel=args.relay_channel,
+                                     brain_config=args.brain_config)
             print(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) if args.json
                   else doctor.render(report))
             return 0 if report.get("ok") else 1
@@ -1028,6 +1031,9 @@ def main(argv=None):
             return 0
         if args.command in ("run", "serve"):
             from .brain import make_brain
+            from . import runtime
+
+            runtime.check_brain_config_options(args)
 
             # A service manager's normal stop should clean up Claude/MCP children
             # just as Ctrl-C does. SIGKILL recovery uses the durable run fence.
@@ -1036,9 +1042,12 @@ def main(argv=None):
                 stopped_by_signal.append(signum)
                 raise KeyboardInterrupt()
             signal.signal(signal.SIGTERM, terminate)
-            model = args.model or ("claude-opus-5-5" if args.brain == "claude" else "")
+            model = None if args.brain_config is not None else args.model or (
+                "claude-opus-5-5" if args.brain == "claude" else "")
             brain = make_brain(home, brain=args.brain, claude=args.claude, codex=args.codex, model=model,
-                               timeout=args.timeout, budget=args.budget)
+                               timeout=args.timeout, budget=args.budget, brain_config=args.brain_config)
+            if args.brain_config is not None:
+                model = brain.configuration.model
             def update(event):
                 print(json.dumps(event, ensure_ascii=False), file=sys.stderr, flush=True)
             if args.command == "run":
@@ -1046,7 +1055,7 @@ def main(argv=None):
                 output(engine.run(max_turns=args.turns))
                 return 0
             controller = None
-            if args.runtime_config or args.brain == "codex":
+            if args.runtime_config or args.brain == "codex" or args.brain_config is not None:
                 from . import runtime
                 from .service import request_restart
                 if args.runtime_config and Path(args.runtime_config).expanduser().resolve() != home / runtime.CONFIG_FILE:
@@ -1055,11 +1064,16 @@ def main(argv=None):
                 baseline = dict(claude="", model=model, budget=args.budget, timeout=args.timeout,
                                 poll=args.poll, retry=args.retry, daily_limit=args.daily_limit,
                                 limit_notify=args.limit_notify, limit_allow=args.limit_allow)
-                if args.brain == "codex":
+                if args.brain_config is not None:
+                    baseline.update(brain="configured", brain_config=str(brain.configuration.path),
+                                    brain_config_sha256=brain.configuration.fingerprint)
+                elif args.brain == "codex":
                     baseline.update(brain="codex", codex=None)
                 resolution_error = None
                 try:
-                    if args.brain == "claude":
+                    if args.brain_config is not None:
+                        pass  # make_brain already validated the pinned configuration and its executable.
+                    elif args.brain == "claude":
                         baseline["claude"] = resolve_claude(args.claude if args.claude != "claude" else None)
                     else:
                         baseline["codex"] = resolve_codex(args.codex if args.codex != "codex" else None)

@@ -80,7 +80,7 @@ def resolve_codex(explicit=None):
 
 def worker_argv(home, claude, model, budget, timeout, poll=2.0, daily_limit=75.0, limit_notify=None,
                 limit_allow=(), runtime_config=False, allow_model=(), allow_claude=(), python=None,
-                brain="claude", codex=None, allow_codex=()):
+                brain="claude", codex=None, allow_codex=(), brain_config=None):
     """The `serve` argv for a worker plist. Order matches the pre-M25 telegram install."""
     import math
 
@@ -89,11 +89,19 @@ def worker_argv(home, claude, model, budget, timeout, poll=2.0, daily_limit=75.0
             raise ValueError("Worker %s must be positive." % name)
     if not math.isfinite(daily_limit) or daily_limit < 0:
         raise ValueError("Worker daily limit must be zero or positive.")
-    if brain not in ("claude", "codex"):
-        raise ValueError("brain must be claude or codex.")
-    executable = ["--claude", str(Path(claude).absolute())] if brain == "claude" else [
-        "--brain", "codex", "--codex", resolve_codex(codex)]
-    model = model or ("claude-opus-5-5" if brain == "claude" else "")
+    if brain_config is not None:
+        from . import brainconfig
+        if (brain != "claude" or claude not in (None, "", "claude") or codex or model is not None
+                or allow_model or allow_claude or allow_codex):
+            raise ValueError("--brain-config owns executor/model selection; provider/model overrides are not allowed.")
+        configuration = brainconfig.load(brain_config)
+        executable = ["--brain-config", str(configuration.path)]
+    else:
+        if brain not in ("claude", "codex"):
+            raise ValueError("brain must be claude or codex.")
+        executable = ["--claude", str(Path(claude).absolute())] if brain == "claude" else [
+            "--brain", "codex", "--codex", resolve_codex(codex)]
+        model = model or ("claude-opus-5-5" if brain == "claude" else "")
     # An omitted Codex model selects its CLI default. Launch-agent argv deliberately refuses empty
     # strings, so represent that choice by omitting --model rather than an empty argument.
     model_args = ["--model", model] if model else []
@@ -189,6 +197,8 @@ def add_commands(sub):
     ws = worker.add_subparsers(dest="worker_command", required=True)
     inst = ws.add_parser("install", help="write the worker plist and start it (operator)")
     inst.add_argument("--label", help="default: com.synthetics.worker.<sha256(employee id)[:16]>")
+    inst.add_argument("--brain-config", metavar="CONFIG_JSON",
+                      help="owner-provisioned executor and model connection JSON")
     inst.add_argument("--claude", help="Claude executable (default: ~/.local/bin/claude, then PATH)")
     inst.add_argument("--brain", choices=["claude", "codex"], default="claude", help="reasoning executor")
     inst.add_argument("--codex", help="Codex executable (default: PATH)")
@@ -280,11 +290,15 @@ def handle(args, home):
     if args.worker_command != "install":
         return _control("worker", args.worker_command, label, args)
     selected = getattr(args, "brain", "claude")
-    claude = resolve_claude(args.claude) if selected == "claude" else ""
-    codex = resolve_codex(getattr(args, "codex", None)) if selected == "codex" else None
+    configuration_path = getattr(args, "brain_config", None)
+    from .runtime import check_brain_config_options
+    check_brain_config_options(args)
+    claude = resolve_claude(args.claude) if selected == "claude" and configuration_path is None else ""
+    codex = resolve_codex(getattr(args, "codex", None)) if selected == "codex" and configuration_path is None else None
     argv = worker_argv(home, claude, args.model, args.budget, args.timeout, args.poll, args.daily_limit,
                        args.limit_notify, args.limit_allow, args.runtime_config, args.allow_model, args.allow_claude,
-                       brain=selected, codex=codex, allow_codex=getattr(args, "allow_codex", ()))
+                       brain=selected, codex=codex, allow_codex=getattr(args, "allow_codex", ()),
+                       brain_config=configuration_path)
     agents = Path(args.launch_agents_dir).absolute() if args.launch_agents_dir else None
     plist = write_worker(home, label, argv, agents)
     result = {"employee": identity["id"], "label": label, "plist": str(plist), "argv": argv,
@@ -327,9 +341,9 @@ def delegated_install_params(home, args, refuse):
     from . import authority, roster, runtime
     from .store import Store
 
-    if (getattr(args, "brain", "claude") != "claude" or getattr(args, "codex", None)
+    if (getattr(args, "brain_config", None) is not None or getattr(args, "brain", "claude") != "claude" or getattr(args, "codex", None)
             or getattr(args, "allow_codex", None)):
-        refuse("executor_owner_only", "Codex worker installation and executor allow-lists are owner-only; "
+        refuse("executor_owner_only", "Configured/Codex worker installation and executor allow-lists are owner-only; "
                "a delegated worker install preserves the provisioned Claude executor.")
     if args.model is None:
         args.model = "claude-opus-5-5"
