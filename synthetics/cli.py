@@ -847,6 +847,14 @@ def parser():
     which.add_argument("--since", help="runs started at or after this ISO timestamp")
     expr.add_argument("--audit", action="store_true", help="also export audit rows (allow-listed fields + data_sha256)")
     expr.add_argument("--out", help="write to this file (0600) instead of stdout")
+    homep = sub.add_parser("home", help="Satchel (docs/satchel.md): extract this home into one archive with secrets "
+                                        "masked, or verify an archive; operator only")
+    homes_ = homep.add_subparsers(dest="home_command", required=True)
+    hext = homes_.add_parser("extract", help="write satchel-<id>-<stamp>.tar into --out (read-only on the home)")
+    hext.add_argument("--out", required=True, help="existing directory for the finished archive")
+    hext.add_argument("--timeout", type=float, default=None, help="snapshot timeout in seconds (default 600)")
+    hver = homes_.add_parser("verify", help="check an archive: sums, database, row counts, run chains, masks")
+    hver.add_argument("archive")
     proj = sub.add_parser("project", help="project memory (M21): bindings, capture, grants, redaction, export")
     ps = proj.add_subparsers(dest="project_command", required=True)
     pbind = ps.add_parser("bind", help="capture a thread/source into project P from now on (allowed in a session; "
@@ -1203,6 +1211,15 @@ def main(argv=None):
                                                               "actor": a["id"], "run": a["run"],
                                                               "dry_run": bool(args.dry_run)})
             return 0
+        if args.command == "home":
+            _refuse_in_session("home %s" % args.home_command)
+            from . import satchel
+            if args.home_command == "extract":
+                output(satchel.extract(home, args.out, timeout=args.timeout or satchel.DEFAULT_TIMEOUT))
+                return 0
+            report = satchel.verify(args.archive)
+            output(report)
+            return 0 if report["ok"] else 1
         if args.command == "export" or (args.command == "routine" and args.routine_command == "verify"):
             # i17 Ledgerline: read-only (sqlro, never a Store), fenced exactly like doctor (C5).
             what = "export runs" if args.command == "export" else "routine verify"
