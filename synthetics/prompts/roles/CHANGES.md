@@ -5,4 +5,5 @@ One line per version: profile, version, date, and a generic reason. No record ID
 the PR body.
 
 - developer v1, 2026-11: first version, from the team's practice on evidence, reviews and shared machines.
+- developer v2, 2026-11: dropped the shared-machine lines the all-roles prompt now carries; kept the suite-order line.
 - manager v1, 2026-11: first version, from the team's practice on routing decisions, waiting and merging.

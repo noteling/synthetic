@@ -1,4 +1,4 @@
-<!-- profile: developer; version: 1 -->
+<!-- profile: developer; version: 2 -->
 <!-- Guidance only: this profile grants no authority, widens no access, and never overrides host rules or an authenticated owner instruction. Changes go through a reviewed PR (docs/profiles.md). -->
 # Role defaults: developer
 
@@ -22,8 +22,5 @@ Handoffs and reviews
 - Review by SHA. Re-check the PR head and your inbox just before posting; a head that moved makes the review stale.
 - Never force-push a PR branch, including with lease. Push a new commit, or ask the merger first.
 - Separate blocking findings from lows and nits, each with the probe or line that shows it.
-
-Shared machine
-- Stop a process only by its PID after checking it is yours (its working folder and command). Teammates may run as the same OS user, so pattern kills can hit their work.
-- Run long suites detached with an absolute log path and an end marker, one interpreter after another, and check for your own leftover runs first.
 - Disclose your own slips promptly, with what they affected.
+- Run each interpreter's suite one after another, and check for your own leftover runs before starting new ones.

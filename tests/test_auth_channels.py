@@ -276,7 +276,7 @@ class BrainSessionEnvTests(unittest.TestCase):
             env.pop(SESSION_ENV, None)
             env.pop("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", None)
             with mock.patch.dict(os.environ, env, clear=True):
-                result = ClaudeBrain(home, executable=str(script)).run({"run": {"id": "run-abc"}})
+                result = ClaudeBrain(home, executable=str(script)).run({"run": {"id": "run-abc", "profile": None}})
             self.assertEqual(result.summary, "ok")
 
     def test_cli_subprocess_refuses_in_session(self):

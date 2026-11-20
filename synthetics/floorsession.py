@@ -84,11 +84,11 @@ class MeetingSession:
     def recorded_profile(self):
         """#81 L3: the role profile meeting_run_begin recorded for this run (None: none at its start), so a restart
         of the CLI mid-meeting keeps the same block and the prompt matches the run record."""
-        from .brain import CURRENT
+        from .brain import recorded_profile
         from .store import Store
         with Store(self.home) as store:
             run = store._find("runs", self.run_id)
-        return CURRENT if run is None else run.get("profile")  # no run row (a bare session in tests): read now
+        return recorded_profile(run)  # no run row (a bare session in tests): read now; row without the key: refuse
 
     def command(self):
         base = ClaudeBrain(self.home, executable=self.executable, model=self.model, budget=self.budget)
