@@ -333,7 +333,10 @@ David never has to type a routing word. With two or more homes:
   manager David chooses.
 - **A failed release** (the home's store refuses for a moment) keeps that message and the rest held. A tapped
   inline button's callback id is recorded only after its release finished, and the generation moves on only
-  then, so Telegram's redelivery of the same tap finishes the job instead of being refused as a replay.
+  then, so Telegram's redelivery of the same tap finishes the job instead of being refused as a replay; the
+  redelivery does not send `Talking to:` a second time. A directive with content waits the same way: if an
+  earlier held message can't be released, the new content is not fed either (the update is retried), so it never
+  jumps ahead of what was held before it.
 - **C1.** A held message's body leaves the state file once it is fed or refused; `held_done` keeps only
   `update_id`, home, event id, outcome and time (last 200).
 - **Callbacks (C2).** Accepted only from the paired user in the paired chat, not a bot, for a configured key, the
