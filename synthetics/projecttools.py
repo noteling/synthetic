@@ -63,7 +63,9 @@ TOOLS = [
           ["project", "entries", "key"]),
     _tool("project_memory_get",
           "Read one project record or source entry, bounded to ~8 KB: claims, each claim's current head, nearest "
-          "history and a quote excerpt. part='quote' pages a source's full bytes with cursor.",
+          "history and a quote excerpt; for a lesson also applies_when, uncertainty and its evidence refs. "
+          "evidence_truncated flags omitted evidence notes or refs; evidence_count keeps the stored count. "
+          "part='quote' pages a source's full bytes with cursor.",
           {"project": PROJECT, "id": _text("pm-… record or source ID."), "history": _int(0, 20),
            "cursor": _int(0), "part": {"type": "string", "enum": ["quote"]}, "as_of": AS_OF},
           ["project", "id"]),
