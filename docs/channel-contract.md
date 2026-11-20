@@ -97,8 +97,12 @@ an employee session.
 ## 2. Common rules
 
 - Every request and response line carries `"v": 1`. `channel version` (no key)
-  prints `{"v":1,"supported":[1],"synthetics":"…"}`. A future v2 adds
+  prints `{"v":1,"supported":[1],"synthetics":"…","features":[…]}`. A future v2 adds
   commands or fields; v1 lines keep working while `supported` lists 1.
+- `features` lists additive v1 pieces (#100 P1): `inbound.provider` (the inbound
+  `provider` field, §3) and `identity` (§3.3). An adapter uses one only when it is
+  listed, so the same adapter keeps working against an older Synthetics, whose
+  version line has no `features` at all.
 - Every other command needs `--key-file`. The key selects the channel record.
 - Exit status: `0` when every line was processed, including per-line
   rejections; `2` for a whole-command failure (`auth_failed`, `in_session`,
@@ -145,6 +149,7 @@ One request line per message:
 | `routed` | no | `true` only: see §3.1 |
 | `recipient_work_id` | no | the receiving employee's work this concerns (M23) |
 | `project` | no | single-project tag for unbound channels (M21) |
+| `provider` | no | provider message references, e.g. `{"message_id": 41, "reply_to_message_id": 40, "chat_id": 7}` (#100 P1, feature `inbound.provider`) |
 | `kind` | no | `"message"` (the only v1 kind) |
 
 One response line per request line, in order:
@@ -152,6 +157,12 @@ One response line per request line, in order:
 ```json
 {"v":1,"external_id":"…","result":"accepted|duplicate|rejected","event_id":"event-…|null","error":null}
 ```
+
+`provider` is a flat object of 1 to 8 keys matching `[a-z][a-z0-9_]{0,31}`; each value is an
+integer, nonempty text of at most 64 characters, or null; the whole object is at most 256 UTF-8
+bytes. Anything else is `bad_line`. It is stored on the event as `provider`, takes part in the
+idempotency check (the same `external_id` with other refs is `conflict`), is never interpreted by
+the engine and is never echoed by `event-status`. It never answers a question or wakes work.
 
 Every accepted event is stamped `auth: {channel: …}`. Redelivering the same
 `(source, external_id)` with the same content returns `duplicate` and the
@@ -243,6 +254,18 @@ being answered; `status.json` carries only the first line.
 - A key from another home is `auth_failed` (exit 2, no audit row); inside an
   employee session it is `in_session`.
 - A consumer must not log or cache the body.
+
+### 3.3 The home's employee (`channel identity`, #100 P1)
+
+```sh
+channel identity --key-file KEY
+```
+
+prints `{"v": 1, "employee_id": "employee-…", "name": "…", "error": null}` from the home's
+own identity record. An adapter that serves several homes pins each configured home to its
+`employee_id` and refuses to run that home on a mismatch. Keyed like every command (another
+home's key is `auth_failed`, exit 2) and refused inside an employee session. Read-only; feature
+`identity`.
 
 ## 4. Outbound
 
