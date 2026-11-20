@@ -88,6 +88,17 @@ def _is_homes_config(path):
     return isinstance(data, dict) and "homes" in data
 
 
+def _worker_colleague(path):
+    """The paired human a worker installed with ``--with-worker`` notifies and lets through a limit pause.
+
+    v1: the config's ``colleague_id``. v2 (#100, Rowan #104 nit): the primary entry's ``colleague_id``; the worker
+    installed here is the primary home's (_configuration already checked that). Empty when there is none."""
+    config = json.loads(Path(path).read_text()) if Path(path).exists() else {}
+    if isinstance(config, dict) and "homes" in config:
+        config = next((h for h in config.get("homes") or [] if isinstance(h, dict) and h.get("primary")), {})
+    return (config.get("colleague_id") if isinstance(config, dict) else None) or ""
+
+
 def _homes_status(data, state):
     """#100 P2 extra status fields for a v2 config (labels and counts only, never bodies)."""
     if not isinstance(data, dict) or "homes" not in data:
@@ -222,7 +233,7 @@ def handle(args, home):
                                  ROOT, logs, keep_alive=True, environment=service_environment())
     started = [_start_if_needed(adapter)]
     if args.with_worker:
-        colleague = (json.loads(path.read_text()).get("colleague_id") if path.exists() else None) or ""
+        colleague = _worker_colleague(path)
         # The paired human hears about a pause and can still reach the worker during it.
         argv = worker_argv(home, _worker_claude(args.claude), args.model, args.budget, args.timeout,
                            poll=2.0, daily_limit=75.0, limit_notify=colleague or None,

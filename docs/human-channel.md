@@ -265,14 +265,18 @@ config single-home (today's v1 file, which still runs the unchanged single-home 
   (`channel provision telegram --source-prefix telegram: --route david --home A --home B`).
 - **Pinned identity (C4).** At start each home's `channel identity` must equal its `employee_id`. A home that
   fails (or whose outbox lines name another sender) is stopped alone; the others keep working, and David gets
-  one `↪ Router` notice naming the unreachable label.
+  one `↪ Router` notice naming the unreachable label. A message meant for a stopped home is held with a notice
+  saying that manager can't be reached. With a single configured home there is no other manager, so (as in v1)
+  the message is not held: the cursor stays put and the update is retried with backoff until the home is back
+  (an adapter restart re-checks the pin; Telegram keeps an update up to 24 hours).
 - **Header.** Every part of a delivered message starts with that home's `label` on its own line, rendered by the
   adapter from the home whose outbox row it delivers, never from the model's text. A body whose first line is
   exactly the label loses that one line (`header_deduped`). The Byline footer stays on the last part only;
   every part is at most 4096 characters. The receipt is `telegram:<chat>:<ids>;header:<sha8>[;footer:<sha8>]`.
 - **Replies.** Every sent part and every fed message is mapped (`route_map`: Telegram message id → home,
-  employee, local message or event id, question). A Reply goes to the mapped home if it is still configured with
-  the same employee: a Reply to a question's part answers that question; if that question is closed, the same
+  employee, local message or event id, question); it keeps the newest 2000 ids, and a Reply to an older one
+  counts as unknown. A Reply goes to the mapped home if it is still configured with the same employee: a Reply
+  to a question's part answers that question; if that question is closed, the same
   line is fed again without `question_id`, as ordinary context. `in_reply_to` is the replied-to local message
   (or event) id, else `tg:<message_id>`. A Reply to an unknown target, to a pre-upgrade message that carried no
   question, or to a home no longer configured is **held** (at most 20, durable) and never guessed; P3's chooser
@@ -281,12 +285,15 @@ config single-home (today's v1 file, which still runs the unchanged single-home 
   (`message_id`, `chat_id`, `reply_to_message_id`); against an older Synthetics it is left out (C3).
 - **Upgrade.** The state file moves from schema 3 to 4 on first start: each old `question_map` entry becomes a
   route to the primary home's exact question; old deliveries are tagged with the primary home; the old
-  bindings (employee, colleague, thread) now belong to the primary entry and keep their refusals.
+  bindings (employee, colleague, thread) now belong to the primary entry and keep their refusals. The bindings
+  are checked before anything is written, so a refused start leaves the state file as it was.
 - **No flood.** A home sends only rows created after its cutoff: the later of its `not_before` and the baseline
   the state keeps (the primary keeps today's `outbox_baseline_at`; a home first seen with neither gets the start
   time).
 - **Typing.** From each home's `shared/status.json` (session running) while that home owes David an answer
   (it was fed a message and has delivered nothing since). No status file: no typing.
+- `telegram install --with-worker --config F` installs the primary home's worker, notifying the primary
+  entry's `colleague_id`.
 - `telegram status --config F` on the primary home shows the homes (key, label, primary), schema, held count
   and route-map size.
 - Limit: an accepted send whose `ack` failed is marked in the local journal (no `acked`) and its claim lapses to

@@ -26,6 +26,7 @@ FOOTER_SEPARATOR = "\n\n"
 LABEL_MAX = 64
 BUTTON_MAX = 64
 STATE_SCHEMA = 4
+ROUTE_MAP_CAP = 2000   # newest Telegram message ids kept in route_map (about 300 KB of state); older Replies are held
 _KEY = re.compile(r"^[a-z][a-z0-9_-]{0,15}$")
 _EMPLOYEE = re.compile(r"^employee-[0-9a-f]{32}$")
 HOME_FIELDS = ("key", "home", "employee_id", "colleague_id", "label", "button", "thread", "primary", "not_before")
@@ -66,7 +67,7 @@ def load_homes(entries: Any, base: Path) -> List[Dict[str, Any]]:
         if not isinstance(raw, dict):
             raise HomesConfigError("each homes entry must be an object")
         key = raw.get("key")
-        if not isinstance(key, str) or not _KEY.match(key):
+        if not isinstance(key, str) or not _KEY.fullmatch(key):
             raise HomesConfigError("home key %r must match [a-z][a-z0-9_-]{0,15}" % (key,))
         unknown = sorted(set(raw) - set(HOME_FIELDS))
         if unknown:
@@ -74,7 +75,7 @@ def load_homes(entries: Any, base: Path) -> List[Dict[str, Any]]:
         for field in ("home", "employee_id", "colleague_id"):
             if not isinstance(raw.get(field), str) or not raw[field].strip():
                 raise HomesConfigError("home %s: %s is required" % (key, field))
-        if not _EMPLOYEE.match(raw["employee_id"]):
+        if not _EMPLOYEE.fullmatch(raw["employee_id"]):
             raise HomesConfigError("home %s: employee_id must be a full employee ID" % key)
         thread = raw.get("thread")
         if thread is not None and (not isinstance(thread, str) or not thread.strip()):
@@ -301,6 +302,8 @@ def _ts(value: Optional[str]) -> Optional[datetime]:
 ROUTER = "↪ Router"
 HELD_CAP = 20
 HELD_NOTICE = "Held: not sent to any manager yet (chooser not available)."
+HELD_DOWN_NOTICE = ("Held: %s can't be reached through this chat right now, so this message was not sent to it. "
+                    "It is kept here until the operator fixes it.")
 HELD_CAP_NOTICE = ("Not kept: this message was NOT sent to any manager and was NOT saved, because %d messages "
                    "are already waiting. Please send it again later.")
 
@@ -360,16 +363,20 @@ class HomesAdapter:
     # ---- startup ----
 
     def start(self) -> None:
-        """Checks that don't need the network beyond the contract: migration, bindings, identity pins."""
-        if migrate_state(self.d, self.primary):
+        """Checks that don't need the network beyond the contract: bindings, migration, identity pins.
+
+        The bindings are checked before anything is written (Rowan #104 L1): a refused start leaves the state
+        file exactly as it was, so a wrong config never stamps schema 4 on another employee's state."""
+        bound = self._verify_bindings()
+        if migrate_state(self.d, self.primary) or bound:
             self.state.save()
-        self._verify_bindings()
         self._pin_homes()
         self._baselines()
         self._recover_inflight()
 
-    def _verify_bindings(self) -> None:
-        """Schema 3 bindings move into the primary entry and keep their refusals (§4)."""
+    def _verify_bindings(self) -> bool:
+        """Schema 3 bindings move into the primary entry and keep their refusals (§4). Raises before any write;
+        returns True when it bound a fresh state (the caller saves)."""
         st = self.state
         if st.employee_id is not None and st.employee_id != self.primary["employee_id"]:
             raise RuntimeError("Employee identity mismatch: state was bound to %r, the primary home is pinned to "
@@ -386,7 +393,8 @@ class HomesAdapter:
             st.employee_id = self.primary["employee_id"]
             st.bound_colleague_id = self.colleague_id
             st.bound_local_thread = self.primary["thread"]
-            st.save()
+            return True
+        return False
 
     def _pin_homes(self) -> None:
         """C4/F11: each home's ``channel identity`` must equal its pinned employee_id. A home that fails is stopped
@@ -623,7 +631,13 @@ class HomesAdapter:
             else:
                 return self._hold(update_id, message, reply_to)
         if home["key"] in self.down:
-            return self._hold(update_id, message, reply_to, reason="home_down")
+            if len(self.homes) == 1:
+                # Rowan #104 L2: one home has no other manager to hold for. Keep the v1 behaviour: don't move the
+                # cursor, retry with backoff (Telegram keeps the update up to 24 h), never hold and drop at 20.
+                logger.error("Home %s is down (%s); update %d not fed, will retry", home["key"],
+                             self.down[home["key"]], update_id)
+                return {"processed": False, "reason": "store_error", "event_id": None, "home": home["key"]}
+            return self._hold(update_id, message, reply_to, reason="home_down", home=home)
         question = entry.get("question") if (verdict == "home" and entry) else None
         return self._feed(home, update_id, message, reply_to, entry if verdict == "home" else None, question)
 
@@ -710,7 +724,7 @@ class HomesAdapter:
         return rows[0]
 
     def _hold(self, update_id: int, message: Dict[str, Any], reply_to: Optional[int],
-              reason: str = "ambiguous") -> Dict[str, Any]:
+              reason: str = "ambiguous", home: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """F10: kept durably (cap 20) until P3's chooser releases it. P2 never feeds a held message by itself."""
         held = self.d.setdefault("held", [])
         if any(h.get("update_id") == update_id for h in held):
@@ -721,7 +735,9 @@ class HomesAdapter:
             return {"processed": False, "reason": "held_cap", "event_id": None}
         held.append(dict(update_id=update_id, message=message, reply_to=reply_to, reason=reason, at=_now()))
         self.state.save()
-        self.notice(HELD_NOTICE)   # one per held message; a failed notice only logs (notice() catches it)
+        # One per held message; a failed notice only logs (notice() catches it). A message for a manager that
+        # can't be reached says so honestly (Rowan #104 L2), not "chooser not available".
+        self.notice(HELD_DOWN_NOTICE % home["label"] if reason == "home_down" and home else HELD_NOTICE)
         return {"processed": False, "reason": "held", "event_id": None}
 
     # ---- typing indicator (F11: shared/status.json, never the Store) ----
@@ -852,6 +868,12 @@ def _homes_state(base: Any) -> Any:
         def save(self) -> None:
             from .telegram import _atomic_write
             self._d["schema"] = STATE_SCHEMA
+            route_map = self._d.get("route_map")
+            if isinstance(route_map, dict) and len(route_map) > ROUTE_MAP_CAP:
+                # Bounded (Rowan #104 nit): the oldest entries go first (JSON keeps insertion order). A Reply to a
+                # dropped target is unmapped, so it is held, never guessed.
+                for stale in list(route_map)[:len(route_map) - ROUTE_MAP_CAP]:
+                    del route_map[stale]
             _atomic_write(self.path, self._d)
             guard = self._guard_path()
             if not guard.exists():
