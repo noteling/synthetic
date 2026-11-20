@@ -123,6 +123,7 @@ class ConfiguredExecutorReviewTests(unittest.TestCase):
             self.assertEqual(run["executor_config"], metadata)
 
     def prepare_meeting(self, active):
+        (self.home / "floor.json").write_text('{"enabled":true}')
         key = b"q" * 32
         keyfile = self.root / "stand.key"
         keyfile.write_bytes(key)
