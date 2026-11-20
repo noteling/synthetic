@@ -4,13 +4,15 @@ Only reasoning is scripted. HTTP, pairing, contract subprocesses, MCP writes, wo
 event processing, shared publication and status rendering use the maintained product.
 """
 import json
+import html
+import re
 from types import SimpleNamespace
 from unittest import mock
 
 from synthetics import answer_desk, sharedstatus
 from synthetics.engine import Engine
 from synthetics.mcp import Server
-from synthetics.store import Store
+from synthetics.store import ChannelError, Store
 from tests import test_i25_answer_desk as desk_fixture
 
 
@@ -102,6 +104,7 @@ class AnswerDeskEngine(desk_fixture.DeskBase):
         self.assert_unrelated_still_waiting()
         _, _, page = self.request("GET", location, cookie=cookie)
         self.assertIn("✓ Employee read it", page)
+        self.assertIn("Applied your answer; the linked work is complete.", page)
         self.assertIn("✓ Outcome", page)
         # Shared status intentionally exports only open work: the page must report that
         # it left that list, rather than infer done versus cancelled from its absence.
@@ -111,6 +114,104 @@ class AnswerDeskEngine(desk_fixture.DeskBase):
         self.assertEqual(self.submit(cookie, nonce, token)[0], 303)
         self.assertEqual(Engine(self.home, brain).run(), [])
         self.assertEqual(brain.calls, 1)
+
+    def test_reply_privacy_pagination_and_no_delivery_side_effects(self):
+        _, cookie = self.paired()
+        _, nonce, token = self.form(cookie)
+        status, headers, _ = self.submit(cookie, nonce, token, kind="context")
+        self.assertEqual(status, 303)
+        location = headers["Location"]
+        event_id = location.rsplit("/", 1)[1]
+        _, _, empty = self.request("GET", location, cookie=cookie)
+        self.assertIn("No explicitly correlated follow-up yet", empty)
+        long_body = "<script>🌍</script>" + "é" * 4100 + "END"
+        with Store(self.home) as store:
+            unrelated = store.feed("david", "other event", source="manual")
+            other_key = b"other-channel-key-long-enough"
+            store.channel_register("other", Store.credential_hash(other_key), ["other:"], "test")
+            other_event = store.feed("david", "other channel event", source="other:test", credential=other_key)
+            store.message_send("david", "OTHER-EVENT-SECRET", in_reply_to=unrelated["id"], key="other-event")
+            store.message_send("not-david", "OTHER-RECIPIENT-SECRET", in_reply_to=event_id, key="other-to")
+            store.message_send("david", "THREAD-ONLY-SECRET", thread="same-thread", key="thread-only")
+            store.message_send("david", long_body, in_reply_to=event_id, key="old-reply")
+            store.message_send("david", "newest reply", in_reply_to=event_id, key="new-reply")
+            before = store.outbox_list()
+        _, headers, page = self.request("GET", location, cookie=cookie)
+        self.assertIn("newest reply", page)
+        self.assertIn("reply 1 of 2", page)
+        self.assertIn("Older reply", page)
+        self.assertNotIn("SECRET", page)
+        self.assertIn("no-store", headers.get("Cache-Control", ""))
+        _, _, older = self.request("GET", location + "?reply=1", cookie=cookie)
+        self.assertIn("&lt;script&gt;🌍&lt;/script&gt;", older)
+        self.assertNotIn("<script>", older)
+        self.assertIn("More text", older)
+        self.assertNotIn("END", older)
+        _, _, tail = self.request("GET", location + "?reply=1&offset=4096", cookie=cookie)
+        self.assertIn("END", tail)
+        self.assertIn("Previous text", tail)
+        with Store(self.home) as store:
+            self.assertEqual(before, store.outbox_list())
+            # No correlation may leak through body-free status.
+            self.assertNotIn("body", store.channel_event_status(self.key.read_bytes(), event_id=event_id))
+        first = answer_desk.contract(self.home, self.key, "event-reply", "--event", event_id,
+                                     "--index", "1")
+        last = answer_desk.contract(self.home, self.key, "event-reply", "--event", event_id,
+                                    "--index", "1", "--offset", "4096")
+        self.assertEqual(first["reply"]["body"] + last["reply"]["body"], long_body)
+        other_channel = answer_desk.contract(self.home, self.key, "event-reply", "--event", other_event["id"])
+        self.assertEqual(other_channel["error"]["code"], "not_routed")
+        absent_key = answer_desk.contract(self.home, self.key.parent / "missing", "event-reply", "--event", event_id)
+        self.assertEqual(absent_key["error"]["code"], "auth_failed")
+        wrong_home = self.root / "other-home"
+        with Store(wrong_home) as store:
+            store.initialize("Other", "test")
+        refused = answer_desk.contract(wrong_home, self.key, "event-reply", "--event", event_id)
+        self.assertEqual(refused["error"]["code"], "auth_failed")
+        hidden = answer_desk.contract(self.home, self.key, "event-reply", "--event", unrelated["id"])
+        self.assertEqual(hidden["error"]["code"], "not_routed")
+        missing = answer_desk.contract(self.home, self.key, "event-reply", "--event", "event-" + "0" * 32)
+        self.assertEqual(missing["error"]["code"], "not_routed")
+        with mock.patch.dict("os.environ", {"SYNTHETICS_SESSION_RUN": "run-test"}):
+            refused = answer_desk.contract(self.home, self.key, "event-reply", "--event", event_id)
+        self.assertEqual(refused["error"]["code"], "in_session")
+        with Store(self.home) as store:
+            store.channel_register("lookout-desk", Store.credential_hash(b"replacement-key-long-enough"), ["lookout:"], "test")
+        refused = answer_desk.contract(self.home, self.key, "event-reply", "--event", event_id)
+        self.assertEqual(refused["error"]["code"], "auth_failed")
+        _, _, unavailable = self.request("GET", location, cookie=cookie)
+        self.assertIn("Follow-up unavailable", unavailable)
+        self.assertNotIn("newest reply", unavailable)
+
+    def test_stable_cursor_after_new_reply_and_scoped_refusal(self):
+        _, cookie = self.paired()
+        _, nonce, token = self.form(cookie)
+        _, headers, _ = self.submit(cookie, nonce, token, kind="context")
+        location = headers["Location"]
+        event_id = location.rsplit("/", 1)[1]
+        with Store(self.home) as store:
+            original = store.message_send("david", "A" * 4096 + "ORIGINAL-TAIL",
+                                          in_reply_to=event_id, key="stable-original")
+            hidden = store.message_send("someone-else", "SECRET", in_reply_to=event_id, key="stable-hidden")
+        _, _, page = self.request("GET", location, cookie=cookie)
+        link = html.unescape(re.search(r"href='([^']+)'[^>]*>More text", page).group(1))
+        with Store(self.home) as store:
+            store.message_send("david", "NEW", in_reply_to=event_id, key="stable-new")
+            for bad in (True, False):
+                with self.assertRaises(ChannelError):
+                    store.channel_event_reply(self.key.read_bytes(), event_id, bad, 0)
+                with self.assertRaises(ChannelError):
+                    store.channel_event_reply(self.key.read_bytes(), event_id, 0, bad)
+        _, _, tail = self.request("GET", link, cookie=cookie)
+        self.assertIn("ORIGINAL-TAIL", tail)
+        self.assertNotIn(">NEW<", tail)
+        for cursor in (hidden["id"], "message-" + "0" * 32):
+            result = answer_desk.contract(self.home, self.key, "event-reply", "--event", event_id,
+                                          "--cursor", cursor)
+            self.assertIsNone(result["reply"])
+        result = answer_desk.contract(self.home, self.key, "event-reply", "--event", event_id,
+                                      "--cursor", original["id"], "--offset", "99999")
+        self.assertIsNone(result["reply"])
 
     def test_partial_context_is_processed_without_answering_or_releasing_work(self):
         _, cookie = self.paired()
