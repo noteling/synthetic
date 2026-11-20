@@ -176,3 +176,18 @@ hosts.
 
 A same-form retry needs the cookie that signed the form's token, so it is possible for at most the
 12-hour session; the journal's 7 days only matter for the unconfirmed-submits listing.
+
+## Follow-through verification
+
+`tests/test_answer_desk_engine.py` drives real HTTP pairing and form submission through the keyed
+channel subprocess, then starts a fresh work engine after an interrupted run. The scripted reasoning
+step uses run-bound MCP tools to complete the linked work and record a correlated reply. The test
+checks the UI before and after processing, verifies the authenticated original answer, and confirms
+that retrying the form creates neither another input nor another work session. Separate cases cover
+partial context that leaves the question and work waiting, and an unauthorized request that wakes no
+session. Unrelated blocked work stays waiting throughout.
+
+This establishes the transport, recovery and work-engine path on temporary homes. It does not measure
+whether a particular model correctly interprets an answer or completes the requested real-world work.
+Completed work leaves the shared open-work list, so the page says "no longer open" rather than inferring
+whether it was completed or cancelled; its precise disposition remains in the employee's work record.
