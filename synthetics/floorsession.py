@@ -23,6 +23,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import floorjournal as fj
 from . import floortools
@@ -58,7 +59,12 @@ def provider_error_message(result):
         reset = re.search(r"\bresets\s+((?:1[0-2]|0?[1-9])(?::[0-5][0-9])?\s*(?:am|pm))"
                           r"\s*\(([A-Za-z_]+/[A-Za-z_]+)\)", text, re.IGNORECASE)
         if reset:
-            message += " Provider reset: %s (%s)." % (reset.group(1).lower(), reset.group(2))
+            try:
+                ZoneInfo(reset.group(2))
+            except (ValueError, ZoneInfoNotFoundError):
+                pass
+            else:
+                message += " Provider reset: %s (%s)." % (reset.group(1).lower(), reset.group(2))
         return message
     if any(word in lower for word in ("not logged in", "authentication", "invalid api key", "unauthorized")):
         return "The employee's Claude executor needs a valid login or provider credential."
@@ -182,6 +188,14 @@ class MeetingSession:
             self._write(turn_text(self.inflight))
 
     def _read(self, process, generation):
+        try:
+            self._read_results(process, generation)
+        finally:
+            # This thread owns stdout: close it here, including on a provider error or
+            # generation fence. Closing it from stop while readline blocks can hang.
+            process.stdout.close()
+
+    def _read_results(self, process, generation):
         for raw in process.stdout:
             try:
                 item = json.loads(raw)

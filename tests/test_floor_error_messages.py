@@ -1,5 +1,6 @@
 """Known operational diagnostics may cross the meeting channel; arbitrary error text may not."""
 import json
+import io
 from pathlib import Path
 import tempfile
 import unittest
@@ -33,6 +34,11 @@ class SafeProviderMessages(unittest.TestCase):
     def test_invalid_reset_time_is_not_echoed(self):
         self.assertNotIn("Provider reset", provider_error_message("weekly limit resets 99am (Secret/Unknown)"))
 
+    def test_unknown_timezone_cannot_echo_arbitrary_identifiers(self):
+        value = provider_error_message("weekly limit resets 8am (Secret/Credential)")
+        self.assertNotIn("Secret", value)
+        self.assertNotIn("Provider reset", value)
+
     def test_cli_error_stops_the_queue_but_retains_reported_usage(self):
         with tempfile.TemporaryDirectory() as temporary:
             answers, errors = [], []
@@ -41,14 +47,16 @@ class SafeProviderMessages(unittest.TestCase):
             session.inflight = {"id": "first"}
             session.queue.append({"id": "second"})
             class Process:
-                stdout = [json.dumps({"type": "result", "is_error": True, "result": "weekly limit",
-                                      "total_cost_usd": 0.125}),
-                          json.dumps({"type": "result", "result": "must not become another answer"})]
+                stdout = io.StringIO("\n".join([
+                    json.dumps({"type": "result", "is_error": True, "result": "weekly limit", "total_cost_usd": 0.125}),
+                    json.dumps({"type": "result", "result": "must not become another answer"})]))
+            process = Process()
             with patch.object(session, "_next") as next_request:
-                session._read(Process(), session.generation)
+                session._read(process, session.generation)
             next_request.assert_not_called()
             self.assertEqual(answers, [("first", None)])
             self.assertEqual(len(errors), 1)
             self.assertIn("usage limit", errors[0])
             self.assertEqual(list(session.queue), [{"id": "second"}])
             self.assertEqual(session.cost(), 0.125)
+            self.assertTrue(process.stdout.closed, "the reader owns its pipe even on early error exit")
