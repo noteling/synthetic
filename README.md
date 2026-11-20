@@ -8,6 +8,9 @@ and local execution; Synthetics owns durable identity, memory, inbox/outbox,
 assignments, questions, follow-ups, and recovery. Voice and desktop interaction come
 later. Noteling and Stand have been studied as reference projects and remain untouched.
 
+Repeated event data is sent to reasoning executors using a [lossless context view](docs/prompt-context.md).
+The employee's full durable records remain intact.
+
 ## Start an employee
 
 Requires macOS or Linux, Python 3.9+, and an installed Claude CLI or Codex CLI with a saved
