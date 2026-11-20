@@ -1,4 +1,6 @@
 """M25 §2-3: per message x channel delivery state, routing isolation, no blind resend (design tests 3-7)."""
+import json
+
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -166,7 +168,19 @@ class OutboxListMCPTests(unittest.TestCase):
             server = Server(store)
 
             def call(args):
-                return server.call("outbox_list", args)
+                values, chunks = [], {}
+                while True:
+                    page = server.call("outbox_list", args)
+                    values.extend(entry["value"] for entry in page.get("entries", []))
+                    if "chunk" in page:
+                        key = page["key"]
+                        chunks[key] = chunks.get(key, "") + page["chunk"]
+                        if len(chunks[key]) == page["length"]:
+                            values.append(json.loads(chunks.pop(key)))
+                    if not page["next_cursor"]:
+                        self.assertEqual(chunks, {})
+                        return values
+                    args = {"cursor": page["next_cursor"]}
             self.assertEqual(len(call({})), 50)
             self.assertEqual(call({})[-1]["body"], "m59")
             self.assertEqual([m["id"] for m in call({"status": "delivered"})], [first["id"]])
