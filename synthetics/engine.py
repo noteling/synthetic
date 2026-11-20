@@ -318,7 +318,8 @@ class Engine:
         return ProviderStep(failed)
 
     def _provider_resumed(self, store, run_id, outcome):
-        """#98 D5: the first session the provider accepted (finished, or failed for its own reasons) ends the pause."""
+        """#98 D5: the first session that ends without a provider refusal (finished, or failed for its own reasons,
+        which may be before the provider was reached) ends the pause."""
         try:
             pause = self._provider_pause_read(store)
             if pause is None:
@@ -328,9 +329,16 @@ class Engine:
                                        {"run_id": pause.get("run_id"), "accepted_run": run_id, "outcome": outcome,
                                         "attempts": pause.get("attempts")})
             if self.limit_notify:
-                body = ("Synthetics home %s: the model provider accepted sessions again at %s after %s refused "
-                        "session(s) (first %s); first accepted session %s (%s)."
-                        % (self.home, now, pause.get("attempts"), pause.get("run_id"), run_id, outcome))
+                if outcome == "finished":
+                    body = ("Synthetics home %s: the model provider accepted sessions again at %s after %s refused "
+                            "session(s) (first %s); first accepted session %s (finished)."
+                            % (self.home, now, pause.get("attempts"), pause.get("run_id"), run_id))
+                else:
+                    # #99 L2 (a): a failed session may never have reached the provider (e.g. the CLI could not
+                    # start), so don't claim the provider is back; say only what is known.
+                    body = ("Synthetics home %s: a session ended at %s without a provider refusal (%s, failed for "
+                            "its own reasons) after %s refused session(s) (first %s); resuming normal sessions."
+                            % (self.home, now, run_id, pause.get("attempts"), pause.get("run_id")))
                 try:
                     store.message_send(self.limit_notify, body, key="provider-resume-%s" % pause.get("run_id"))
                 except ValueError:

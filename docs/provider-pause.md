@@ -38,8 +38,14 @@ character boundary. The stream result fact keeps `terminal_reason`, `api_error`,
 - Precedence: failure pause > provider pause > daily limit. The provider pause admits no limit bypass.
 - `limit resume` also asks for an early try: the engine sets the next try to now and keeps the attempt count.
 - The owner (`limit_notify`) gets one message on entering (`provider-pause-<first run>`) and one on leaving
-  (`provider-resume-<first run>`); both name the home and say "next try", never "resets at". Lookout's paused
-  field (`reason provider_unavailable`, `kind`, `next_try_at`, `attempts`) is the primary signal.
+  (`provider-resume-<first run>`); both name the home and neither says "resets at" (the pause message gives the
+  "next try"). Lookout's paused field (`reason provider_unavailable`, `kind`, `next_try_at`, `attempts`) is the
+  primary signal.
+- The pause ends with the first session that ends without a provider refusal. When it finished, the message says
+  the provider accepted sessions again. When it failed for its own reasons, the provider may never have been
+  reached (for example the CLI could not start), so the message says only that a session ended without a provider
+  refusal and normal sessions resume (#99 L2); that failure counts toward the failure pause as before, and if the
+  provider is still out the next session pauses again.
 - A second runtime request applied while a probation is undecided marks the first `superseded_on_disk`
   (runtime.py); that is not a probation failure.
 
