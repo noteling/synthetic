@@ -12,7 +12,7 @@ import os
 import re
 import sys
 
-from . import ledgerline, sharedstatus
+from . import boundedreads, ledgerline, sharedstatus
 from .store import Store
 
 
@@ -39,7 +39,11 @@ EVENT_CHUNK_CHARS = 30000
 
 KEY = text_property("Stable descriptive key for this intended operation. Reuse after interruption; a different payload with the same key is rejected.")
 TOOLS = [
-    tool("employee_context", "Read current identity, relationships, memories, ongoing work, pending inputs, questions, and recent runs."),
+    tool("employee_context", "Read budgeted context entries; sections lists selectable names. Follow next_cursor or concatenate JSON chunks. A changed source invalidates continuation.", {
+        "section": text_property("Select a top-level context section."),
+        "cursor": text_property("Continuation returned by this tool."),
+        "max_bytes": {"type": "integer", "minimum": 1024, "maximum": 32000},
+    }),
     tool("event_get", "Read the original source event by ID, including messages already processed in earlier sessions. Use this to verify the evidence behind a memory. A unique ID prefix of 8+ hex characters is accepted. Without body_offset/body_chars the whole event is returned; when its body_len is over ~30 000, read it in chunks instead: body_offset=0 with body_chars, then body_offset=body_next until body_next is null.", {
         "id": text_property(),
         "body_offset": {"type": "integer", "minimum": 0, "description": "Character offset into the original body; the result has that slice plus body_len, body_offset and body_next (null at the end)."},
@@ -145,9 +149,13 @@ TOOLS = [
         "key": KEY,
         "settings": {"type": "object", "additionalProperties": True, "description": "Optional changes: model, claude, budget, timeout, poll, retry, daily_limit. Omit to restart with the current settings."},
     }, ["reason", "key"]),
-    tool("outbox_list", "Inspect messages and questions you have already queued. Queued does not mean delivered; each item's delivery shows pending, uncertain, failed or delivered as recorded by the channel that carries it.", {
+    tool("outbox_list", "Inspect queued messages and questions as budgeted entries or JSON chunks. Follow next_cursor until null; older_before selects an older window. Queued does not mean delivered; each item's delivery shows pending, uncertain, failed or delivered as recorded by the channel that carries it.", {
         "status": {"type": "string", "enum": ["pending", "uncertain", "failed", "delivered"],
                    "description": "Only items whose delivery state is this."},
+        "id": text_property("Select one own message ID, including older messages."),
+        "before": text_property("Read messages older than this outbox ID, exclusively."),
+        "cursor": text_property("Continue concatenating JSON chunks; new messages do not shift the page."),
+        "max_bytes": {"type": "integer", "minimum": 1024, "maximum": 32000},
         "limit": {"type": "integer", "minimum": 1, "maximum": 500, "description": "Newest N items (default 50)."},
     }),
     tool("docket", "Read-only: your own open questions to one person (default: this home's default human), oldest first, with asked-age, delivery ack and age, and the works each blocks. text is a paste-ready block. Only your home's data.", {
@@ -291,10 +299,10 @@ class Server:
                 value = click.call(self.store, name, arguments)
             elif name in floortools.NAMES:
                 value = floortools.call(self.store.home, self.meeting, name, arguments, text_mode=self.text_mode)
+            elif name in ("employee_context", "outbox_list"):
+                value = boundedreads.page(self.store, name, arguments, self._yield_notice())
             else:
-                method = self.store.context if name == "employee_context" else getattr(self.store, name)
-                if name == "outbox_list":
-                    arguments = dict({"limit": 50}, **arguments)  # backlog 6: never the whole outbox by default
+                method = getattr(self.store, name)
                 arguments = self._compact_defaults(name, arguments)
                 value = method(**arguments)
         except Exception as exc:
@@ -305,7 +313,7 @@ class Server:
         if self.store.resolved and isinstance(value, dict):
             # Backlog 24 (K6): show the full IDs short prefixes were expanded to.
             value = dict(value, resolved=dict(self.store.resolved))
-        if isinstance(value, dict):
+        if isinstance(value, dict) and name not in ("employee_context", "outbox_list"):
             notice = self._yield_notice()
             if notice is not None:
                 value = dict(value, **{"yield": notice})  # MTG F1 (C2): before the receipt, so it records it

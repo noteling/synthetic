@@ -238,3 +238,24 @@ and concurrency need separate care; a normalized event is useful for durable mea
 but is not a replacement for a low-latency audio path. No POC is needed merely because
 the overall ambition is large. Experiments should answer a concrete question that
 changes an implementation decision.
+
+## Budgeted MCP context and outbox reads
+
+The MCP-only `employee_context` and `outbox_list` results are JSON envelopes,
+not the raw Store/CLI return values. `max_bytes` is 1024–32000 UTF-8 bytes
+(default 32000), including continuation and yield metadata. `entries` batches
+complete `{key, value}` records. When one record cannot fit, `key`, `encoding:
+"json"`, `offset`, `length`, and `chunk` describe its serialized JSON; offsets
+and lengths count Unicode code points in the decoded chunk strings. Join
+successive chunks and JSON-decode to recover the value. Follow `next_cursor`
+until null, passing only `cursor` and optionally `max_bytes`. Changes to the
+selected source invalidate continuation; start again rather than mixing states.
+For context, `as_of` is the UTC read clock pinned across the continuation;
+time-derived display values use that clock, while source changes still
+invalidate the cursor. A fresh read uses the current clock. `sections`
+advertises the selectable top-level keys; for example,
+`employee_context {"section":"work"}` reads just work. For outbox,
+`outbox_list {"id":"message-..."}` selects an own message even outside the
+newest window; `older_before` can be passed as `before` to retrieve an older
+window. A window is anchored against new arrivals, while changes or removal of
+selected records invalidate its continuation. Results never alter the raw state.

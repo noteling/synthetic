@@ -2957,11 +2957,11 @@ class Store:
         return dict(key=key, sent=True, message_id=message["id"], to=to,
                     recovery=routines.quarantine_recovery(work["routine"]["kind"], work["id"], self.home))
 
-    def routines_due(self, run=None):
+    def routines_due(self, run=None, now=None):
         """Every snapshot (A2-C2): routines fired, quarantined or due within 15 min, each with its ready-made
         re-arm target and guidance. Absorbing one means doing its review and calling routine_rearm."""
         from . import routines
-        moment = routines.parse(timestamp())
+        moment = now if now is not None else routines.parse(timestamp())
         out, route = [], None
         for work in self._routines():
             state = routines.due_state(work, moment)
@@ -3721,7 +3721,11 @@ class Store:
         except Exception:  # noqa: BLE001 - a broken project log must not block the session snapshot
             return {}
 
-    def context(self, run_id=None):
+    def context(self, run_id=None, as_of=None):
+        """Raw employee snapshot; optional aware ``as_of`` pins derived display clocks only.
+
+        Records are read fresh. This does not freeze data or change mutation/routine clocks.
+        """
         identity = self.identity()
         run_id = run_id or self.run_id
         run = self.run_get(run_id) if run_id else None
@@ -3757,9 +3761,9 @@ class Store:
                     memory_count=active_count, memory_context_truncated=bool(hidden),
                     memory_index=memory_index, memory_index_truncated=index_truncated,
                     work=work, events=events, threads=threads, questions=questions,
-                    recent_runs=[self._failed_tools(r) for r in self.run_list(5)], usage=self.usage(days=3),
-                    runtime=self.runtime_view(), outbox_stuck=self.outbox_stuck(), relay_owed=self.relay_owed(),
+                    recent_runs=[self._failed_tools(r) for r in self.run_list(5)], usage=self.usage(day=as_of.astimezone(timezone.utc).strftime("%Y-%m-%d") if as_of else None, days=3),
+                    runtime=self.runtime_view(), outbox_stuck=self.outbox_stuck(now=as_of), relay_owed=self.relay_owed(now=as_of),
                     project_bindings=capture.binding_lines(self), project_capture=capture.capture_status(self), publish_failing=board.publish_failing(self),
                     project_uncovered=capture.uncovered_counts(self, capture.home_id(self)),
-                    routines_due=self.routines_due(run),
+                    routines_due=self.routines_due(run, now=as_of),
                     **self._board_section(run_id))
