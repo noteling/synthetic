@@ -9,6 +9,12 @@ Claude CLI remains the default. Codex CLI is an explicitly selected alternative 
 version does not switch existing workers. This increment of issue #12 supports ordinary bounded
 employee sessions; it does not migrate the live team or supply persistent meeting conversations.
 
+For host-provisioned selection, use `--brain-config /company/synthetics/brain.json`.
+This separates the agent runtime from the model connection and supports a Responses-compatible
+company gateway as well as saved logins. See [reasoning configuration](brain-config.md) for the
+versioned file format, authentication references, lifecycle and acceptance checks. The sections
+below also document the compatible direct CLI selections.
+
 ## Select an executor
 
 Install the selected CLI and sign in before starting an employee. For Codex, use its ChatGPT
@@ -107,6 +113,10 @@ MCP servers are host processes. The shell sandbox is not a sandbox around the Sy
 arbitrary MCP behavior, the host account or the company's credentials. Use an externally isolated
 account, container or machine when those boundaries are required. An instruction or role profile never
 grants additional authority.
+
+The saved-login connection checks the current login method before execution so enforcing ChatGPT
+authentication cannot log out an incompatible saved account. Configured gateways instead use an
+isolated temporary CLI home and ephemeral credential storage; they never load the saved account.
 
 Output is consumed as JSONL events. The adapter records filtered activity and token usage; raw thinking
 and tool results do not become display records. A successful process exit alone is not enough:

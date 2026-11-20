@@ -10,7 +10,8 @@ later. Noteling and Stand have been studied as reference projects and remain unt
 
 ## Start an employee
 
-Requires macOS or Linux, Python 3.9+, and a logged-in Claude CLI or Codex CLI. Claude remains
+Requires macOS or Linux, Python 3.9+, and an installed Claude CLI or Codex CLI with a saved
+login or a [configured model connection](docs/brain-config.md). Claude remains
 the default executor. There are no Python
 runtime dependencies. Run from this repository, or install with `pip install .`
 (`pip install -e .` needs pip 21.3 or newer; the stock macOS Command Line Tools pip is older).
@@ -53,6 +54,17 @@ does not create another employee or change its durable identity and work. Codex 
 USD session-budget cap or USD cost report; token usage is retained separately and cost stays
 unknown. Its persistent live-meeting session is not supported in this increment. See
 [executors](docs/executors.md) for setup, capabilities and restrictions.
+
+For a company-provided model connection, supply one configuration path:
+
+```sh
+python3 -m synthetics --home .synthetics/rowan run --brain-config /company/synthetics/brain.json
+```
+
+The file selects the agent runtime separately from the model endpoint, protocol, model alias and
+credential references. A supported company gateway requires configuration rather than changes to
+the employee engine. The same interface supports saved CLI logins. See
+[reasoning configuration](docs/brain-config.md) for the format, supported protocols and worker setup.
 
 The output includes queued messages and questions. Reply to a question using its
 `question_id` from the outbox (or its `id` from status.questions):

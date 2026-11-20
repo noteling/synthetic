@@ -107,7 +107,7 @@ def _string(value, label, empty=False, maximum=4096):
 
 def _environment_reference(value):
     if (not isinstance(value, str) or not _ENV.fullmatch(value)
-            or value.upper().startswith("SYNTHETICS_")):
+            or value.upper().startswith("SYNTHETICS_") or value.upper() == "CODEX_HOME"):
         raise BrainConfigError("Credential environment reference is invalid or reserved.")
     return value
 

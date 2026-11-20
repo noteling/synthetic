@@ -7,7 +7,7 @@ platform mismatch here rather than quietly redefining the employee to fit it.
 | Existing assumption | Current implementation | Consequence and direction |
 | --- | --- | --- |
 | An OS process acts as a logged-in human account. | Executors and Synthetics MCP servers run under the host account. Codex adds a workspace-write shell sandbox, while the Claude adapter relies on host privileges and tool settings. A private employee home is not an OS identity. | Eventually provision employee credentials and externally enforced resource boundaries. A separate account, VM, or container may be useful; a desktop OS is not a settled requirement. |
-| An agent CLI serves an interactive developer with a personal login. | Bounded work can explicitly select Claude or Codex. The Codex adapter requires the host's saved ChatGPT login and excludes API-key/endpoint overrides, unrelated user configuration, app integrations and MCP servers. | Model access and provider quota are not the synthetic's own organizational identity. Keep the executor replaceable; no silent provider fallback or transfer of unavailable live context. See [executors](executors.md). |
+| An agent CLI serves an interactive developer with a personal login. | A host-owned config selects the runtime separately from saved-login or supported company-gateway model access. The runtime excludes unrelated user instructions, app integrations and MCP servers. Gateway auth is isolated from the host's saved CLI account. | Model access and provider quota are not the synthetic's own organizational identity. Keep connections configurable; no silent fallback or transfer of unavailable live context. See [reasoning configuration](brain-config.md). |
 | Every provider exposes the same budget and tool controls. | Claude reports monetary usage and accepts a session-dollar cap; Codex reports tokens without an equivalent dollar cap or native tool allow-list. Doctor and the employee snapshot expose those differences. | Unknown cost must not become zero, and a setting named budget must not imply enforcement. Use actual provider controls and external isolation where needed. |
 | Ending a chat ends the interaction. | Synthetics persists work and questions, then wakes the next session. | Session history is an optimization, never the employee's identity or sole memory. |
 | A human reads a notification and remembers to follow up. | The inbox, work records, and reminders survive restart. Optional macOS launch agents run a paired channel and bounded worker beyond the desktop UI. | Logged-in, awake hardware and network access remain requirements. Always-on hosting, aggregate model budgets and organizational provisioning remain open. |
@@ -25,3 +25,10 @@ an OS sandbox, a full semantic memory system, immediate
 mid-session event injection, or continuous multi-activity coordination. Each is a
 capability to add when it advances actual employee work. None is a reason to shrink
 the product into a personal assistant.
+## Model-runtime accounts and gateway configuration
+
+Agent CLIs often assume one human-owned configuration directory and saved login. Changing a forced
+login method can log out an incompatible saved account. Configured gateway work uses a private
+temporary CLI home and ephemeral credentials; saved-login work checks the method before execution.
+The durable employee remains in its Synthetics home. Model routing is a separate, host-owned
+[configuration](brain-config.md), with protocol-specific runtime compatibility made explicit.

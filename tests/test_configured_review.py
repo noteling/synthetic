@@ -32,6 +32,8 @@ class ConfiguredExecutorReviewTests(unittest.TestCase):
         fixture_root = repr(str(self.root.resolve()))
         code = ("#!" + sys.executable + "\n"
                 "import json,os,sys\nfrom pathlib import Path\n"
+                "if 'login' in sys.argv and 'status' in sys.argv:\n"
+                " print('Logged in using ChatGPT');raise SystemExit(0)\n"
                 "sys.stdin.read()\n"
                 "connection_home=os.environ.get('CODEX_HOME')\n"
                 "managed_home=Path(connection_home).resolve() if connection_home and Path(" + fixture_root + ") in Path(connection_home).resolve().parents else None\n"

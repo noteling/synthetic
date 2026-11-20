@@ -1,4 +1,4 @@
-"""Claude supplies reasoning; Synthetics retains the employee's continuity."""
+"""Replaceable reasoning runtimes; Synthetics retains the employee's continuity."""
 
 import json
 import os
@@ -132,8 +132,14 @@ def executor_capabilities(backend="claude"):
 
 
 def make_brain(home, brain="claude", claude="claude", codex="codex", model=None,
-               timeout=300, budget=100.0, stream_output=True):
+               timeout=300, budget=100.0, stream_output=True, brain_config=None):
     """Explicit provider choice; a failed executor never silently changes the employee's provider."""
+    if brain_config is not None:
+        from .configuredbrain import ConfiguredBrain
+        return ConfiguredBrain(home, brain_config, timeout=timeout, budget=budget,
+                               stream_output=stream_output)
+    if brain == "configured":
+        raise ValueError("The configured brain requires --brain-config.")
     executor_capabilities(brain)  # validate before choosing a class
     if brain == "codex":
         from .codexbrain import CodexBrain
@@ -158,11 +164,12 @@ class ClaudeBrain:
         return executor_capabilities(self.backend)
 
     def __init__(self, home, executable="claude", model="claude-opus-5-5", timeout=300, budget=100.0,
-                 stream_output=True):
+                 stream_output=True, configured_login=False):
         self.home = Path(home).expanduser().resolve()
         # E4 (Ledgerline): read the session as stream-json and keep display facts in runs/<run>.stream.jsonl.
         # False restores the pre-E4 `--output-format json` path exactly (runtime.json stream_output, Codex C1).
         self.stream_output = bool(stream_output)
+        self.configured_login = bool(configured_login)
         self.executable = str(executable)
         self.model = model
         self.timeout = float(timeout)
@@ -326,7 +333,9 @@ class ClaudeBrain:
         record_id = candidate if candidate and all(c.isalnum() or c in "-_" for c in candidate) else uuid.uuid4().hex
         output_path = records / (record_id + ".claude.json")
         error_path = records / (record_id + ".stderr.txt")
-        environment = dict(os.environ)
+        environment = {k: v for k, v in os.environ.items()
+                       if not self.configured_login or not k.startswith(
+                           ("ANTHROPIC_", "CLAUDE_CODE_", "OPENAI_", "CODEX_"))}
         environment.pop("CLAUDECODE", None)
         environment["SYNTHETICS_HOME"] = str(self.home)
         # M22: marks every process in the session; the CLI refuses credential

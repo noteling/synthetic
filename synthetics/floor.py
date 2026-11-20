@@ -118,7 +118,7 @@ def attach(home, key_file, stdin=None, stdout=None, renew_seconds=None, sleep=ti
                 running = next((r for r in store._all("runs") if r.get("status") == "running"), {})
                 backend = running.get("executor") or effective.get("brain", "claude")
                 if backend != "claude":
-                    raise ValueError("The selected Codex executor does not support persistent meeting sessions; "
+                    raise ValueError("The selected executor does not support persistent meeting sessions; "
                                      "ordinary work has not been yielded.")
             pending = store.meeting_begin(meeting, channel["id"], grace=first.get("grace"))
     except (ValueError, TypeError) as exc:
