@@ -128,6 +128,10 @@ fairness guarantee yet.
   lessons by status, history, open Board backlog), rewritten after each write; a failed rewrite never fails the
   write. `synthetics project view P [--as-of N] [--out F | --write]` renders it; a session needs read access.
   Corrections go through the log, never into the view.
+  `project_memory_get` includes a lesson's `applies_when`, `uncertainty` and stored evidence alongside its
+  statement. A bounded result may omit evidence notes before dropping references: `evidence_truncated`
+  flags either omission, and `evidence_count` retains the full stored count. An empty shortened list is
+  therefore distinguishable from a lesson with no evidence. Read trimming never changes the source log.
   Only `project grant`, `project import` and `project bind` create a project; `project grants`, `export`, `view`
   and `redact` on an unknown project refuse ("No project P") and leave nothing behind (backlog 51).
   Whichever process appends last re-materialises the fold into the `state` table, stamped with a hash of the

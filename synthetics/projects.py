@@ -865,13 +865,15 @@ def _cut_text(text: str, limit: int) -> str:
 
 def _shrink_lesson(lesson: dict) -> bool:
     """One step of trimming the lesson block to fit GET_BUDGET: notes go first, then evidence items from the
-    end (evidence_count keeps the full number, evidence_truncated says so). False when nothing is left to trim."""
+    end. evidence_count keeps the full number; evidence_truncated marks omitted notes as well as refs.
+    False when nothing is left to trim."""
     ev = lesson.get("evidence")
     if isinstance(ev, list):
         noted = [x for x in ev if "note" in x]
         if noted:
             for x in ev:
                 x.pop("note", None)
+            lesson["evidence_truncated"] = True
             return True
         if ev:
             ev.pop()
