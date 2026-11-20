@@ -96,10 +96,24 @@ class TelegramOperationTests(unittest.TestCase):
             base = "http://127.0.0.1:%s" % server.server_port
             brain = root / "test_brain"
             brain.write_text("#!" + sys.executable + "\n" + '''
-import json,os,sys,time
+import copy,json,os,sys,time
 from datetime import datetime,timedelta,timezone
 from synthetics.store import Store
-raw=sys.stdin.read(); c=json.loads(raw[raw.index('{'):])
+# Consume the documented model snapshot, including lossless presentation references.
+header, body = sys.stdin.read().split('\\n\\n', 1)
+c = json.loads(body)
+marker = 'Snapshot references (JSON Pointers): '
+references = json.loads(header.split(marker, 1)[1]) if marker in header else {}
+def at(pointer):
+ value = c
+ for part in pointer.split('/')[1:]:
+  part = part.replace('~1', '/').replace('~0', '~')
+  value = value[int(part)] if isinstance(value, list) else value[part]
+ return value
+for pointer, source in references.items():
+ parent, key = pointer.rsplit('/', 1)
+ value = at(parent); key = key.replace('~1', '/').replace('~0', '~')
+ value[int(key) if isinstance(value, list) else key] = copy.deepcopy(at(source))
 with Store(os.environ['SYNTHETICS_HOME'],run_id=c['run']['id']) as s:
  for e in c['events']:
   t=e.get('thread') or 'continuing-human-conversation'
@@ -210,6 +224,8 @@ print(json.dumps({'result':'Handled captured input through durable employee stat
                 for log in logs:
                     log.seek(0)
                     details.append(log.read().decode(errors="replace")[-3000:])
+                for path in (home / "runs").glob("*.stderr.txt"):
+                    details.append(path.read_text(errors="replace")[-3000:])
                 self.fail("Expected %r; service logs: %s" % (text, details))
 
             start()
