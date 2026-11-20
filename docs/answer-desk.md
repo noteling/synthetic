@@ -61,10 +61,14 @@ is set, so an employee session can't pair or serve. The desk binds to `127.0.0.1
   application/x-www-form-urlencoded`, and a per-form token: HMAC-SHA256(cookie, question ID |
   form nonce), compared in constant time.
 - Every response sets `Cache-Control: no-store`, `X-Frame-Options: DENY`,
-  `Referrer-Policy: no-referrer` and `Content-Security-Policy: default-src 'none';
+  `Referrer-Policy: same-origin` and `Content-Security-Policy: default-src 'none';
   style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'`. There is no
   JavaScript. PUT, DELETE and PATCH get 405.
 - The desk logs no request line, path, form field, header or body.
+
+`same-origin` preserves the Origin header on the desk's own form submissions while suppressing
+referrers to other origins. `no-referrer` would make browsers send `Origin: null` for those form
+POSTs, which the desk correctly refuses. Missing, null and cross-origin Origin values stay refused.
 
 ## Pages
 

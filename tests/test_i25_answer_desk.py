@@ -99,6 +99,16 @@ class DeskBase(unittest.TestCase):
 
 
 class PairingTests(DeskBase):
+    def test_pairing_page_preserves_the_origin_of_its_own_form(self):
+        # Browsers send Origin:null on a form navigation under no-referrer.
+        # Keep the Origin needed by our CSRF check, without sending cross-origin referrers.
+        code = answer_desk.pair(self.root)
+        status, headers, _ = self.request("GET", "/pair")
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Referrer-Policy"], "same-origin")
+        status, _, _ = self.request("POST", "/pair", {"code": code})
+        self.assertEqual(status, 303)
+
     def test_pair_sets_hash_only_session(self):
         code, cookie = self.paired()
         state = self.root / "answer-desk"
@@ -338,6 +348,7 @@ class RefusalTests(DeskBase):
         cases = [
             dict(headers={"Host": "evil.example:%d" % self.port}),
             dict(headers={"Origin": None}),
+            dict(headers={"Origin": "null"}),
             dict(headers={"Origin": "http://evil.example"}),
             dict(headers={"Origin": "http://localhost:%d" % self.port}),
             dict(headers={"Sec-Fetch-Site": "cross-site"}),
