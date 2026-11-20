@@ -3,7 +3,7 @@
 Floor is the Synthetics side of an employee taking part in a meeting by voice. Stand is the real-time
 interface (audio, speech, the human's panel); Synthetics is the brain. The design is the MTG P0
 (Vesper, approved by Codex 2026-11-19, review `management/realworld/meeting/p0-review.md`). It is built in
-three Synthetics-only slices:
+four Synthetics-only slices:
 
 - **F1 yield** (this document's first part): a meeting takes the idle boundary from ordinary work.
 - **F2 attach + meeting session**: the meeting's Claude session, journal, persona and brief.
@@ -130,8 +130,7 @@ A `begin` line with `goal` (the human's brief for this meeting) runs the meeting
 - **Panel lines (G4).** `note` and `confirm` live only in the journal (`human-panel`). They never become store
   events, so they can't answer a question, approve a click or stand in for the default human. The wrap event's
   sender is the channel, not the human.
-- **Retention (G5).** F2 never prunes `meetings/`. A pruning slice must pin journals cited by memories or work
-  evidence first.
+- **Retention (G5, R3).** Meeting journals have no automatic expiry. E4 runs pruning leaves `meetings/` intact.
 
 ## F3: the gate (floor_accept and floor verify)
 
@@ -220,10 +219,11 @@ number) and open items. No new tool: the link fields are copied from the wrap ev
 `floor verify RUN` reports per meeting `summary`:
 
 - A summary is a successful `memory_put` whose predicate is `meeting summary` (case and surrounding space ignored)
-  and whose source or value cites the meeting (the rule above).
+  and whose source or value cites the meeting (the rule above). Idempotent retries returning the same memory ID
+  count once; separate memories count separately.
 - `present`: exactly one, and it is anchored: its source cites the wrap event ID (`event-` + 8 or more of its hex),
-  and its value holds `meetings/<id>/journal.jsonl` and at least the first 12 hex characters of the wrap head's
-  sha256.
+  and its value holds `meetings/<id>/journal.jsonl` (a relative or absolute path, with no filename suffix or extra
+  path component) and at least the first 12 hex characters of the wrap head's sha256.
 - `missing` (none), `duplicate` (more than one), `unanchored` (one, not anchored). Each is a `summary` violation
   with the receipt lines. verify only reports it; the wrap is never refused for it.
 - A wrap run with no MCP receipts at all stays `no_evidence`, as before.

@@ -22,8 +22,8 @@ documented here and in docs/floor.md:
   an older answered question is not about this meeting). Any other citing work_put is ``unattributed_meeting_work``.
 - F4 (R4) meeting summary: a successful memory_put receipt whose predicate is ``meeting summary`` (case and
   surrounding space ignored) and whose source or value cites the meeting (as above) is a summary of it. Per meeting
-  verify reports ``summary``: ``present`` when exactly one is *anchored*, ``missing`` (none), ``duplicate`` (more than
-  one) or ``unanchored`` (one, but its source does not cite the wrap event ID, or its value lacks the journal path
+  verify reports ``summary``: ``present`` when exactly one memory is *anchored*, ``missing`` (none), ``duplicate`` (more than
+  one; idempotent retries of the same memory count once) or ``unanchored`` (one, but its source does not cite the wrap event ID, or its value lacks the journal path
   ``meetings/<id>/journal.jsonl`` or the first 12+ hex characters of the wrap head's sha256). Anything but
   ``present`` is a ``summary`` violation. verify only reports it; the wrap is never refused for it.
 - A memory_put receipt with ``replaces`` whose source cites the meeting and names ``line N`` (or ``lines N``,
@@ -192,6 +192,8 @@ _HEX = re.compile(r"[0-9a-f]{12,}")
 def _summary_state(meeting, wrap_id, head, cites, records):
     """F4: (state, receipt lines) of this meeting's summary memory_put receipts; see the module docstring."""
     found = []
+    seen = set()
+    lines = []
     for number, record in records:
         args = record.get("arguments") if isinstance(record.get("arguments"), dict) else {}
         if record.get("tool") != "memory_put":
@@ -199,8 +201,15 @@ def _summary_state(meeting, wrap_id, head, cites, records):
         if str(args.get("predicate") or "").strip().lower() != SUMMARY_PREDICATE:
             continue
         if cites(args.get("source")) or cites(args.get("value")):
+            lines.append(number)
+            # A retry returns the original durable memory ID. Count memories, not attempts.
+            result = record.get("result")
+            memory_id = result.get("id") if isinstance(result, dict) else None
+            if isinstance(memory_id, str) and memory_id:
+                if memory_id in seen:
+                    continue
+                seen.add(memory_id)
             found.append((number, args))
-    lines = [n for n, _ in found]
     if not found:
         return "missing", lines
     if len(found) > 1:
@@ -211,7 +220,8 @@ def _summary_state(meeting, wrap_id, head, cites, records):
     wrap_hex = wrap_id[len("event-"):] if isinstance(wrap_id, str) and wrap_id.startswith("event-") else None
     cites_wrap = wrap_hex is not None and any(
         wrap_hex.startswith(m.group(1)) for m in re.finditer(r"event-([0-9a-f]{8,})", source))
-    has_path = ("meetings/%s/journal.jsonl" % meeting) in value
+    journal = re.escape("meetings/%s/journal.jsonl" % meeting)
+    has_path = re.search(r"(?<![A-Za-z0-9_.:-])" + journal + r"(?![A-Za-z0-9_./:-])", value) is not None
     has_head = bool(sha) and any(sha.startswith(m.group(0)) for m in _HEX.finditer(value))
     return ("present" if cites_wrap and has_path and has_head else "unanchored"), lines
 

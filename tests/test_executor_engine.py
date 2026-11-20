@@ -56,6 +56,7 @@ class ExecutorEngineTests(unittest.TestCase):
             self.assertEqual(len(s.event_pending()),1)
 
     def test_unsupported_live_meeting_fails_before_yielding_ordinary_run(self):
+        (self.home/'floor.json').write_text('{"enabled":true}')
         key=b's'*32
         keyfile=Path(self.tmp.name)/'stand.key';keyfile.write_bytes(key);keyfile.chmod(0o600)
         with Store(self.home) as s:
