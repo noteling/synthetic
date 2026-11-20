@@ -22,6 +22,7 @@ from tests.humans_fixture import write_host_humans
 
 PAUSE_WORDS = "refused a session"
 RESUME_WORDS = "accepted sessions again"
+ENDED_WORDS = "without a provider refusal"
 
 
 def quota(reset_at=None, text="You've hit your weekly limit"):
@@ -287,8 +288,10 @@ class PauseResume(Base):
         with self.assertRaises(BrainError):
             engine._step()
         self.assertIsNone(self.pause_row(engine))
-        self.assertEqual(len(self.outbox(RESUME_WORDS)), 1)
-        self.assertIn("(failed)", self.outbox(RESUME_WORDS)[0]["body"])
+        # #99 L2 (a): one leaving message, not claiming the provider is back.
+        self.assertEqual(self.outbox(RESUME_WORDS), [])
+        self.assertEqual(len(self.outbox(ENDED_WORDS)), 1)
+        self.assertIn("failed for its own reasons", self.outbox(ENDED_WORDS)[0]["body"])
 
     def test_deliberate_stop_does_not_end_the_pause(self):
         self.feed()
@@ -315,14 +318,51 @@ class PauseResume(Base):
         self.age_pause(engine)
         self.assertEqual(self.pause(engine)["reason"], "daily_limit")
 
-    def test_provider_pause_admits_no_limit_bypass(self):
+    KEY = b"t" * 32
+
+    def authenticated(self, text, external_id):
         with Store(self.home) as store:
-            store.feed("david", "from Telegram", source="telegram:1")
+            if not any(c.get("name") == "telegram" for c in store.channel_list()):
+                store.channel_register("telegram", Store.credential_hash(self.KEY), ["telegram:"], "test")
+            return store.feed("david", text, source="telegram:1", external_id=external_id, credential=self.KEY)
+
+    def test_authenticated_event_bypasses_a_daily_limit(self):
+        # #99 L1 control: the event below is one the daily limit does admit, so the next test can tell.
+        with Store(self.home) as store:
+            run = store.run_begin(event_ids=[])
+            store.run_finish(run["id"], "spent", cost=5.0)
+        self.assertIsNotNone(self.authenticated("from Telegram", "tg:1")["auth"])
+        brain = Seq([])
+        engine = self.engine(brain, daily_limit=1.0, limit_allow=["david"])
+        self.assertEqual(engine._step()["status"], "finished")
+        self.assertEqual(len(brain.contexts), 1)
+
+    def test_provider_pause_admits_no_limit_bypass(self):
+        # #99 L1: an authenticated, limit_allow'ed event (one a daily limit lets through) still waits.
+        self.authenticated("first", "tg:0")
         brain = Seq([quota()])
         engine = self.engine(brain, limit_allow=["david"])
         engine._step()
+        self.authenticated("from Telegram", "tg:1")
         self.assertIs(engine._step(), PROVIDER_IDLE)
         self.assertEqual(len(brain.contexts), 1)
+
+    def test_l2_failed_session_does_not_claim_the_provider_is_back(self):
+        # #99 L2 (a): a session that fails before reaching the provider (the CLI can't start) ends the pause, but the
+        # message says only that a session ended without a provider refusal.
+        self.feed()
+        engine = self.engine(Seq([quota(), BrainError("Could not start Claude CLI: [Errno 2] No such file")]))
+        engine._step()
+        self.age_pause(engine)
+        with self.assertRaises(BrainError):
+            engine._step()
+        self.assertIsNone(self.pause_row(engine))
+        self.assertEqual(self.outbox(RESUME_WORDS), [])
+        ended = self.outbox(ENDED_WORDS)
+        self.assertEqual(len(ended), 1)
+        self.assertIn("resuming normal sessions", ended[0]["body"])
+        self.assertNotIn("resets at", ended[0]["body"])
+        self.assertIn("provider.resumed", [r["action"] for r in self.audit()])
 
     def test_lookout_paused_field_carries_the_provider_pause(self):
         from synthetics import sharedstatus
@@ -500,6 +540,15 @@ class EndToEnd(Base):
             with Store(self.home) as store:
                 store.run_finish(run["id"], "requested")
 
+    def reverts(self):
+        with Store(self.home) as store:
+            return [r["id"] for r in store.runtime_requests(50) if r.get("origin") == "revert" or r.get("revert")]
+
+    def last_good_timeout(self):
+        """LAST_GOOD's timeout, or a marker when the file is absent (so an absent file never passes as 300)."""
+        path = self.home / runtime.LAST_GOOD_FILE
+        return json.loads(path.read_text()).get("timeout") if path.exists() else "absent"
+
     def status(self, request_id):
         with Store(self.home) as store:
             return {r["id"]: r for r in store.runtime_requests(20)}[request_id]["status"]
@@ -520,14 +569,13 @@ class EndToEnd(Base):
             {"lines": tool_turns(), "result": SUCCESS, "exit": 0}])
         brain = ClaudeBrain(self.home, executable=str(fake.path), timeout=60, stream_output=True)
         engine = Engine(self.home, brain, runtime=second, limit_notify="codex-manager")
-        stop = threading.Event()
         for _ in range(4):  # the probation run, then three fast 429s (each try due at once)
             self.assertIsInstance(engine._step(), ProviderStep)
             self.age_pause(engine)
         self.assertEqual(fake.calls(), 4)
         self.assertEqual(self.status(request["id"]), "applied_unconfirmed")  # no revert
-        self.assertFalse((self.home / runtime.LAST_GOOD_FILE).exists()
-                         and json.loads((self.home / runtime.LAST_GOOD_FILE).read_text()).get("timeout") == 300)
+        self.assertEqual(self.reverts(), [])  # #99 n1: no revert record, whatever LAST_GOOD holds
+        self.assertNotEqual(self.last_good_timeout(), 300)
         # One more refusal leaves a real pause; the worker restarts in the middle of it.
         with Store(self.home) as store:
             row = engine._provider_pause_read(store)
@@ -551,9 +599,10 @@ class EndToEnd(Base):
             self.assertEqual(store.event_pending(), [])
             processed = [r for r in store.run_list(50) if event["id"] in [e["id"] for e in r.get("events") or []]]
         self.assertEqual([r["status"] for r in processed if r["status"] == "finished"], ["finished"])
+        self.assertEqual(self.reverts(), [])
+        self.assertEqual(self.last_good_timeout(), 300)  # the confirmed probation wrote it
         stream = (self.home / "runs" / (self.runs()[1]["id"] + ".stream.jsonl"))
         self.assertTrue(stream.exists())
-        stop.set()
 
 
 class Bytes(unittest.TestCase):
