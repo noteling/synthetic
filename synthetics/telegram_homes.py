@@ -263,6 +263,7 @@ def migrate_state(d: Dict[str, Any], primary: Dict[str, Any]) -> bool:
 
 
 HOLD = "hold"
+_TO_COMMAND = re.compile(r"/to(?:@[A-Za-z0-9_]{1,64})?")
 
 
 def resolve_reply(route_map: Dict[str, Any], reply_to_message_id: Optional[int],
@@ -389,7 +390,9 @@ CHOOSE_NOTICE = "Held: not sent to any manager yet. Who should get this?"
 HELD_DOWN_NOTICE = ("Held: %s can't be reached through this chat right now, so this message was not sent to it. "
                     "It is kept here until the operator fixes it.")
 HELD_DOWN_CHOOSE = ("Held: %s can't be reached through this chat right now, so this message was not sent to it. "
-                    "Pick another manager below, or it stays held until the operator fixes it.")
+                    "Pick a manager below to send it to; until you choose one, it stays held here.")
+HELD_REPLY_DOWN = ("Held: %s can't be reached through this chat right now, so this reply was not sent to it. "
+                   "It stays held for it and is sent to it when you choose it again after the operator fixes it.")
 TALKING_TO = "Talking to: %s"
 SENT_TO = "Sent to: %s"
 CALLBACK_WINDOW = 200            # handled callback ids kept (C2: replay beyond it is refused by the update cursor)
@@ -745,8 +748,9 @@ class HomesAdapter:
         target = selection_target(message, self.homes)
         if target is not None:
             return self._select(target, "keyboard", update_id, message)
-        if self.chooser and isinstance(text, str) and text.strip().split(" ", 1)[0] == "/to":
-            return self._command(update_id, message, text.strip()[3:].strip())
+        command = text.strip().split(None, 1) if isinstance(text, str) else []
+        if self.chooser and command and _TO_COMMAND.fullmatch(command[0]):
+            return self._command(update_id, message, command[1].strip() if len(command) > 1 else "")
         directive = parse_directive(text, self.homes) if self.chooser and not message.get("caption") else None
         verdict, home, entry = resolve_reply(self.route_map, reply_to, self.homes)
         extra: Dict[str, Any] = {}
@@ -761,6 +765,9 @@ class HomesAdapter:
             extra = dict(body=content, directive=prefix[:64])
             if self._save_selection(named, "directive", update_id):
                 self.notice(TALKING_TO % named["button"])
+            # Rowan #105 n1: earlier held messages go first, so arrival order is kept as with a tap.
+            if self._release(named).get("reason") == "store_error":
+                return {"processed": False, "reason": "store_error", "event_id": None}
             if verdict != "home":
                 verdict, home, entry = "home", named, None
         if verdict == "none":
@@ -782,7 +789,8 @@ class HomesAdapter:
                 logger.error("Home %s is down (%s); update %d not fed, will retry", home["key"],
                              self.down[home["key"]], update_id)
                 return {"processed": False, "reason": "store_error", "event_id": None, "home": home["key"]}
-            return self._hold(update_id, message, reply_to, reason="home_down", home=home, **extra)
+            return self._hold(update_id, message, reply_to, reason="home_down", home=home,
+                              target=home["key"] if (verdict == "home" and entry) else None, **extra)
         question = entry.get("question") if (verdict == "home" and entry) else None
         return self._feed(home, update_id, message, reply_to, entry if verdict == "home" else None, question,
                           **extra)
@@ -876,10 +884,12 @@ class HomesAdapter:
 
     def _hold(self, update_id: int, message: Dict[str, Any], reply_to: Optional[int],
               reason: str = "ambiguous", body: Optional[str] = None,
-              directive: Optional[str] = None, home: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+              directive: Optional[str] = None, home: Optional[Dict[str, Any]] = None,
+              target: Optional[str] = None) -> Dict[str, Any]:
         """F10: kept durably (cap 20) until a tap releases it (§3.4); never fed by itself. A hold is never silent:
         one Router notice per held message (with the inline chooser when there is a choice), and a message over
-        the cap gets a distinct notice that it was NOT kept."""
+        the cap gets a distinct notice that it was NOT kept. ``target``: a Reply to a home that is down stays held
+        for that home only (Rowan #105 L2); no other home's tap releases it, so its notice offers no choice."""
         held = self.d.setdefault("held", [])
         if any(h.get("update_id") == update_id for h in held):
             return {"processed": False, "reason": "held", "event_id": None}
@@ -889,11 +899,16 @@ class HomesAdapter:
         record = dict(update_id=update_id, message=message, reply_to=reply_to, reason=reason, at=_now())
         if body is not None:
             record.update(body=body, directive=directive)
+        if target is not None:
+            record["target"] = target
         held.append(record)
         self.state.save()
         # A message for a manager that can't be reached says so honestly (Rowan #104 L2), not "not sent yet".
         down = reason == "home_down" and home is not None
-        if self.chooser:
+        if self.chooser and target is not None:
+            record["notice"] = self.notice(HELD_REPLY_DOWN % home["label"])
+            self.state.save()
+        elif self.chooser:
             text = HELD_DOWN_CHOOSE % home["label"] if down else CHOOSE_NOTICE
             record["notice"] = self.notice(text, markup=inline_chooser(self.homes, self._gen()))
             self.state.save()
@@ -945,16 +960,25 @@ class HomesAdapter:
         self.notice(TALKING_TO % current["button"] if current else "Choose who to talk to below.")
         return {"processed": True, "reason": "command", "event_id": None}
 
+    def _held_for(self, record: Dict[str, Any], home: Dict[str, Any]) -> bool:
+        """Rowan #105 L2: a held Reply whose home was down waits for that home only, while it is still configured.
+        Every other hold (no selection, unknown target, conflict, plain message to a down home) goes to the
+        chosen home."""
+        target = record.get("target")
+        return target is None or target == home["key"] or all(h["key"] != target for h in self.homes)
+
     def _release(self, home: Dict[str, Any]) -> Dict[str, Any]:
-        """Feed held messages to ``home`` in arrival order. C1: once fed or refused, the body leaves the state; only
-        ids stay (``held_done``). A transient failure keeps that message and the rest held."""
-        if home["key"] in self.down or not self.d.get("held"):
+        """Feed the held messages meant for ``home`` (``_held_for``) in arrival order; the others stay held, in
+        order. C1: once fed or refused, the body leaves the state; only ids stay (``held_done``). A transient
+        failure keeps that message and the rest held and returns ``store_error``; the generation moves on only
+        after a complete release, so a redelivered inline tap still matches (Rowan #105 L1)."""
+        if home["key"] in self.down or not any(self._held_for(r, home) for r in self.d.get("held") or []):
             return {"released": 0}
-        self.d["chooser_gen"] = self._gen() + 1     # every inline chooser shown before now is stale
-        self.state.save()
         released = 0
-        while self.d.get("held"):
-            record = self.d["held"][0]
+        while True:
+            record = next((r for r in self.d.get("held") or [] if self._held_for(r, home)), None)
+            if record is None:
+                break
             reply_to = record.get("reply_to")
             verdict, target, entry = resolve_reply(self.route_map, reply_to, self.homes)
             same = verdict == "home" and target["key"] == home["key"]
@@ -963,7 +987,7 @@ class HomesAdapter:
                                 record.get("directive"))
             if result.get("reason") == "store_error":
                 return {"released": released, "reason": "store_error"}
-            self.d["held"].pop(0)
+            self.d["held"].remove(record)
             done = self.d.setdefault("held_done", [])
             done.append(dict(update_id=record["update_id"], home=home["key"], event_id=result.get("event_id"),
                              outcome=result.get("reason"), at=_now()))
@@ -972,6 +996,8 @@ class HomesAdapter:
             released += 1
             if record.get("notice") is not None:
                 self._edit(record["notice"], SENT_TO % home["button"])
+        self.d["chooser_gen"] = self._gen() + 1     # every inline chooser shown before now is stale
+        self.state.save()
         return {"released": released}
 
     def _edit(self, tg_mid: int, text: str) -> None:
@@ -1006,7 +1032,7 @@ class HomesAdapter:
                 reason = "callback_stale"
             elif home["key"] in self.down:
                 reason = "home_down"
-        if qid and reason != "unrecognized_sender":
+        if qid and reason is not None and reason != "unrecognized_sender":
             handled.append(qid)
             del handled[:-CALLBACK_WINDOW]
         if reason is not None:
@@ -1019,7 +1045,11 @@ class HomesAdapter:
         self.notice(TALKING_TO % home["button"])
         result = self._release(home)
         if result.get("reason") == "store_error":
+            # Rowan #105 L1: the id is not recorded, so Telegram's redelivery of this update finishes the release.
             return result
+        handled.append(qid)
+        del handled[:-CALLBACK_WINDOW]
+        self.state.save()
         return {"processed": True, "reason": "selected", "event_id": None, "home": home["key"],
                 "released": result.get("released", 0)}
 

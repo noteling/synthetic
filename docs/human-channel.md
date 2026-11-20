@@ -319,11 +319,21 @@ David never has to type a routing word. With two or more homes:
   choice and is treated the same (stated limit).
 - **Plain messages** go to the saved selection. With none (or a selection whose home is gone or re-pinned) the
   message is held.
-- **Reply** rules are unchanged and win over the selection; a Reply never changes the selection (F6).
+- **Reply** rules are unchanged and win over the selection. A plain Reply never changes the selection (F6); a
+  Reply that also starts with a directive naming the same home does (it selects like any directive, T21).
 - **Held messages** get one Router notice each, `Held: not sent to any manager yet. Who should get this?`, with
-  inline buttons `sel:<key>:<gen>`. Tapping one, or a keyboard button, saves that selection and feeds every held
-  message to that home in arrival order; each held notice is then edited to `Sent to: <button>` (its buttons go).
-  Over 20 held, the new message is not kept and a distinct Router notice says so.
+  inline buttons `sel:<key>:<gen>`. Tapping one, a keyboard button or a directive (alone or with content) saves
+  that selection and feeds the held messages to that home in arrival order, before any new content; each held
+  notice is then edited to `Sent to: <button>` (its buttons go). Over 20 held, the new message is not kept and a
+  distinct Router notice says so.
+- **A Reply to a manager that can't be reached** is held for that manager only: its notice says so and offers no
+  other manager, another manager's tap leaves it held, and it is fed (answering its question) when David next
+  chooses that manager after the operator has fixed it. A message held for any other reason (no selection,
+  unknown Reply target, a Reply/directive conflict, a plain message to an unreachable manager) goes to whichever
+  manager David chooses.
+- **A failed release** (the home's store refuses for a moment) keeps that message and the rest held. A tapped
+  inline button's callback id is recorded only after its release finished, and the generation moves on only
+  then, so Telegram's redelivery of the same tap finishes the job instead of being refused as a replay.
 - **C1.** A held message's body leaves the state file once it is fed or refused; `held_done` keeps only
   `update_id`, home, event id, outcome and time (last 200).
 - **Callbacks (C2).** Accepted only from the paired user in the paired chat, not a bot, for a configured key, the
@@ -342,7 +352,7 @@ David never has to type a routing word. With two or more homes:
 - **Config check.** A button that would read as a directive, a button equal to a shortcut, a button starting
   with `✓` or `/`, or one too long for the 64-character placeholder stops the adapter at load with a clear
   message; nothing is skipped silently.
-- `/to` re-sends the Router notice with the keyboard; `/to <shortcut|key|button>` selects. Optional; no text
+- `/to` (also `/to@<bot>`) re-sends the Router notice with the keyboard; `/to <shortcut|key|button>` selects. Optional; no text
   ever tells David to type it.
 - **Restart** keeps the selection and held messages; the adapter sends nothing by itself on start, and the next
   bot message refreshes the keyboard.
