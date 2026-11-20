@@ -9,30 +9,38 @@ import unittest
 from synthetics.brain import make_brain
 from synthetics.engine import Engine
 from synthetics.store import Store
+from synthetics.promptcontext import REFERENCE_HEADER
 
 
 BODY = "SOURCE-ONCE-51d9 " + "Keep the exact intention, café 🌱, and its provenance.\n" * 400
 
 
-def expand(value, root):
+def expand(value, references):
     """Test-side reader of the documented JSON Pointer presentation, independent of its writer."""
-    def target(pointer):
-        found = root
-        for part in pointer.split('/')[1:]:
-            part = part.replace('~1', '/').replace('~0', '~')
-            found = found[int(part)] if isinstance(found, list) else found[part]
-        return expand(found, root)
+    def path(pointer):
+        return [p.replace('~1', '/').replace('~0', '~') for p in pointer.split('/')[1:]]
 
-    if isinstance(value, list):
-        return [expand(v, root) for v in value]
-    if not isinstance(value, dict):
-        return value
-    if set(value) == {'context_ref'}:
-        return target(value['context_ref'])
-    result = {k: expand(v, root) for k, v in value.items() if k != 'body_ref'}
-    if 'body_ref' in value:
-        result['body'] = target(value['body_ref'])
+    def target(pointer):
+        found = value
+        for part in path(pointer):
+            found = found[int(part)] if isinstance(found, list) else found[part]
+        return found
+
+    result = copy.deepcopy(value)
+    for pointer, source in references.items():
+        parent = result
+        parts = path(pointer)
+        for part in parts[:-1]:
+            parent = parent[int(part)] if isinstance(parent, list) else parent[part]
+        last = int(parts[-1]) if isinstance(parent, list) else parts[-1]
+        parent[last] = copy.deepcopy(target(source))
     return result
+
+
+def read_prompt(prompt):
+    header, body = prompt.split('\n\n', 1)
+    references = json.loads(header.split(REFERENCE_HEADER, 1)[1]) if REFERENCE_HEADER in header else {}
+    return json.loads(body), references
 
 
 class PromptContextAcceptance(unittest.TestCase):
@@ -87,8 +95,8 @@ else:
                 prompt = (home / 'workspace/captured.txt').read_text()
                 self.assertEqual(prompt.count('SOURCE-ONCE-51d9'), 1,
                                  'The same captured event must not be serialized repeatedly')
-                presented = json.loads(prompt.split('\n\n', 1)[1])
-                self.assertEqual(expand(presented, presented), captured[0])
+                presented, references = read_prompt(prompt)
+                self.assertEqual(expand(presented, references), captured[0])
                 with Store(home) as store:
                     self.assertEqual(store.identity()['id'], identity['id'])
                     source = store.event_get(event['id'])

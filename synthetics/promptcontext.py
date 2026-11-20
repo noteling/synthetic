@@ -8,11 +8,12 @@ import copy
 import json
 
 
+REFERENCE_HEADER = "Snapshot references (JSON Pointers): "
 REFERENCE_GUIDANCE = (
-    "Repeated input arrays may be represented as {\"context_ref\":\"/events\"}; "
-    "an event's body_ref similarly points to its exact body. These are JSON Pointers "
-    "within this snapshot, not missing information or new messages. Resolve them here; "
-    "source/auth and reply metadata still belong to each record."
+    "Only paths declared in the reference map are presentation placeholders: their null "
+    "values reuse the exact material value at the target JSON Pointer in this snapshot. "
+    "All other values, including literal reference-looking objects, remain source data. "
+    "Resolve declared references here; each record keeps its own provenance and authority."
 )
 
 
@@ -42,48 +43,59 @@ def _worth_ref(original, replacement):
     return len(_encoded(original).encode("utf-8")) - len(_encoded(replacement).encode("utf-8")) >= 32
 
 
-def compact_context(context):
+def project_context(context):
     """Detach and share only identical event payloads; all unique values remain in the snapshot.
 
-    context_ref points to a complete earlier event array. body_ref points directly
-    to an earlier string of the same event ID with exactly the same text. Changed
-    auth/sender metadata is never inferred from another record, and a changed body
-    never aliases an older version. References never form chains or cycles.
+    Return (view, references), with references kept outside the caller's data.
+    Each reference maps a placeholder's JSON Pointer to an earlier material value.
+    Changed auth/sender metadata is never inferred from another record, and a
+    changed body never aliases an older version. Literal source keys are untouched.
     """
-    arrays, bodies = {}, {}
+    arrays, bodies, references = {}, {}, {}
 
     def visit(value, path):
         if isinstance(value, list):
             if _event_array(path):
                 key = _encoded(value)
                 if key in arrays:
-                    ref = {"context_ref": arrays[key]}
-                    if _worth_ref(value, ref):
-                        return ref
-                else:
-                    arrays[key] = _pointer(path)
-            return [visit(v, path + (i,)) for i, v in enumerate(value)]
+                    pointer = _pointer(path)
+                    if _worth_ref(value, {pointer: arrays[key]}):
+                        references[pointer] = arrays[key]
+                        return None
+            before = len(references)
+            result = [visit(v, path + (i,)) for i, v in enumerate(value)]
+            if _event_array(path) and len(references) == before:
+                # An array containing a placeholder must never become a target.
+                arrays.setdefault(key, _pointer(path))
+            return result
         if not isinstance(value, dict):
             return copy.deepcopy(value)
         body_ref = None
         if (_event_record(path) and str(value.get("id", "")).startswith("event-")
-                and isinstance(value.get("body"), str) and "body_ref" not in value):
+                and isinstance(value.get("body"), str)):
             key = (value["id"], value["body"])
             if key in bodies:
-                ref = {"body_ref": bodies[key]}
-                if _worth_ref({"body": value["body"]}, ref):
+                pointer = _pointer(path + ("body",))
+                if _worth_ref(value["body"], {pointer: bodies[key]}):
                     body_ref = bodies[key]
             else:
                 bodies[key] = _pointer(path + ("body",))
-        result = {k: visit(v, path + (k,)) for k, v in value.items()
-                  if not (k == "body" and body_ref is not None)}
+        result = {k: (None if k == "body" and body_ref is not None else visit(v, path + (k,)))
+                  for k, v in value.items()}
         if body_ref is not None:
-            result["body_ref"] = body_ref
+            references[_pointer(path + ("body",))] = body_ref
         return result
 
-    return visit(context, ())
+    return visit(context, ()), references
 
 
-def render_context(context):
-    """Model JSON only; keep whitespace stable for prompt caching and human inspection."""
-    return json.dumps(compact_context(context), ensure_ascii=False, indent=2)
+def render_context(context, preamble):
+    """Complete model message; reference instructions must not outweigh saved data."""
+    view, references = project_context(context)
+    original = json.dumps(context, ensure_ascii=False, indent=2)
+    if references:
+        presented = json.dumps(view, ensure_ascii=False, indent=2)
+        header = " " + REFERENCE_GUIDANCE + "\n" + REFERENCE_HEADER + _encoded(references)
+        if len((header + presented).encode("utf-8")) < len(original.encode("utf-8")):
+            return preamble + header + "\n\n" + presented
+    return preamble + "\n\n" + original

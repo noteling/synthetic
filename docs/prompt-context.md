@@ -4,21 +4,30 @@ The engine keeps full incoming events, current work, memory, relationships and e
 Only the JSON sent to an ordinary reasoning executor uses a lossless presentation of repeated
 event data. This applies to Claude CLI, Codex CLI and their configured connections.
 
-For example, when `events`, `pending_events` and the current run all contain the same input:
+For example, when `events`, `pending_events` and the current run all contain the same input,
+the model message declares this reference map **outside** the JSON snapshot:
+
+```json
+{"/pending_events": "/events", "/run/events": "/events"}
+```
+
+The corresponding snapshot contains placeholders only at those declared paths:
 
 ```json
 {
   "events": [{"id": "event-example", "body": "The complete source text stays here."}],
-  "pending_events": {"context_ref": "/events"},
-  "run": {"events": {"context_ref": "/events"}}
+  "pending_events": null,
+  "run": {"events": null}
 }
 ```
 
-`context_ref` replaces an identical event array. `body_ref` replaces the repeated body of the
-same event ID, while keeping that record's own sender, authentication, source, thread, reply
-and sequence metadata. Both use JSON Pointers into the same snapshot. Slash and tilde in a
+An identical event array, or a repeated body of the same event ID, can be shared while keeping
+that record's own sender, authentication, source, thread, reply and sequence metadata.
+The reference map uses JSON Pointers into the same snapshot. Slash and tilde in a
 pointer component are escaped as `~1` and `~0`. Targets are earlier material values; references
-do not point to another reference. Short values stay inline when a reference would cost more.
+do not point to another reference or to a container holding references. Only explicitly declared
+paths are expanded, so literal reference-looking source values keep their original meaning.
+Short values stay inline when references and their instructions would cost more.
 
 The executor's instruction explains how to read these references. Every unique historical body
 and every changed version remains present. No memory or source record is deleted, summarized,
