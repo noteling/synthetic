@@ -233,6 +233,9 @@ def load(home, baseline, allowed_models=None, allowed_claude=None, allowed_codex
     on first start is seeded from the baseline (both files), which is not a problem.
     """
     home = Path(home)
+    if allowed_config is None:
+        allowed_config = ({"path": baseline.get("brain_config"), "sha256": baseline.get("brain_config_sha256")}
+                          if baseline.get("brain") == "configured" else {})
     problems = []
     current, error = _read(home / CONFIG_FILE, allowed_models, allowed_claude, allowed_codex, allowed_config)
     if current is not None:

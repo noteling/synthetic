@@ -89,6 +89,16 @@ class ConfiguredControlTests(unittest.TestCase):
         self.assertEqual(result["effective"]["brain"], "configured")
         self.assertTrue(all("pinned" in problem for problem in result["problems"]))
 
+    def test_low_level_runtime_loader_infers_the_owner_pin_without_a_controller(self):
+        runtime.write_atomic(self.home / runtime.CONFIG_FILE, baseline())
+        selected = runtime.load(self.home, self.config)
+        self.assertEqual(selected["effective"]["brain"], "configured")
+        self.assertIn("pinned", selected["problems"][0])
+        runtime.write_atomic(self.home / runtime.CONFIG_FILE, self.config)
+        selected = runtime.load(self.home, baseline())
+        self.assertNotEqual(selected["source"], "file")
+        self.assertIn("No brain config was provisioned", selected["problems"][0])
+
     def test_operational_settings_survive_reload_without_changing_the_selection(self):
         runtime.write_atomic(self.home / runtime.CONFIG_FILE, dict(self.config, timeout=900, poll=4))
         controller = runtime.Controller(self.home, self.config)
