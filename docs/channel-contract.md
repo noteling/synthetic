@@ -158,11 +158,12 @@ One response line per request line, in order:
 {"v":1,"external_id":"…","result":"accepted|duplicate|rejected","event_id":"event-…|null","error":null}
 ```
 
-`provider` is a flat object of 1 to 8 keys matching `[a-z][a-z0-9_]{0,31}`; each value is an
-integer, nonempty text of at most 64 characters, or null; the whole object is at most 256 UTF-8
+`provider` is a flat object of 1 to 8 keys matching `[a-z][a-z0-9_]{0,31}` exactly (no trailing newline); each value is a
+signed 64-bit integer, nonempty text of at most 64 characters, or null; the whole object is at most 256 UTF-8
 bytes. Anything else is `bad_line`. It is stored on the event as `provider`, takes part in the
-idempotency check (the same `external_id` with other refs is `conflict`), is never interpreted by
-the engine and is never echoed by `event-status`. It never answers a question or wakes work.
+idempotency check (the same `external_id` with other refs is `conflict`), is not interpreted by
+the engine and is never echoed by `event-status`. It is not hidden: the employee sees it on the event
+(for example in `pending_events`). It never answers a question or wakes work.
 
 Every accepted event is stamped `auth: {channel: …}`. Redelivering the same
 `(source, external_id)` with the same content returns `duplicate` and the

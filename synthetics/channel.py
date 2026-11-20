@@ -27,7 +27,8 @@ FEATURES = ("inbound.provider", "identity")
 PROVIDER_MAX_BYTES = 256
 PROVIDER_MAX_KEYS = 8
 PROVIDER_TEXT_MAX = 64
-_PROVIDER_KEY = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+_PROVIDER_KEY = re.compile(r"[a-z][a-z0-9_]{0,31}")  # fullmatch: $ would accept a trailing newline
+PROVIDER_INT_MIN, PROVIDER_INT_MAX = -2 ** 63, 2 ** 63 - 1  # signed 64-bit
 
 
 class UsageFailure(Exception):
@@ -76,20 +77,22 @@ def _opt_text(item, field):
 def _provider(item):
     """#100 P1: optional provider references for the message (e.g. Telegram message_id, reply_to_message_id,
     chat_id). Transport-neutral: a small flat object of short keys whose values are integers, short text or null.
-    Stored on the event as `provider`; never interpreted by the engine and never echoed by event-status."""
+    Stored on the event as `provider`: not interpreted by the engine and never echoed by event-status, but
+    visible to the employee on the event (e.g. in pending_events)."""
     value = item.get("provider")
     if value is None:
         return None
     if not isinstance(value, dict) or not value or len(value) > PROVIDER_MAX_KEYS:
         raise ChannelError("bad_line", "provider must be a nonempty object of at most %d keys" % PROVIDER_MAX_KEYS)
     for key, ref in value.items():
-        if not _PROVIDER_KEY.match(key):
+        if not isinstance(key, str) or not _PROVIDER_KEY.fullmatch(key):
             raise ChannelError("bad_line", "provider key %r must match [a-z][a-z0-9_]{0,31}" % key)
-        if ref is None or (isinstance(ref, int) and not isinstance(ref, bool)):
+        if ref is None or (isinstance(ref, int) and not isinstance(ref, bool)
+                           and PROVIDER_INT_MIN <= ref <= PROVIDER_INT_MAX):
             continue
         if isinstance(ref, str) and ref.strip() and len(ref) <= PROVIDER_TEXT_MAX:
             continue
-        raise ChannelError("bad_line", "provider.%s must be an integer, nonempty text of at most %d characters, "
+        raise ChannelError("bad_line", "provider.%s must be a signed 64-bit integer, nonempty text of at most %d characters, "
                            "or null" % (key, PROVIDER_TEXT_MAX))
     if len(json.dumps(value, sort_keys=True, ensure_ascii=False).encode("utf-8")) > PROVIDER_MAX_BYTES:
         raise ChannelError("bad_line", "provider is over %d bytes" % PROVIDER_MAX_BYTES)
