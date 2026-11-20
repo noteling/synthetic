@@ -3439,9 +3439,11 @@ class Store:
             self._quarantine_left_ready(run, "finished")
             return self._save("runs", run, "run.finished")
 
-    def run_fail(self, run_id, error, cost=None, yielded=None):
+    def run_fail(self, run_id, error, cost=None, yielded=None, provider=None):
         """Record a failed run. cost is the session's reported cost when known. yielded (MTG F1): the meeting this
-        run was stopped for; such a run is no failure verdict and quarantines no routine (its inputs stay pending)."""
+        run was stopped for; such a run is no failure verdict and quarantines no routine (its inputs stay pending).
+        provider (#98 D2/D3): {kind, status, api_error, reset_at} when the provider refused the session (quota or
+        outage); likewise no failure verdict and no routine quarantine."""
         if not isinstance(cost, (int, float)) or isinstance(cost, bool):
             cost = None
         with self._tx():
@@ -3451,9 +3453,11 @@ class Store:
             run.update(status="failed", error=str(error), cost=cost, finished_at=timestamp())
             if yielded is not None:
                 run["yielded"] = str(yielded)
+            if provider is not None:
+                run["provider"] = {k: provider.get(k) for k in ("kind", "status", "api_error", "reset_at")}
             run["receipt_chain"] = self._receipt_chain(run_id)
             self._stream_chain(run, run_id)
-            if yielded is None:
+            if yielded is None and provider is None:
                 self._quarantine_left_ready(run, "failed")
             return self._save("runs", run, "run.failed")
 

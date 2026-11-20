@@ -280,7 +280,10 @@ def _delegated_limit(store, home, args):
                                 what="limit resume %s" % home,
                                 check=lambda sc: authority.homes_cover(sc["homes"], home, a.get("home")))
         latest = failure_streak(store.run_list(50))  # MTG F1: yielded runs are skipped
-        fields = dict(resume_after_run=latest, resumed_by=by)
+        from datetime import datetime, timezone
+        # #98 P3: resume also asks for an early try of a provider pause (the engine sets next_try_at = now and audits)
+        fields = dict(resume_after_run=latest, resumed_by=by,
+                      provider_resume_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
         if res["delegation"]:
             fields.update(delegation=res["delegation"], resumed_run=a["run"])
         return authority.fenced_file(res["warrant"], lambda: write_limit_override(home, **fields))
@@ -722,7 +725,7 @@ def parser():
                                   "instead of today's override")
     limit_raise.add_argument("--reason", help="reason recorded with a --persistent request")
     limit_raise.add_argument("--key", help="idempotency key for a --persistent request")
-    limit_resume = limit_sub.add_parser("resume", help="clear a recent-failures pause after inspecting the runs")
+    limit_resume = limit_sub.add_parser("resume", help="clear a recent-failures pause after inspecting the runs; also tries a provider (quota) pause now")
     limit_resume.add_argument("--by", help="display label (owner default operator; a session must name itself)")
     sub.add_parser("backfill-cost", help="recover cost of failed runs from retained Claude output (idempotent)")
     runs = sub.add_parser("runs", help="read recent work-session outcomes")

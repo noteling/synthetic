@@ -81,6 +81,104 @@ class BrainError(RuntimeError):
         self.cost = cost
 
 
+class ProviderUnavailable(BrainError):
+    """#98: the provider refused the session for quota or (untested) outage reasons.
+
+    Not a verdict on the session's settings or work: the engine pauses and retries
+    instead of counting it as a failure. kind is "quota" or "outage"; text is the
+    provider's own message bounded to TEXT_LIMIT UTF-8 bytes; reset_at is a UTC ISO
+    time parsed from the text, or None.
+    """
+
+    TEXT_LIMIT = 300  # bytes, cut at a UTF-8 boundary (Rowan n2; the E4 rule)
+
+    def __init__(self, message="", cost=None, kind="quota", status=None, api_error=None,
+                 api_error_type=None, text="", reset_at=None):
+        super().__init__(message, cost=cost)
+        self.kind = kind
+        self.status = status
+        self.api_error = api_error
+        self.api_error_type = api_error_type
+        self.text = text
+        self.reset_at = reset_at
+
+    def provider(self):
+        """IDs, ints and short strings only: the run's provider field."""
+        return {"kind": self.kind, "status": self.status, "api_error": self.api_error,
+                "reset_at": self.reset_at}
+
+
+def cut_utf8(text, limit):
+    """text bounded to `limit` UTF-8 bytes, never splitting a character."""
+    return text.encode("utf-8")[:limit].decode("utf-8", "ignore")
+
+
+_RESET_HINT = None
+RESET_MAX_AHEAD_SECONDS = 8 * 24 * 3600  # Codex Q3: later or past => unparsed, backoff
+
+
+def parse_reset_hint(text, now=None):
+    """'resets 8am (America/New_York)' / 'resets 8:30pm (Europe/London)' -> next such
+    instant after now as a UTC ISO string. Anything else, an unknown zone, or a result
+    in the past or more than 8 days ahead -> None. Never raises."""
+    import re
+    from datetime import datetime, timedelta, timezone
+    global _RESET_HINT
+    if _RESET_HINT is None:
+        _RESET_HINT = re.compile(r"\bresets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([A-Za-z0-9_+\-/]+)\)",
+                                 re.IGNORECASE)
+    if not isinstance(text, str):
+        return None
+    match = _RESET_HINT.search(text)
+    if not match:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+        zone = ZoneInfo(match.group(4))
+    except Exception:
+        return None
+    hour, minute = int(match.group(1)), int(match.group(2) or 0)
+    if not 1 <= hour <= 12 or minute > 59:
+        return None
+    hour = hour % 12 + (12 if match.group(3).lower() == "pm" else 0)
+    now = now or datetime.now(timezone.utc)
+    local = now.astimezone(zone)
+    candidate = local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if candidate <= local:
+        candidate = (local + timedelta(days=1)).replace(hour=hour, minute=minute, second=0, microsecond=0)
+    delta = (candidate - local).total_seconds()
+    if delta <= 0 or delta > RESET_MAX_AHEAD_SECONDS:
+        return None
+    return candidate.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def classify_provider(raw, now=None):
+    """#98 D1: a ProviderUnavailable for a Claude result whose terminal_reason is
+    api_error with quota (429 / rate_limit_error / usage_limit_reached) or outage
+    (529 / overloaded_error; UNTESTED: no observed sample, synthetic fixture only)
+    fields; otherwise None, and the caller keeps today's path. Never looks at
+    num_turns, duration or stderr."""
+    if not isinstance(raw, dict) or raw.get("terminal_reason") != "api_error":
+        return None
+    status = raw.get("api_error_status")
+    status = status if isinstance(status, int) and not isinstance(status, bool) else None
+    etype = raw.get("api_error_type") if isinstance(raw.get("api_error_type"), str) else None
+    api_error = raw.get("api_error") if isinstance(raw.get("api_error"), str) else None
+    if status == 429 or etype == "rate_limit_error" or api_error == "usage_limit_reached":
+        kind = "quota"
+    elif status == 529 or etype == "overloaded_error":
+        kind = "outage"  # untested: classified on documented fields, no sample on this host
+    else:
+        return None
+    text = raw.get("result") if isinstance(raw.get("result"), str) else ""
+    text = cut_utf8(" ".join(text.split()), ProviderUnavailable.TEXT_LIMIT)
+    reset_at = parse_reset_hint(text, now) if kind == "quota" else None
+    label = "/".join(str(part) for part in (api_error, status) if part is not None) or (etype or "api_error")
+    message = "provider_unavailable %s (%s): %s" % (kind, label, text or "no provider text")
+    return ProviderUnavailable(message, cost=_cost_of(raw), kind=kind, status=status, api_error=api_error,
+                               api_error_type=etype, text=text, reset_at=reset_at)
+
+
 def _cost_of(raw):
     cost = raw.get("total_cost_usd") if isinstance(raw, dict) else None
     if not isinstance(cost, (int, float)) or isinstance(cost, bool):
@@ -471,6 +569,12 @@ class ClaudeBrain:
         stderr = error_path.read_text(encoding="utf-8", errors="replace")
         if len(stderr) > 16000:
             error_path.write_text(stderr[-16000:], encoding="utf-8")
+        try:  # #98 D1: claude.json before the exit status; absent/invalid falls through unchanged (C1)
+            unavailable = classify_provider(json.loads(output_path.read_text(encoding="utf-8")))
+        except (ValueError, OSError):
+            unavailable = None
+        if unavailable is not None:
+            raise unavailable
         if process.returncode:
             raise BrainError("Claude CLI exited with status %d. See %s." % (process.returncode, error_path),
                              cost=_read_cost(output_path))

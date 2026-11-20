@@ -39,7 +39,7 @@ from . import click, docket, glance, routines
 VERSION = 1
 RUNS = 10
 FILENAME = "status.json"
-PAUSE_KEYS = ("reason", "day", "limit_usd", "cost_usd", "run_id")
+PAUSE_KEYS = ("reason", "day", "limit_usd", "cost_usd", "run_id", "kind", "next_try_at", "attempts")  # #98: provider pause
 KEEP = object()
 STUCK_KEYS = ("id", "to", "kind", "question_id", "state", "age_minutes", "routed_by")  # VIS G8: never the body
 GLANCE_KEYS = ("id", "run_id", "at", "ok", "exit", "status", "counts", "find", "browser")
