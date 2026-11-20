@@ -5,7 +5,7 @@ import json
 import os
 import sys
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import board
@@ -27,6 +27,50 @@ LIMIT_FILE = "usage_limit.json"
 FAILURE_WINDOW = 3
 FAILURE_SCAN = 50  # MTG F1: runs read to find FAILURE_WINDOW non-yielded ones
 YIELD_PREFIX = "yielded: meeting "
+PROVIDER_KEY = "provider_pause"  # #98 D4: capture_meta row, so a worker restart keeps the pause
+PROVIDER_RESET_SLACK = 120  # seconds after a parsed reset time (Codex Q3)
+PROVIDER_RESET_MAX_AHEAD = 8 * 24 * 3600  # Codex Q3: a reset time later than this, or past, counts as unparsed
+
+
+class ProviderStep(dict):
+    """#98 P1: the run record of a session the provider refused. serve neither counts it as a failure nor
+    resets its failure counter (it is no verdict either way)."""
+
+
+class _ProviderIdle:
+    """#98 P1: _step found the provider pause in force. Falsy like None, but serve keeps its failure counter."""
+
+    def __bool__(self):
+        return False
+
+
+PROVIDER_IDLE = _ProviderIdle()
+
+
+def _provider_refused(error):
+    """#98: is this the provider refusing the session? brain is imported lazily, as in apply_runtime: minimal copies of
+    the engine (the experiment fixture) ship without brain.py."""
+    try:
+        from .brain import ProviderUnavailable
+    except ImportError:
+        return False
+    return isinstance(error, ProviderUnavailable)
+
+
+def _now():
+    return datetime.now(timezone.utc)
+
+
+def _iso(moment):
+    return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _parse_iso(value):
+    try:
+        moment = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    return moment if moment.tzinfo else None
 
 
 def utc_day(moment=None):
@@ -56,8 +100,10 @@ def write_limit_override(home, **fields):
 def failure_streak(runs, window=FAILURE_WINDOW):
     """Latest run id when the newest `window` runs all failed or were interrupted, else None.
     MTG F1 (C3): a run stopped for a meeting (`yielded`) is no verdict; it is skipped, neither failure nor success.
-    MTG F2: a meeting run (kind `meeting`) is run by the attach process, not the worker: skipped too."""
-    recent = [run for run in runs if not run.get("yielded") and run.get("kind") != "meeting"][:window]
+    MTG F2: a meeting run (kind `meeting`) is run by the attach process, not the worker: skipped too.
+    #98 D3: a run the provider refused (`provider`, quota/outage) is no verdict either: skipped."""
+    recent = [run for run in runs
+              if not run.get("yielded") and run.get("kind") != "meeting" and not run.get("provider")][:window]
     if len(recent) < window or any(run.get("status") not in ("failed", "interrupted") for run in recent):
         return None
     return recent[0]["id"]
@@ -125,6 +171,7 @@ class Engine:
         self.limit_notify = limit_notify or None
         self.limit_allow = frozenset(limit_allow or ())
         self.failure_pause = None  # latest failed run id when serve started in a failure streak
+        self.provider_backoff = (300, 600, 1200, 2400, 3600)  # #98 D4 / Codex Q3: seconds, last one is the cap
         self._last_pause = None
         self.runtime = runtime  # M19 runtime.Controller, or None for a fixed argv configuration
         self.retention = {"keep_days": 30.0, "max_mb": 200.0}  # E4 runs/ retention (runtime.json runs_keep_days/_max_mb)
@@ -167,6 +214,9 @@ class Engine:
         if self.failure_pause and override.get("resume_after_run") != self.failure_pause:
             return {"reason": "recent_failures", "run_id": self.failure_pause}
         self.failure_pause = None
+        provider = self._provider_pause_state(store, override)  # #98 C4: failure > provider > daily limit
+        if provider is not None:
+            return provider
         today = utc_day()
         limit = self.daily_limit
         if override.get("date") == today and isinstance(override.get("limit_usd"), (int, float)):
@@ -179,6 +229,116 @@ class Engine:
                     "unknown_cost_runs": usage["unknown_cost_runs"]}
         return None
 
+    # #98 D4: provider pause (quota / outage). One capture_meta row; every change is audited.
+    def _provider_pause_read(self, store):
+        row = store.db.execute("SELECT v FROM capture_meta WHERE k=?", (PROVIDER_KEY,)).fetchone()
+        if row is None:
+            return None
+        try:
+            value = json.loads(row["v"])
+        except (TypeError, ValueError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    def _provider_pause_write(self, store, value, action, audit):
+        with store._tx():
+            if value is None:
+                store.db.execute("DELETE FROM capture_meta WHERE k=?", (PROVIDER_KEY,))
+            else:
+                store.db.execute("INSERT INTO capture_meta(k,v) VALUES (?,?) ON CONFLICT(k) DO UPDATE SET "
+                                 "v=excluded.v", (PROVIDER_KEY, json.dumps(value, sort_keys=True)))
+            store._audit(action, (value or {}).get("run_id") or audit.get("run_id"), audit)
+
+    @staticmethod
+    def _provider_public(pause):
+        return {"reason": "provider_unavailable", "kind": pause.get("kind"), "run_id": pause.get("run_id"),
+                "next_try_at": pause.get("next_try_at"), "attempts": pause.get("attempts")}
+
+    def _provider_pause_state(self, store, override):
+        pause = self._provider_pause_read(store)
+        if pause is None:
+            return None
+        now = _now()
+        # P3: `limit resume` asks for an early try: next_try_at = now, attempts kept, audited.
+        asked = _parse_iso(override.get("provider_resume_at"))
+        updated = _parse_iso(pause.get("updated_at"))
+        if asked is not None and (updated is None or asked > updated):
+            pause.update(next_try_at=_iso(now), updated_at=_iso(now))
+            self._provider_pause_write(store, pause, "provider.resume_requested",
+                                       {"run_id": pause.get("run_id"), "by": override.get("resumed_by"),
+                                        "attempts": pause.get("attempts")})
+        next_try = _parse_iso(pause.get("next_try_at"))
+        if next_try is not None and now < next_try:
+            return self._provider_public(pause)
+        return None  # due: the next ordinary session is the try (no separate probe call)
+
+    def _provider_next_try(self, now, attempts, reset_at):
+        reset = _parse_iso(reset_at)
+        if reset is not None and now < reset and (reset - now).total_seconds() <= PROVIDER_RESET_MAX_AHEAD:
+            return reset + timedelta(seconds=PROVIDER_RESET_SLACK)
+        backoff = self.provider_backoff
+        return now + timedelta(seconds=backoff[min(attempts, len(backoff)) - 1])
+
+    def _provider_run(self, run_id, error):
+        """#98 D3/D4/D5: the provider refused the session. The run is failed with its cause visible but is no
+        verdict: no routine quarantine, no probation decision, no failure-streak or serve count. Inputs stay pending
+        and replay after the pause (at-least-once). The owner hears once on entering and once on leaving."""
+        with Store(self.home) as store:
+            failed = store.run_fail(run_id, str(error) or type(error).__name__, cost=getattr(error, "cost", None),
+                                    provider=error.provider())
+            now = _now()
+            pause = self._provider_pause_read(store)
+            first = pause is None
+            attempts = 1 if first else int(pause.get("attempts") or 0) + 1
+            next_try = self._provider_next_try(now, attempts, error.reset_at)
+            pause = dict(pause or {}, kind=error.kind, last_run=run_id, attempts=attempts, next_try_at=_iso(next_try),
+                         updated_at=_iso(now), text=error.text)
+            if first:
+                pause.update(run_id=run_id, since=_iso(now))
+            self._provider_pause_write(store, pause, "provider.paused",
+                                       {"run_id": pause["run_id"], "last_run": run_id, "kind": error.kind,
+                                        "attempts": attempts, "next_try_at": pause["next_try_at"]})
+            public = self._provider_public(pause)
+            self._last_pause = public
+            sharedstatus.write(store, paused=public)  # Lookout's paused field is the primary signal (C2)
+            if first and self.limit_notify:
+                body = ("Synthetics home %s: the model provider refused a session (%s; provider said: %s). New "
+                        "sessions are paused; next try %s UTC, then it keeps retrying with backoff and resumes by "
+                        "itself. No action needed. To try sooner: synthetics --home %s limit resume."
+                        % (self.home, error.kind, error.text or "no text", pause["next_try_at"], self.home))
+                try:
+                    store.message_send(self.limit_notify, body, key="provider-pause-%s" % pause["run_id"])
+                except ValueError:
+                    pass
+            try:
+                board.advance(store, run_id, finished=False)
+            except Exception:  # noqa: BLE001
+                pass
+        self.on_update(dict(public, type="provider_paused", last_run=run_id))
+        return ProviderStep(failed)
+
+    def _provider_resumed(self, store, run_id, outcome):
+        """#98 D5: the first session the provider accepted (finished, or failed for its own reasons) ends the pause."""
+        try:
+            pause = self._provider_pause_read(store)
+            if pause is None:
+                return
+            now = _iso(_now())
+            self._provider_pause_write(store, None, "provider.resumed",
+                                       {"run_id": pause.get("run_id"), "accepted_run": run_id, "outcome": outcome,
+                                        "attempts": pause.get("attempts")})
+            if self.limit_notify:
+                body = ("Synthetics home %s: the model provider accepted sessions again at %s after %s refused "
+                        "session(s) (first %s); first accepted session %s (%s)."
+                        % (self.home, now, pause.get("attempts"), pause.get("run_id"), run_id, outcome))
+                try:
+                    store.message_send(self.limit_notify, body, key="provider-resume-%s" % pause.get("run_id"))
+                except ValueError:
+                    pass
+            self.on_update({"type": "provider_resumed", "run_id": run_id, "pause_run": pause.get("run_id")})
+        except Exception as problem:  # noqa: BLE001 - never masks the run's own outcome; stays visible
+            self.on_update({"type": "provider_resume_error", "run_id": run_id, "error": type(problem).__name__})
+
     # M25 §4: which channels and senders may pass a limit pause is the home's humans.json
     # limit_bypass, intersected with runtime limit_allow, and always requires channel auth (M22).
     # Operator notices never bypass (C1).
@@ -190,8 +350,8 @@ class Engine:
             self._last_pause = pause
             self.on_update(dict(pause, type="paused"))
             sharedstatus.write(store, paused=pause)  # VIS C1: Lookout shows the pause
-        if not self.limit_notify:
-            return
+        if not self.limit_notify or pause["reason"] == "provider_unavailable":
+            return  # #98 D5: the provider pause's one message is sent when it begins (_provider_run)
         if pause["reason"] == "daily_limit":
             key = "daily-soft-limit-%s-%s" % (pause["day"], pause["limit_usd"])
             body = ("Daily soft limit reached for %s (UTC): known spend $%.2f of $%.2f; %d run(s) of unknown cost. "
@@ -267,7 +427,7 @@ class Engine:
                     allowed = [e["id"] for e in store.event_pending_select(
                         lambda e: not store.admission_held(e) and self._admissible_during_limit(e, humans_cfg))]
                 if not allowed:
-                    return None
+                    return PROVIDER_IDLE if pause["reason"] == "provider_unavailable" else None
                 try:
                     run = store.run_begin(event_ids=allowed, **self._run_executor())
                 except WorkerHeld:
@@ -298,6 +458,7 @@ class Engine:
             result = self._run_yieldable(run["id"], context, yielded)
             with Store(self.home) as store:
                 finished = store.run_finish(run["id"], result.summary, cost=result.cost)
+                self._provider_resumed(store, run["id"], "finished")
                 self._yield_ended_itself(store, run["id"], yielded)
                 sharedstatus.write(store, paused=self._last_pause)  # VIS: session ended, idle
                 try:
@@ -312,9 +473,13 @@ class Engine:
         except BaseException as error:
             if yielded.get("stopped") and isinstance(error, Exception):
                 return self._yielded_run(run["id"], error, yielded)
+            if _provider_refused(error):
+                return self._provider_run(run["id"], error)
             # Tool effects may already exist. Failed input is retained for reconciliation.
             with Store(self.home) as store:
                 store.run_fail(run["id"], str(error) or type(error).__name__, cost=getattr(error, "cost", None))
+                if isinstance(error, Exception):  # a stop (KeyboardInterrupt) is no sign the provider is back
+                    self._provider_resumed(store, run["id"], "failed")
                 sharedstatus.write(store, paused=self._last_pause)  # VIS: session ended (failed), idle
                 try:
                     board.advance(store, run["id"], finished=False)
@@ -408,7 +573,7 @@ class Engine:
             completed = []
             for _ in range(max_turns):
                 result = self._step()
-                if result is None:
+                if result is None or result is PROVIDER_IDLE:
                     break
                 completed.append(result)
             return completed
@@ -479,7 +644,8 @@ class Engine:
                         continue
                 try:
                     result = self._step()
-                    failures = 0
+                    if not isinstance(result, ProviderStep) and result is not PROVIDER_IDLE:
+                        failures = 0  # #98 P1: a provider-refused run or pause neither counts nor resets
                 except Exception as error:
                     failures += 1
                     if failures >= 3:

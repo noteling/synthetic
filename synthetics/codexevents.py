@@ -147,10 +147,12 @@ class CodexReducer:
             parts = ()
         parts += (value.get("message"), value.get("code"))
         text = " ".join(part[:4096] for part in parts if isinstance(part, str))
-        if QUOTA.search(text):
-            self._fail("quota", "Codex provider quota or rate limit reached.")
-        elif AUTH.search(text):
+        # #98 L1 (Rowan): AUTH before QUOTA. An auth failure needs a human; read as quota it would be retried
+        # silently by the provider pause. Codex has no structured error field, so this classifies on text.
+        if AUTH.search(text):
             self._fail("authentication", "Codex authentication failed; sign in with codex login.")
+        elif QUOTA.search(text):
+            self._fail("quota", "Codex provider quota or rate limit reached.")
         else:
             self._fail("provider", "Codex reported a failed turn.")
 

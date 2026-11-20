@@ -10,7 +10,7 @@ import tempfile
 import threading
 import uuid
 
-from .brain import BrainError, BrainResult, ClaudeBrain, CURRENT, recorded_profile, system_prompt
+from .brain import BrainError, BrainResult, ClaudeBrain, CURRENT, ProviderUnavailable, recorded_profile, system_prompt
 from .promptcontext import render_context
 
 
@@ -266,6 +266,9 @@ class CodexBrain(ClaudeBrain):
                     error_path.write_bytes(tail)
         if timed_out:
             raise BrainError("Codex session exceeded %.1f seconds; work and tool effects remain recorded." % self.timeout)
+        if result.get("error_kind") == "quota":  # #98 D1/Q6: the error mapping only (separable hunk)
+            raise ProviderUnavailable("provider_unavailable quota (codex): %s" % result.get("error"),
+                                      kind="quota", text=result.get("error") or "")
         if process is not None and process.returncode:
             raise BrainError("Codex CLI exited with status %s (%s); work and tool effects remain recorded."
                              % (process.returncode, result.get("error_kind") or "executor failure"))

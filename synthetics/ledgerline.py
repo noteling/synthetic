@@ -610,7 +610,10 @@ STREAM_ALLOWED = {
     "tool_use": frozenset({"tool_use_id", "name", "input_bytes", "input_sha256"}),
     "displayed": frozenset({"tool_use_id", "bytes", "sha256", "shape", "reported_chars", "saved_outside_home"}),
     "turn": frozenset({"text_blocks", "text_bytes"}),
-    "result": frozenset({"subtype", "is_error", "num_turns", "total_cost_usd", "duration_ms", "usage"}),
+    # #98 D2: the api error fields (short names/ints) and, only for terminal_reason api_error, the provider's own
+    # message bounded to 300 UTF-8 bytes. No other result text enters the stream.
+    "result": frozenset({"subtype", "is_error", "num_turns", "total_cost_usd", "duration_ms", "usage",
+                         "terminal_reason", "api_error", "api_error_status", "api_error_type", "api_error_text"}),
     "tool": frozenset({"item_type", "state"}),
     "stream_error": frozenset({"stage", "type"}),
     # E4-r2 (Rowan B1): the pipe was still held open after the CLI exited (an escaped descendant); the reader was
@@ -749,6 +752,16 @@ class StreamReducer:
                 elif isinstance(value, bool) or not isinstance(value, (int, float)):
                     value = None
                 fact[key] = value
+            for key in ("terminal_reason", "api_error", "api_error_type"):  # #98 D2
+                value = data.get(key)
+                if isinstance(value, str) and value:
+                    fact[key] = _name(value[:64])
+            status = data.get("api_error_status")
+            if isinstance(status, int) and not isinstance(status, bool):
+                fact["api_error_status"] = status
+            if data.get("terminal_reason") == "api_error" and isinstance(data.get("result"), str):
+                # 300 UTF-8 bytes, cut at a character boundary (Rowan n2, the E4 rule)
+                fact["api_error_text"] = " ".join(data["result"].split()).encode("utf-8")[:300].decode("utf-8", "ignore")
             yield fact
 
     def write(self, fact):
