@@ -3722,6 +3722,10 @@ class Store:
             return {}
 
     def context(self, run_id=None, as_of=None):
+        """Raw employee snapshot; optional aware ``as_of`` pins derived display clocks only.
+
+        Records are read fresh. This does not freeze data or change mutation/routine clocks.
+        """
         identity = self.identity()
         run_id = run_id or self.run_id
         run = self.run_get(run_id) if run_id else None

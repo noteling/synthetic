@@ -149,7 +149,7 @@ TOOLS = [
         "key": KEY,
         "settings": {"type": "object", "additionalProperties": True, "description": "Optional changes: model, claude, budget, timeout, poll, retry, daily_limit. Omit to restart with the current settings."},
     }, ["reason", "key"]),
-    tool("outbox_list", "Inspect messages and questions you have already queued. Queued does not mean delivered; each item's delivery shows pending, uncertain, failed or delivered as recorded by the channel that carries it.", {
+    tool("outbox_list", "Inspect queued messages and questions as budgeted entries or JSON chunks. Follow next_cursor until null; older_before selects an older window. Queued does not mean delivered; each item's delivery shows pending, uncertain, failed or delivered as recorded by the channel that carries it.", {
         "status": {"type": "string", "enum": ["pending", "uncertain", "failed", "delivered"],
                    "description": "Only items whose delivery state is this."},
         "id": text_property("Select one own message ID, including older messages."),
@@ -302,9 +302,7 @@ class Server:
             elif name in ("employee_context", "outbox_list"):
                 value = boundedreads.page(self.store, name, arguments, self._yield_notice())
             else:
-                method = self.store.context if name == "employee_context" else getattr(self.store, name)
-                if name == "outbox_list":
-                    arguments = dict({"limit": 50}, **arguments)  # backlog 6: never the whole outbox by default
+                method = getattr(self.store, name)
                 arguments = self._compact_defaults(name, arguments)
                 value = method(**arguments)
         except Exception as exc:

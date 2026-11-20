@@ -243,6 +243,23 @@ class BoundedModelReadsTests(unittest.TestCase):
         self.assertLessEqual(len(raw.encode('utf-8')), 1024)
         self.assertEqual(self.store.outbox_list(), before)
 
+    def test_pinned_day_and_unbound_dream_cutoff(self):
+        from datetime import datetime, timedelta, timezone
+        from synthetics.store import timestamp
+        instant = datetime(2030, 1, 1, 23, 59, tzinfo=timezone.utc)
+        self.store.routine_seed(['dream'], now=instant, dream_at='00:05')
+        original = self.store.work_list()
+        first = self.store.context(as_of=instant)
+        later = instant + timedelta(days=2)
+        second = self.store.context(as_of=later)
+        self.assertEqual(first['usage']['today']['day'], '2030-01-01')
+        self.assertEqual(second['usage']['today']['day'], '2030-01-03')
+        self.assertEqual(first['routines_due'][0]['evidence_cutoff'], timestamp(instant))
+        self.assertEqual(second['routines_due'][0]['evidence_cutoff'], timestamp(later))
+        self.assertNotEqual(first['routines_due'][0]['rearm_wake_at'],
+                            second['routines_due'][0]['rearm_wake_at'])
+        self.assertEqual(self.store.work_list(), original)
+
     def test_stale_run_can_read_but_cannot_mutate(self):
         self.store.message_send('reviewer', 'x' * 5000, key='stale-run')
         run = self.store.run_begin()
