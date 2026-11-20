@@ -20,6 +20,12 @@ documented here and in docs/floor.md:
   ``answered``, not proxy, not withdrawn), was addressed to this home's default human, and whose answer event has
   a non-null auth (Codex Q2), and that was created at or after the meeting's journal ``begin`` line (F3-lows L1:
   an older answered question is not about this meeting). Any other citing work_put is ``unattributed_meeting_work``.
+- F4 (R4) meeting summary: a successful memory_put receipt whose predicate is ``meeting summary`` (case and
+  surrounding space ignored) and whose source or value cites the meeting (as above) is a summary of it. Per meeting
+  verify reports ``summary``: ``present`` when exactly one is *anchored*, ``missing`` (none), ``duplicate`` (more than
+  one) or ``unanchored`` (one, but its source does not cite the wrap event ID, or its value lacks the journal path
+  ``meetings/<id>/journal.jsonl`` or the first 12+ hex characters of the wrap head's sha256). Anything but
+  ``present`` is a ``summary`` violation. verify only reports it; the wrap is never refused for it.
 - A memory_put receipt with ``replaces`` whose source cites the meeting and names ``line N`` (or ``lines N``,
   ``line #N``) where journal line N is ``room-unidentified`` is ``room_correction_replaces``.
 """
@@ -179,6 +185,37 @@ def _answered_by_human(conn, ref, human, since=None):
     return bool(answer and json.loads(answer["data"]).get("auth"))
 
 
+SUMMARY_PREDICATE = "meeting summary"
+_HEX = re.compile(r"[0-9a-f]{12,}")
+
+
+def _summary_state(meeting, wrap_id, head, cites, records):
+    """F4: (state, receipt lines) of this meeting's summary memory_put receipts; see the module docstring."""
+    found = []
+    for number, record in records:
+        args = record.get("arguments") if isinstance(record.get("arguments"), dict) else {}
+        if record.get("tool") != "memory_put":
+            continue
+        if str(args.get("predicate") or "").strip().lower() != SUMMARY_PREDICATE:
+            continue
+        if cites(args.get("source")) or cites(args.get("value")):
+            found.append((number, args))
+    lines = [n for n, _ in found]
+    if not found:
+        return "missing", lines
+    if len(found) > 1:
+        return "duplicate", lines
+    args = found[0][1]
+    source, value = str(args.get("source") or ""), str(args.get("value") or "")
+    sha = str((head or {}).get("head_sha256") or "")
+    wrap_hex = wrap_id[len("event-"):] if isinstance(wrap_id, str) and wrap_id.startswith("event-") else None
+    cites_wrap = wrap_hex is not None and any(
+        wrap_hex.startswith(m.group(1)) for m in re.finditer(r"event-([0-9a-f]{8,})", source))
+    has_path = ("meetings/%s/journal.jsonl" % meeting) in value
+    has_head = bool(sha) and any(sha.startswith(m.group(0)) for m in _HEX.finditer(value))
+    return ("present" if cites_wrap and has_path and has_head else "unanchored"), lines
+
+
 def _accepted(conn, meeting):
     """{cid: work_id} from this home's floor.accepted audit rows for the meeting."""
     out = {}
@@ -249,7 +286,10 @@ def verify(home, run_id):
                     if room:
                         violations.append(dict(kind="room_correction_replaces", meeting=meeting,
                                                receipt_line=number, lines=room, replaces=args.get("replaces")))
-            meetings.append(dict(meeting=meeting, wrap_event=event["id"], chain=chain,
+            summary, summary_lines = _summary_state(meeting, event["id"], body.get("head"), cites, records)
+            if summary != "present":
+                violations.append(dict(kind="summary", meeting=meeting, summary=summary, receipt_lines=summary_lines))
+            meetings.append(dict(meeting=meeting, wrap_event=event["id"], chain=chain, summary=summary,
                                  accepted=sorted(c for c in accepted if c in issued),
                                  declined=sorted(c for c in declined if c in issued and c not in accepted),
                                  unaccepted=sorted(c for c in issued if c not in accepted and c not in declined)))

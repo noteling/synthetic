@@ -8,6 +8,8 @@ three Synthetics-only slices:
 - **F1 yield** (this document's first part): a meeting takes the idle boundary from ordinary work.
 - **F2 attach + meeting session**: the meeting's Claude session, journal, persona and brief.
 - **F3 gate**: `floor_accept` and `floor verify`, so no invented commitment enters the records.
+- **F4 opt-in and summary**: meetings only for homes the owner enabled (`floor.json`), and one compact
+  `meeting summary` memory per meeting that `floor verify` checks; the journal is kept.
 
 There is still only one Claude process per employee home at a time. A meeting does not run beside a
 coding session; the coding session yields.
@@ -26,6 +28,7 @@ python3 -m synthetics --home HOME floor attach --key-file ~/.config/synthetics-c
 - Only a key registered as the channel named `stand` is accepted; any other key, or none, is refused with
   `auth_failed`.
 - Inside an employee session (`SYNTHETICS_SESSION_RUN` set) `floor attach` is refused with `in_session`.
+- A home that hasn't opted in is refused with `not_enabled` (F4, below), before the begin line is read.
 - Every refusal is audited as `floor.refused` (the code only; never the key or a line's content).
 - The meeting store calls (`meeting_begin`, `meeting_attach`, …) refuse a Store bound to a session run, so
   no tool path can start or hold a meeting.
@@ -187,3 +190,46 @@ For each `stand:meeting` wrap event among the run's inputs it reads the run's MC
   question. Panel-authored promises come with the Stand slice (Q3).
 - If the store raises while attach drops a pending meeting on the busy path, attach still prints `busy` (exit 2)
   and makes one separate attempt to audit `floor.ended_failed` (#76 nit, K4).
+
+## F4: opt-in per home, the meeting summary, retention
+
+David (intent on the Stand question, 11-19): meetings are not for every employee for now, maybe the manager
+only; the transcript stays in its own place, and the manager keeps a compact summary in memory with a link to
+it. Codex's rulings R1-R4 (first live attendee: the manager home).
+
+### Opt-in (R2)
+
+- `HOME/floor.json` = `{"enabled": true}` opts a home in. Off by default: no file, `{"enabled": false}`, any other
+  value, or a file that can't be read as a JSON object all mean not enabled. The owner or operator writes it
+  (there is no CLI setter, like `click.json`); no name list is committed anywhere.
+- `floor attach` checks it right after the key check, before reading the begin line: refused `not_enabled`
+  (exit 2, audited `floor.refused` with the code), so there is no pending row, no yield of a running session and
+  no hold.
+- `doctor` shows `floor: {"floor_json": "enabled"|"absent"|"disabled"|"unreadable", "meetings": true|false}` and
+  warns `floor_json_unreadable` for a file it can't read.
+- Honest limit: like `click.json`, the file is not fenced against a session writing it with the shell. `floor
+  attach` itself is still refused inside a session.
+
+### Meeting summary (R4)
+
+The wrap guidance (the Meetings block of the employee prompt) asks the wrap session for exactly one `memory_put`
+with predicate `meeting summary` and the wrap event ID as `source`, whose value names the meeting ID, the journal
+`meetings/<id>/journal.jsonl` with its line range and the wrap head sha256, what was decided (panel lines by
+number) and open items. No new tool: the link fields are copied from the wrap event.
+
+`floor verify RUN` reports per meeting `summary`:
+
+- A summary is a successful `memory_put` whose predicate is `meeting summary` (case and surrounding space ignored)
+  and whose source or value cites the meeting (the rule above).
+- `present`: exactly one, and it is anchored: its source cites the wrap event ID (`event-` + 8 or more of its hex),
+  and its value holds `meetings/<id>/journal.jsonl` and at least the first 12 hex characters of the wrap head's
+  sha256.
+- `missing` (none), `duplicate` (more than one), `unanchored` (one, not anchored). Each is a `summary` violation
+  with the receipt lines. verify only reports it; the wrap is never refused for it.
+- A wrap run with no MCP receipts at all stays `no_evidence`, as before.
+
+### Retention (R3)
+
+The journal has no automatic expiry: nothing outside the floor modules touches `meetings/`, and the E4 runs
+prune never does (guard test). The full transcript stays in the journal and never goes into project logs or
+messages; durable memory holds only the summary, corrections and promises, each pointing at journal lines.
