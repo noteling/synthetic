@@ -501,7 +501,7 @@ def event_kind(event_status):
     return None, None
 
 
-def status_page(root, slug, event_id, event_status):
+def status_page(root, slug, event_id, event_status, replies=None):
     kind, qid = event_kind(event_status)
     read, answered = outcome(root, slug, qid, event_status)
     submitted = isinstance(event_status, dict) and event_status.get("event_id") == event_id
@@ -536,8 +536,42 @@ def status_page(root, slug, event_id, event_status):
     ]
     rows = "".join("<li>%s %s — <span class='muted'>%s</span></li>" % ("✓" if ok else "…", E(name), E(text))
                    for name, ok, text in steps)
-    return page("Answer status", "<ol>%s</ol><p><a href='/s/%s/%s'>Refresh</a> · <a href='/'>All questions</a>"
-                "</p>" % (rows, quote(slug), quote(event_id)))
+    base = "/s/%s/%s" % (quote(slug), quote(event_id))
+    followup = "<h2>Employee follow-up</h2>"
+    if not isinstance(replies, dict) or replies.get("error"):
+        followup += "<p>Follow-up unavailable. Try refreshing.</p>"
+    elif not replies.get("count"):
+        followup += "<p>No explicitly correlated follow-up yet.</p>"
+    elif not replies.get("reply"):
+        followup += "<p>That reply is unavailable. <a href='%s'>Show newest</a></p>" % base
+    else:
+        item = replies["reply"]
+        index, offset, count = replies["index"], replies["offset"], replies["count"]
+        length = item["length"]
+        end = offset + len(item["body"])
+        position = []
+        if count > 1:
+            position.append("reply %d of %d" % (index + 1, count))
+        if offset or end < length:
+            position.append("characters %d–%d of %d" % (min(offset + 1, length), end, length))
+        followup += "<p>From %s</p>" % E(item["name"])
+        if position:
+            followup += "<p class='muted'>%s</p>" % E(" · ".join(position))
+        followup += ("<pre>%s</pre><p class='muted'>This is the employee's report. "
+                     "Work status is shown above.</p>" % E(item["body"]))
+        links = []
+        if offset:
+            links.append(("Previous text", item["id"], max(0, offset - 4096)))
+        if end < length:
+            links.append(("More text", item["id"], end))
+        if replies.get("newer"):
+            links.append(("Newer reply", replies["newer"], 0))
+        if replies.get("older"):
+            links.append(("Older reply", replies["older"], 0))
+        followup += "<p>%s</p>" % " · ".join("<a href='%s?cursor=%s&amp;offset=%d'>%s</a>" %
+                                               (base, quote(i), o, label) for label, i, o in links)
+    return page("Answer status", "<ol>%s</ol>%s<p><a href='%s'>Refresh</a> · <a href='/'>All questions</a>"
+                "</p>" % (rows, followup, base))
 
 
 # ---------------------------------------------------------------- HTTP
@@ -634,7 +668,14 @@ def make_handler(root, key_file):
                     raise Refused(404, "No such page.")
                 # The question comes from the event record (D2(a)); a ?q= from older links is ignored (P1 L1).
                 row = contract(home, key_file, "event-status", "--event", parts[2])
-                return self._send(200, status_page(root, parts[1], parts[2], row), head_only=head_only)
+                def number(name):
+                    value = _query.get(name, ["0"])[0]
+                    return value if re.fullmatch(r"[0-9]{1,9}", value) else "999999999"
+                cursor = _query.get("cursor", [""])[0]
+                args = ["--cursor", cursor] if cursor else []
+                replies = contract(home, key_file, "event-reply", "--event", parts[2],
+                                   "--index", number("reply"), "--offset", number("offset"), *args)
+                return self._send(200, status_page(root, parts[1], parts[2], row, replies), head_only=head_only)
             raise Refused(404, "No such page.")
 
         def _post(self):

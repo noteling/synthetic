@@ -2182,6 +2182,39 @@ class Store:
                     run_id=row["processed_run"], question_id=event.get("reply_to"),
                     in_reply_to=event.get("in_reply_to"))
 
+    def channel_event_reply(self, credential, event_id, index=0, offset=0, cursor=None):
+        """Read one bounded slice of an explicitly correlated outgoing message, without routing it."""
+        if self.run_id is not None:
+            raise ChannelError("in_session", "Channel commands are adapter/operator operations, not model tools.")
+        channel = self._channel_by_key(credential)
+        if type(index) is not int or type(offset) is not int or index < 0 or offset < 0:
+            raise ChannelError("bad_line", "index and offset must be non-negative integers")
+        row = self.db.execute("SELECT data FROM events WHERE id=?", (event_id,)).fetchone()
+        event = json.loads(row["data"]) if row else None
+        if not event or (event.get("auth") or {}).get("channel") != channel["id"] or not event.get("sender"):
+            raise ChannelError("not_routed", "Event not available to this channel.")
+        # Iterate records without calling delivery/routing methods. The event's actual sender,
+        # not a thread or question participant, defines the only eligible recipient.
+        eligible = []
+        for record in self.db.execute("SELECT data FROM messages ORDER BY rowid DESC"):
+            message = json.loads(record["data"])
+            if message.get("in_reply_to") == event_id and message.get("to") == event["sender"]:
+                eligible.append(message)
+        count = len(eligible)
+        if cursor is not None:
+            index = next((i for i, m in enumerate(eligible) if m["id"] == cursor), count)
+        selected = eligible[index] if index < count else None
+        result = dict(v=1, count=count, index=index, offset=offset, reply=None)
+        if selected is not None:
+            body = selected.get("body", "")
+            if offset < len(body) or (offset == 0 and not body):
+                result["reply"] = dict(id=selected["id"], sender=selected["sender"],
+                    name=self.identity()["name"], body=body[offset:offset + 4096], length=len(body),
+                    created_at=selected.get("created_at"))
+                result["newer"] = eligible[index - 1]["id"] if index else None
+                result["older"] = eligible[index + 1]["id"] if index + 1 < count else None
+        return result
+
     QUESTION_FULL_ID = re.compile(r"^question-[0-9a-f]{32}$")
     QUESTION_HIDDEN = "No open question for the human of this home with that ID is visible to this channel."
 

@@ -89,8 +89,9 @@ an employee session.
 
 - **source prefixes**: an inbound line's `source` must start with one of them.
 - **routes**: the recipient addresses (`to` of outgoing messages) this channel
-  may see and deliver. Each channel only ever sees messages routed to it, which
-  gives per-credential isolation. A channel with no routes delivers nothing
+  may see and deliver. Delivery commands only expose messages routed to the channel; the explicit
+  event-reply read described below is a narrow sender-and-event exception and does not deliver.
+  A channel with no routes delivers nothing
   (fail closed).
 
 ## 2. Common rules
@@ -398,3 +399,19 @@ stderr and exits; there is no direct network fallback.
   same OS user can read Synthetics state directly (MG-09).
 - Unauthenticated input (no `auth` stamp) never wakes work, answers a
   verified-only check, or bypasses the daily limit.
+
+### Explicit event replies
+
+`channel event-reply --event ID [--index N] [--cursor MESSAGE_ID] [--offset N]` is a keyed operator-only read.
+It refuses employee sessions, invalid keys and events not authenticated by this channel. It returns
+only outgoing messages with both `in_reply_to` equal to the event ID and `to` equal to that event's
+sender. It does not infer correlation from threads, work or questions. Results are newest first:
+`count` is the number of matching messages, `index` selects one (zero based), and `offset` selects
+up to 4096 Unicode code points of its body. `reply.length` gives the full code-point length, so a
+caller can retrieve the rest and older replies. Use the returned reply ID as `cursor` for stable
+continuation; `newer` and `older` IDs navigate adjacent matching replies. A cursor is resolved only
+within the authenticated event and recipient scope. Invalid cursors, indexes and offsets beyond the
+body return a null reply. Indexes alone may shift when another reply arrives.
+This read does not route, claim, acknowledge,
+or deliver anything; the response is not evidence of delivery or work completion. Do not publish
+its private body through a shared status export.

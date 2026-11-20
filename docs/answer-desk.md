@@ -191,3 +191,13 @@ This establishes the transport, recovery and work-engine path on temporary homes
 whether a particular model correctly interprets an answer or completes the requested real-world work.
 Completed work leaves the shared open-work list, so the page says "no longer open" rather than inferring
 whether it was completed or cancelled; its precise disposition remains in the employee's work record.
+
+The status page also reads the newest explicitly correlated employee follow-up using the keyed
+`channel event-reply` contract. Only a message whose `in_reply_to` is this inbound event and whose
+recipient is the event's authenticated sender is eligible. The page labels the employee and shows
+exact escaped text, one reply and at most 4096 Unicode characters at a time; links reach older
+replies and the rest of long text using stable scoped reply cursors, even when a new reply arrives.
+Counts and character positions make omissions explicit when there are multiple replies or more text. An empty
+result is not a promise that no reply will arrive, and an unavailable read is not an empty result.
+A recorded reply does not establish delivery or completion. Reading never claims, routes or
+acknowledges a message. Lookout's shared status and the body-free `event-status` remain unchanged.
