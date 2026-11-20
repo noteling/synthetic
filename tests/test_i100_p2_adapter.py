@@ -78,7 +78,7 @@ class HomesAdapterTest(unittest.TestCase):
             store.close()
         self.tmp.cleanup()
 
-    def adapter(self, paired=True, state=None, config=None):
+    def adapter(self, paired=True, state=None, config=None, select="synthetics"):
         path = self.root / "telegram.json"
         path.write_text(json.dumps(config or self.config))
         if state is not None:
@@ -90,6 +90,13 @@ class HomesAdapterTest(unittest.TestCase):
             a.state.paired, a.state.bound_user_id, a.state.bound_chat_id = True, 42, CHAT
             a.state.save()
         a.start()
+        if select and len(a.homes) > 1 and a.d.get("selection") is None:
+            # P3: a plain message goes to the saved selection (none -> held). These P2 cases start with the primary
+            # selected, which is what P2 did for every plain message.
+            home = next(h for h in a.homes if h["key"] == select)
+            a.d["selection"] = dict(key=home["key"], employee_id=home["employee_id"], at="2026-11-20T00:00:00Z",
+                                    by_update=0, via="keyboard")
+            a.state.save()
         return a
 
     def events(self, key):
@@ -217,11 +224,11 @@ class HomesAdapterTest(unittest.TestCase):
         # Codex 18:35Z condition: a hold is never silent to David.
         a = self.adapter()
         a.process_update(msg(1, "which one?", reply_to=12345))
-        self.assertEqual(self.router_notices(), [th.ROUTER + "\n" + th.HELD_NOTICE])
+        self.assertEqual(self.router_notices(), [th.ROUTER + "\n" + th.CHOOSE_NOTICE])
         a.process_update(msg(1, "which one?", reply_to=12345))   # redelivered update: no second notice
         a.process_update(msg(2, "and this?", reply_to=12346))
         notices = self.router_notices()
-        self.assertEqual(notices, [th.ROUTER + "\n" + th.HELD_NOTICE] * 2)
+        self.assertEqual(notices, [th.ROUTER + "\n" + th.CHOOSE_NOTICE] * 2)
         for text in notices:
             self.assertNotIn("/to", text)
             self.assertNotIn("Quill", text)
@@ -312,7 +319,7 @@ class HomesAdapterTest(unittest.TestCase):
         self.assertEqual((self.events("synthetics"), self.events("noteling")), ([], []))
         # Codex 18:35Z condition: the 21st is dropped, and David gets a distinct notice saying it was NOT kept.
         notices = self.router_notices()
-        self.assertEqual(notices[:20], [th.ROUTER + "\n" + th.HELD_NOTICE] * 20)
+        self.assertEqual(notices[:20], [th.ROUTER + "\n" + th.CHOOSE_NOTICE] * 20)
         self.assertEqual(len(notices), 21)
         self.assertNotEqual(notices[20], notices[0])
         self.assertIn("NOT", notices[20])
@@ -331,6 +338,7 @@ class HomesAdapterTest(unittest.TestCase):
         status = json.loads(out.getvalue())
         self.assertEqual([h["key"] for h in status["homes"]], ["synthetics", "noteling"])
         self.assertEqual((status["schema"], status["held"], status["employee"]), (4, 1, self.ids["synthetics"]))
+        self.assertEqual(status["selection"], "synthetics")   # P3: the saved selection's key, never a body
         err = io.StringIO()
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
             rc = main(["--home", str(self.root / "noteling"), "telegram", "status", "--config",

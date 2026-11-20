@@ -681,21 +681,35 @@ class TelegramClient:
         return self._call("getWebhookInfo")
 
     def get_updates(self, offset: Optional[int] = None,
-                    timeout: int = POLL_TIMEOUT_SECONDS) -> List[Dict[str, Any]]:
+                    timeout: int = POLL_TIMEOUT_SECONDS,
+                    allowed_updates: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         params: Dict[str, Any] = {
             "timeout": timeout,
-            "allowed_updates": ["message"],
+            "allowed_updates": list(allowed_updates or ["message"]),
         }
         if offset is not None:
             params["offset"] = offset
         return self._call("getUpdates", params, timeout=timeout + 10)
 
     def send_message(self, chat_id: int, text: str,
-                     reply_to_message_id: Optional[int] = None) -> Dict[str, Any]:
+                     reply_to_message_id: Optional[int] = None,
+                     reply_markup: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         params: Dict[str, Any] = {"chat_id": chat_id, "text": text}
         if reply_to_message_id is not None:
             params["reply_to_message_id"] = reply_to_message_id
+        if reply_markup is not None:
+            params["reply_markup"] = reply_markup
         return self._call("sendMessage", params)
+
+    def answer_callback_query(self, callback_query_id: str, text: Optional[str] = None) -> bool:
+        params: Dict[str, Any] = {"callback_query_id": callback_query_id}
+        if text:
+            params["text"] = text
+        return self._call("answerCallbackQuery", params)
+
+    def edit_message_text(self, chat_id: int, message_id: int, text: str) -> Any:
+        """Without reply_markup Telegram removes the message's inline keyboard."""
+        return self._call("editMessageText", {"chat_id": chat_id, "message_id": message_id, "text": text})
 
     def send_chat_action(self, chat_id: int, action: str = "typing") -> bool:
         return self._call("sendChatAction", {"chat_id": chat_id, "action": action},

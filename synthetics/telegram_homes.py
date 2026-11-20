@@ -1,4 +1,4 @@
-"""Telegram adapter, several homes (#100 P2): config v2, author header, route map, state migration.
+"""Telegram adapter, several homes (#100 P2 + P3): config v2, author header, route map, state migration, chooser.
 
 A v1 config (today's ``employee_home``) keeps the single-home adapter in telegram.py unchanged. A v2 config
 (``"homes": [...]``) serves several employee homes from one bot and one ``getUpdates`` poller, and reaches every
@@ -11,6 +11,9 @@ home, the primary one included, only through the channel contract (docs/channel-
 * ``migrate_state`` turns a schema 3 state (``question_map``, deliveries without a home) into schema 4
   (``route_map``, deliveries tagged with the primary home). Idempotent.
 * ``resolve_reply`` decides where a Telegram Reply goes from the route map alone (§2 rules 2-3); no inference.
+* P3 chooser: ``keyboard`` (persistent reply keyboard, ✓ on the saved selection), ``selection_target`` (a message
+  that is exactly a button's text), ``parse_directive`` (optional ``for <shortcut>``), ``inline_chooser`` (held
+  messages only).
 
 The header is rendered from the home whose outbox row is delivered, never from model text (§1).
 """
@@ -26,9 +29,16 @@ FOOTER_SEPARATOR = "\n\n"
 LABEL_MAX = 64
 BUTTON_MAX = 64
 STATE_SCHEMA = 4
+ROUTE_MAP_CAP = 2000   # newest Telegram message ids kept in route_map (about 300 KB of state); older Replies are held
 _KEY = re.compile(r"^[a-z][a-z0-9_-]{0,15}$")
 _EMPLOYEE = re.compile(r"^employee-[0-9a-f]{32}$")
-HOME_FIELDS = ("key", "home", "employee_id", "colleague_id", "label", "button", "thread", "primary", "not_before")
+HOME_FIELDS = ("key", "home", "employee_id", "colleague_id", "label", "button", "thread", "primary", "not_before",
+               "shortcut")
+_SHORTCUT = re.compile(r"[a-z0-9]{1,8}")
+MARK = "✓ "                       # the current selection's button (§3.3)
+PLACEHOLDER_MAX = 64              # Telegram input_field_placeholder: 1-64 characters
+PLACEHOLDER_NONE = "Choose who to talk to"
+DIRECTIVE_SEPARATORS = "\n:,.-—"  # F13: end of text, newline or one of : , . - — ; a plain space is not one
 
 
 class HomesConfigError(ValueError):
@@ -66,7 +76,7 @@ def load_homes(entries: Any, base: Path) -> List[Dict[str, Any]]:
         if not isinstance(raw, dict):
             raise HomesConfigError("each homes entry must be an object")
         key = raw.get("key")
-        if not isinstance(key, str) or not _KEY.match(key):
+        if not isinstance(key, str) or not _KEY.fullmatch(key):
             raise HomesConfigError("home key %r must match [a-z][a-z0-9_-]{0,15}" % (key,))
         unknown = sorted(set(raw) - set(HOME_FIELDS))
         if unknown:
@@ -74,11 +84,14 @@ def load_homes(entries: Any, base: Path) -> List[Dict[str, Any]]:
         for field in ("home", "employee_id", "colleague_id"):
             if not isinstance(raw.get(field), str) or not raw[field].strip():
                 raise HomesConfigError("home %s: %s is required" % (key, field))
-        if not _EMPLOYEE.match(raw["employee_id"]):
+        if not _EMPLOYEE.fullmatch(raw["employee_id"]):
             raise HomesConfigError("home %s: employee_id must be a full employee ID" % key)
         thread = raw.get("thread")
         if thread is not None and (not isinstance(thread, str) or not thread.strip()):
             raise HomesConfigError("home %s: thread must be nonempty text or null" % key)
+        shortcut = raw.get("shortcut")
+        if shortcut is not None and (not isinstance(shortcut, str) or not _SHORTCUT.fullmatch(shortcut)):
+            raise HomesConfigError("home %s: shortcut must be 1-8 characters [a-z0-9]" % key)
         primary = raw.get("primary", False)
         if not isinstance(primary, bool):
             raise HomesConfigError("home %s: primary must be true or false" % key)
@@ -92,11 +105,29 @@ def load_homes(entries: Any, base: Path) -> List[Dict[str, Any]]:
             thread=thread,
             primary=primary,
             not_before=_iso(raw["not_before"], key) if raw.get("not_before") is not None else None,
+            shortcut=shortcut,
         ))
+        button = homes[-1]["button"]
+        if button.startswith(MARK.strip()) or button.startswith("/"):
+            raise HomesConfigError("home %s: button must not start with %r or '/'" % (key, MARK.strip()))
+        if len(placeholder(homes[-1])) > PLACEHOLDER_MAX:
+            raise HomesConfigError("home %s: button too long for the input placeholder %r (at most %d characters)"
+                                   % (key, placeholder(homes[-1]), PLACEHOLDER_MAX))
     for field in ("key", "home", "employee_id", "label", "button"):
         values = [h[field] for h in homes]
         if len(set(values)) != len(values):
             raise HomesConfigError("homes: %s must be unique" % field)
+    shortcuts = [h["shortcut"] for h in homes if h["shortcut"]]
+    if len(set(shortcuts)) != len(shortcuts):
+        raise HomesConfigError("homes: shortcut must be unique")
+    for home in homes:
+        # §3.2 rule 3 / P0 r1 carry: a button that also parses as a directive is ambiguous. Stop with a clear
+        # message rather than skip anything silently.
+        if parse_directive(home["button"], homes) is not None:
+            raise HomesConfigError("home %s: button %r reads as a `for <shortcut>` directive; change the button or "
+                                   "the shortcut" % (home["key"], home["button"]))
+        if any(home["button"].casefold() == (other["shortcut"] or "").casefold() for other in homes):
+            raise HomesConfigError("home %s: button equals a shortcut" % home["key"])
     primaries = [h for h in homes if h["primary"]]
     if len(primaries) != 1:
         raise HomesConfigError("homes: exactly one entry must be primary (found %d)" % len(primaries))
@@ -105,6 +136,59 @@ def load_homes(entries: Any, base: Path) -> List[Dict[str, Any]]:
         # One paired Telegram user is one human; every home must name the same colleague for him.
         raise HomesConfigError("homes: every entry must name the same colleague_id")
     return homes
+
+
+def placeholder(home: Optional[Dict[str, Any]]) -> str:
+    """§3.3: ``To: <button>`` for the selected home (its leading emoji kept), else a fixed prompt."""
+    return "To: %s" % home["button"] if home else PLACEHOLDER_NONE
+
+
+def keyboard(homes: List[Dict[str, Any]], selected: Optional[str]) -> Dict[str, Any]:
+    """§3.1 R1: the persistent reply keyboard, one row per home in config order, ✓ on the saved selection."""
+    current = next((h for h in homes if h["key"] == selected), None)
+    return dict(keyboard=[[dict(text=(MARK if h["key"] == selected else "") + h["button"])] for h in homes],
+                is_persistent=True, resize_keyboard=True, one_time_keyboard=False,
+                input_field_placeholder=placeholder(current))
+
+
+def inline_chooser(homes: List[Dict[str, Any]], gen: int) -> Dict[str, Any]:
+    """§3.4: inline buttons for a held message only; callback_data ``sel:<key>:<gen>`` (≤ 64 bytes: key ≤ 16)."""
+    return dict(inline_keyboard=[[dict(text=h["button"], callback_data="sel:%s:%d" % (h["key"], gen))]
+                                 for h in homes])
+
+
+def selection_target(message: Dict[str, Any], homes: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """§3.2 rule 2: the home whose button text the whole message is (surrounding space and the ✓ mark allowed).
+    A caption, media, forward, via_bot, quote or Reply is never a selection; nothing else is inferred."""
+    if len(homes) < 2:
+        return None
+    if any(message.get(k) for k in ("caption", "forward_origin", "forward_from", "forward_from_chat",
+                                    "forward_date", "via_bot", "quote", "reply_to_message")):
+        return None
+    text = message.get("text")
+    if not isinstance(text, str):
+        return None
+    text = text.strip()
+    if text.startswith(MARK.strip()):
+        text = text[len(MARK.strip()):].strip()
+    return next((h for h in homes if h["button"] == text), None)
+
+
+def parse_directive(text: Any, homes: List[Dict[str, Any]]) -> Optional[Tuple[Dict[str, Any], str, str]]:
+    """§3.5 rulings a-e, F13: ``for <shortcut>`` at the very start (leading whitespace allowed, case-insensitive),
+    followed by end of text, a newline or one of ``: , . - —``. Returns (home, prefix, content): ``prefix`` is the
+    exact consumed text (directive, separator, following whitespace), so prefix + content == text. None otherwise."""
+    if not isinstance(text, str):
+        return None
+    shortcuts = {h["shortcut"]: h for h in homes if h.get("shortcut")}
+    if not shortcuts:
+        return None
+    alternatives = "|".join(re.escape(k) for k in sorted(shortcuts, key=len, reverse=True))
+    match = re.match(r"\s*for[ \t]+(%s)(?=\Z|[%s])[%s]?\s*" % (
+        alternatives, re.escape(DIRECTIVE_SEPARATORS), re.escape(DIRECTIVE_SEPARATORS)), text, re.IGNORECASE)
+    if not match:
+        return None
+    return shortcuts[match.group(1).lower()], match.group(0), text[match.end():]
 
 
 def sha8(text: str) -> str:
@@ -196,7 +280,7 @@ def resolve_reply(route_map: Dict[str, Any], reply_to_message_id: Optional[int],
     entry = route_map.get(str(reply_to_message_id))
     if entry is None:
         return HOLD, None, None
-    if entry.get("kind") == "notice":
+    if entry.get("kind") in ("notice", "select"):
         return "none", None, entry
     home = next((h for h in homes if h["key"] == entry.get("home")), None)
     if home is None or home["employee_id"] != entry.get("employee_id"):
@@ -300,17 +384,25 @@ def _ts(value: Optional[str]) -> Optional[datetime]:
 
 ROUTER = "↪ Router"
 HELD_CAP = 20
-HELD_NOTICE = "Held: not sent to any manager yet (chooser not available)."
+HELD_NOTICE = "Held: not sent to any manager yet (chooser not available)."   # single-home config only
+CHOOSE_NOTICE = "Held: not sent to any manager yet. Who should get this?"
+HELD_DOWN_NOTICE = ("Held: %s can't be reached through this chat right now, so this message was not sent to it. "
+                    "It is kept here until the operator fixes it.")
+HELD_DOWN_CHOOSE = ("Held: %s can't be reached through this chat right now, so this message was not sent to it. "
+                    "Pick another manager below, or it stays held until the operator fixes it.")
+TALKING_TO = "Talking to: %s"
+SENT_TO = "Sent to: %s"
+CALLBACK_WINDOW = 200            # handled callback ids kept (C2: replay beyond it is refused by the update cursor)
+HELD_DONE_KEEP = 200
 HELD_CAP_NOTICE = ("Not kept: this message was NOT sent to any manager and was NOT saved, because %d messages "
                    "are already waiting. Please send it again later.")
 
 
 class HomesAdapter:
-    """One bot, one poller, several homes through the channel contract (#100 P2).
+    """One bot, one poller, several homes through the channel contract (#100 P2 + P3).
 
-    Non-reply messages go to the primary home in P2 (the chooser is P3). The second home is not enabled live
-    before P3 (F8, R4): this class serves any number of homes so P3 can build on it, but an operator config with
-    two homes is not to be deployed until P3 merges."""
+    A plain message goes to the saved selection (P3 chooser); with none it is held. A two-home config is first
+    enabled live at P4, with P2 and P3 merged and running together (F8, R4)."""
 
     def __init__(self, config_path: str, contract: Optional[Contract] = None, client: Any = None):
         from .telegram import TelegramChannelState
@@ -360,16 +452,20 @@ class HomesAdapter:
     # ---- startup ----
 
     def start(self) -> None:
-        """Checks that don't need the network beyond the contract: migration, bindings, identity pins."""
-        if migrate_state(self.d, self.primary):
+        """Checks that don't need the network beyond the contract: bindings, migration, identity pins.
+
+        The bindings are checked before anything is written (Rowan #104 L1): a refused start leaves the state
+        file exactly as it was, so a wrong config never stamps schema 4 on another employee's state."""
+        bound = self._verify_bindings()
+        if migrate_state(self.d, self.primary) or bound:
             self.state.save()
-        self._verify_bindings()
         self._pin_homes()
         self._baselines()
         self._recover_inflight()
 
-    def _verify_bindings(self) -> None:
-        """Schema 3 bindings move into the primary entry and keep their refusals (§4)."""
+    def _verify_bindings(self) -> bool:
+        """Schema 3 bindings move into the primary entry and keep their refusals (§4). Raises before any write;
+        returns True when it bound a fresh state (the caller saves)."""
         st = self.state
         if st.employee_id is not None and st.employee_id != self.primary["employee_id"]:
             raise RuntimeError("Employee identity mismatch: state was bound to %r, the primary home is pinned to "
@@ -386,7 +482,8 @@ class HomesAdapter:
             st.employee_id = self.primary["employee_id"]
             st.bound_colleague_id = self.colleague_id
             st.bound_local_thread = self.primary["thread"]
-            st.save()
+            return True
+        return False
 
     def _pin_homes(self) -> None:
         """C4/F11: each home's ``channel identity`` must equal its pinned employee_id. A home that fails is stopped
@@ -458,12 +555,38 @@ class HomesAdapter:
                 logger.warning("Outbox for home %s unavailable: %s", home["key"], exc)
         return attempted
 
-    def notice(self, text: str) -> Optional[int]:
+    @property
+    def chooser(self) -> bool:
+        """The chooser exists only with two or more homes; a single-home v2 config sends no keyboard."""
+        return len(self.homes) > 1
+
+    def selected(self) -> Optional[Dict[str, Any]]:
+        """The saved selection's home, if it is still configured with the same pinned employee (§3.8)."""
+        sel = self.d.get("selection") or None
+        if not isinstance(sel, dict):
+            return None
+        return next((h for h in self.homes if h["key"] == sel.get("key")
+                     and h["employee_id"] == sel.get("employee_id")), None)
+
+    def markup(self) -> Optional[Dict[str, Any]]:
+        """T17: every bot send carries the keyboard; ✓ is the SAVED selection, never the sending home."""
+        if not self.chooser:
+            return None
+        home = self.selected()
+        return keyboard(self.homes, home["key"] if home else None)
+
+    def _send(self, text: str, markup: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        if markup is None:
+            return self.client.send_message(self.state.bound_chat_id, text)
+        return self.client.send_message(self.state.bound_chat_id, text, reply_markup=markup)
+
+    def notice(self, text: str, markup: Optional[Dict[str, Any]] = None) -> Optional[int]:
         """An adapter-authored text (§3.9): starts with the Router mark, never a manager's label, is not an outbox
-        row, and is mapped ``kind: notice`` so a Reply to it uses the current selection."""
+        row, and is mapped ``kind: notice`` so a Reply to it uses the current selection. It carries the persistent
+        keyboard unless ``markup`` (the held-message inline chooser) is given."""
         from .telegram import TelegramAPIError, TelegramNetworkError
         try:
-            tg_mid = self.client.send_message(self.state.bound_chat_id, ROUTER + "\n" + text)["message_id"]
+            tg_mid = self._send(ROUTER + "\n" + text, markup if markup is not None else self.markup())["message_id"]
         except (TelegramAPIError, TelegramNetworkError) as exc:
             logger.warning("Router notice not sent: %s", type(exc).__name__)
             return None
@@ -541,7 +664,8 @@ class HomesAdapter:
                 time.sleep(PART_SEND_INTERVAL)
             for attempt in range(RATE_LIMIT_RETRIES + 1):
                 try:
-                    tg_mid = self.client.send_message(chat_id, part)["message_id"]
+                    # R1: the keyboard goes on the last part only (header on every part).
+                    tg_mid = self._send(part, self.markup() if i == len(parts) - 1 else None)["message_id"]
                 except TelegramAPIError as exc:
                     if exc.error_code == 429 and attempt < RATE_LIMIT_RETRIES:
                         time.sleep(min(exc.retry_after if exc.retry_after is not None else 10, MAX_RATE_LIMIT_WAIT))
@@ -592,12 +716,14 @@ class HomesAdapter:
         except ContractError as exc:
             logger.error("Could not record %s outcome for %s: %s", outcome, message_id, exc)
 
-    # ---- inbound ----
+    # ---- inbound (§3.6 routing order) ----
 
     def process_update(self, update: Dict[str, Any]) -> Dict[str, Any]:
         """One Telegram update. Same gates as the single-home UpdateProcessor (private chat, no bots, pairing,
         paired user only). Result ``reason`` ``store_error`` means: don't advance the cursor."""
         update_id = update["update_id"]
+        if update.get("callback_query"):
+            return self._callback(update_id, update["callback_query"])
         message = update.get("message")
         if not message:
             return {"processed": False, "reason": "no_message_field", "event_id": None}
@@ -614,18 +740,52 @@ class HomesAdapter:
                 or chat.get("id") != self.state.bound_chat_id):
             return {"processed": False, "reason": "unrecognized_sender", "event_id": None}
         reply_to = (message.get("reply_to_message") or {}).get("message_id")
+        # §3.6 routing order: (1) callback (above); (2) selection message or standalone directive; (3) directive
+        # with content, checked against a Reply first; (4) Reply rules; (5) current selection; (6) none -> hold.
+        target = selection_target(message, self.homes)
+        if target is not None:
+            return self._select(target, "keyboard", update_id, message)
+        if self.chooser and isinstance(text, str) and text.strip().split(" ", 1)[0] == "/to":
+            return self._command(update_id, message, text.strip()[3:].strip())
+        directive = parse_directive(text, self.homes) if self.chooser and not message.get("caption") else None
         verdict, home, entry = resolve_reply(self.route_map, reply_to, self.homes)
+        extra: Dict[str, Any] = {}
+        if directive is not None:
+            named, prefix, content = directive
+            if not content.strip():
+                return self._select(named, "directive", update_id, message)
+            if verdict == "home" and home["key"] != named["key"]:
+                # (d) a Reply to X with a directive naming Y: never guess.
+                return self._hold(update_id, message, reply_to, reason="conflict", body=content,
+                                  directive=prefix[:64])
+            extra = dict(body=content, directive=prefix[:64])
+            if self._save_selection(named, "directive", update_id):
+                self.notice(TALKING_TO % named["button"])
+            if verdict != "home":
+                verdict, home, entry = "home", named, None
         if verdict == "none":
-            home = self.primary                      # P2: no chooser yet; P3 uses the selection here
+            if not self.chooser:
+                home = self.primary
+            else:
+                home = self.selected()
+                if home is None:
+                    return self._hold(update_id, message, reply_to, reason="no_selection")
         elif verdict == HOLD:
-            if len(self.homes) == 1:
+            if not self.chooser:
                 home = self.primary                  # nothing to choose between (today's behaviour)
             else:
                 return self._hold(update_id, message, reply_to)
         if home["key"] in self.down:
-            return self._hold(update_id, message, reply_to, reason="home_down")
+            if not self.chooser:
+                # Rowan #104 L2: one home has no other manager to hold for. Keep the v1 behaviour: don't move the
+                # cursor, retry with backoff (Telegram keeps the update up to 24 h), never hold and drop at 20.
+                logger.error("Home %s is down (%s); update %d not fed, will retry", home["key"],
+                             self.down[home["key"]], update_id)
+                return {"processed": False, "reason": "store_error", "event_id": None, "home": home["key"]}
+            return self._hold(update_id, message, reply_to, reason="home_down", home=home, **extra)
         question = entry.get("question") if (verdict == "home" and entry) else None
-        return self._feed(home, update_id, message, reply_to, entry if verdict == "home" else None, question)
+        return self._feed(home, update_id, message, reply_to, entry if verdict == "home" else None, question,
+                          **extra)
 
     def _pair(self, update_id: int, message: Dict[str, Any], sender_id: Any, text: str) -> Dict[str, Any]:
         provided = text[len("/start "):].strip()
@@ -649,9 +809,11 @@ class HomesAdapter:
         return {"processed": True, "reason": "paired", "event_id": result.get("event_id")}
 
     def _line(self, home: Dict[str, Any], update_id: int, message: Dict[str, Any], reply_to: Optional[int],
-              entry: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+              entry: Optional[Dict[str, Any]], body: Optional[str] = None,
+              directive: Optional[str] = None) -> Dict[str, Any]:
         from .telegram import UpdateProcessor, _tg_date_to_iso
-        body, _kind = UpdateProcessor._extract_content(None, message)  # type: ignore[arg-type]
+        if body is None:
+            body, _kind = UpdateProcessor._extract_content(None, message)  # type: ignore[arg-type]
         line: Dict[str, Any] = dict(v=1, external_id="tg:%s:%s" % (self.state.bot_id, update_id),
                                     sender=home["colleague_id"], body=body, source="telegram:%s" % self.state.bot_id,
                                     thread=self._thread(home))
@@ -665,12 +827,15 @@ class HomesAdapter:
             provider = {"message_id": message.get("message_id"), "chat_id": message.get("chat", {}).get("id")}
             if reply_to is not None:
                 provider["reply_to_message_id"] = reply_to
+            if directive and directive.strip():
+                provider["directive"] = directive      # F14: original = directive + body
             line["provider"] = {k: v for k, v in provider.items() if v is not None}
         return line
 
     def _feed(self, home: Dict[str, Any], update_id: int, message: Dict[str, Any], reply_to: Optional[int],
-              entry: Optional[Dict[str, Any]], question: Optional[str]) -> Dict[str, Any]:
-        line = self._line(home, update_id, message, reply_to, entry)
+              entry: Optional[Dict[str, Any]], question: Optional[str], body: Optional[str] = None,
+              directive: Optional[str] = None) -> Dict[str, Any]:
+        line = self._line(home, update_id, message, reply_to, entry, body, directive)
         try:
             row = self._inbound(home, dict(line, question_id=question) if question else line)
             if question and row.get("result") == "rejected" and (row.get("error") or {}).get("code") in (
@@ -710,19 +875,161 @@ class HomesAdapter:
         return rows[0]
 
     def _hold(self, update_id: int, message: Dict[str, Any], reply_to: Optional[int],
-              reason: str = "ambiguous") -> Dict[str, Any]:
-        """F10: kept durably (cap 20) until P3's chooser releases it. P2 never feeds a held message by itself."""
+              reason: str = "ambiguous", body: Optional[str] = None,
+              directive: Optional[str] = None, home: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """F10: kept durably (cap 20) until a tap releases it (§3.4); never fed by itself. A hold is never silent:
+        one Router notice per held message (with the inline chooser when there is a choice), and a message over
+        the cap gets a distinct notice that it was NOT kept."""
         held = self.d.setdefault("held", [])
         if any(h.get("update_id") == update_id for h in held):
             return {"processed": False, "reason": "held", "event_id": None}
         if len(held) >= HELD_CAP:
-            # Codex 18:35Z condition: a hold is never silent, and a message over the cap says plainly it is gone.
             self.notice(HELD_CAP_NOTICE % HELD_CAP)
             return {"processed": False, "reason": "held_cap", "event_id": None}
-        held.append(dict(update_id=update_id, message=message, reply_to=reply_to, reason=reason, at=_now()))
+        record = dict(update_id=update_id, message=message, reply_to=reply_to, reason=reason, at=_now())
+        if body is not None:
+            record.update(body=body, directive=directive)
+        held.append(record)
         self.state.save()
-        self.notice(HELD_NOTICE)   # one per held message; a failed notice only logs (notice() catches it)
+        # A message for a manager that can't be reached says so honestly (Rowan #104 L2), not "not sent yet".
+        down = reason == "home_down" and home is not None
+        if self.chooser:
+            text = HELD_DOWN_CHOOSE % home["label"] if down else CHOOSE_NOTICE
+            record["notice"] = self.notice(text, markup=inline_chooser(self.homes, self._gen()))
+            self.state.save()
+        else:
+            self.notice(HELD_DOWN_NOTICE % home["label"] if down else HELD_NOTICE)   # a failed notice only logs
         return {"processed": False, "reason": "held", "event_id": None}
+
+    # ---- chooser (P3) ----
+
+    def _gen(self) -> int:
+        return int(self.d.get("chooser_gen") or 0)
+
+    def _save_selection(self, home: Dict[str, Any], via: str, update_id: int) -> bool:
+        """§3.8: saved before any reply or feed. Returns True when the selection changed."""
+        current = self.selected()
+        self.d["selection"] = dict(key=home["key"], employee_id=home["employee_id"], at=_now(), by_update=update_id,
+                                   via=via)
+        self.state.save()
+        return current is None or current["key"] != home["key"]
+
+    def _select(self, home: Dict[str, Any], via: str, update_id: int, message: Optional[Dict[str, Any]]
+                ) -> Dict[str, Any]:
+        """A keyboard tap, a standalone directive or ``/to <name>``: saved, journaled without body, never fed;
+        one Router notice with the refreshed keyboard; held messages are released to that home."""
+        self._save_selection(home, via, update_id)
+        if message is not None and message.get("message_id") is not None:
+            self.route_map[str(message["message_id"])] = dict(kind="select", key=home["key"], update_id=update_id,
+                                                              at=_now())
+            self.state.save()
+        self.notice(TALKING_TO % home["button"])
+        result = self._release(home)
+        if result.get("reason") == "store_error":
+            return result
+        return {"processed": True, "reason": "selected", "event_id": None, "home": home["key"],
+                "released": result.get("released", 0)}
+
+    def _command(self, update_id: int, message: Dict[str, Any], arg: str) -> Dict[str, Any]:
+        """§3.7 optional ``/to``: alone re-sends the keyboard; ``/to <shortcut|key|button>`` selects. Never fed."""
+        if message.get("message_id") is not None:
+            self.route_map[str(message["message_id"])] = dict(kind="select", key=None, update_id=update_id, at=_now())
+            self.state.save()
+        if arg:
+            wanted = arg.casefold()
+            home = next((h for h in self.homes if wanted in (h["key"].casefold(), (h["shortcut"] or "").casefold(),
+                                                             h["button"].casefold())), None)
+            if home is not None:
+                return self._select(home, "command", update_id, None)
+        current = self.selected()
+        self.notice(TALKING_TO % current["button"] if current else "Choose who to talk to below.")
+        return {"processed": True, "reason": "command", "event_id": None}
+
+    def _release(self, home: Dict[str, Any]) -> Dict[str, Any]:
+        """Feed held messages to ``home`` in arrival order. C1: once fed or refused, the body leaves the state; only
+        ids stay (``held_done``). A transient failure keeps that message and the rest held."""
+        if home["key"] in self.down or not self.d.get("held"):
+            return {"released": 0}
+        self.d["chooser_gen"] = self._gen() + 1     # every inline chooser shown before now is stale
+        self.state.save()
+        released = 0
+        while self.d.get("held"):
+            record = self.d["held"][0]
+            reply_to = record.get("reply_to")
+            verdict, target, entry = resolve_reply(self.route_map, reply_to, self.homes)
+            same = verdict == "home" and target["key"] == home["key"]
+            result = self._feed(home, record["update_id"], record["message"], reply_to, entry if same else None,
+                                entry.get("question") if (same and entry) else None, record.get("body"),
+                                record.get("directive"))
+            if result.get("reason") == "store_error":
+                return {"released": released, "reason": "store_error"}
+            self.d["held"].pop(0)
+            done = self.d.setdefault("held_done", [])
+            done.append(dict(update_id=record["update_id"], home=home["key"], event_id=result.get("event_id"),
+                             outcome=result.get("reason"), at=_now()))
+            del done[:-HELD_DONE_KEEP]
+            self.state.save()
+            released += 1
+            if record.get("notice") is not None:
+                self._edit(record["notice"], SENT_TO % home["button"])
+        return {"released": released}
+
+    def _edit(self, tg_mid: int, text: str) -> None:
+        """Replace a held message's inline chooser with where it went (removes its buttons). Cosmetic: logs only."""
+        try:
+            self.client.edit_message_text(self.state.bound_chat_id, tg_mid, ROUTER + "\n" + text)
+        except Exception as exc:
+            logger.warning("Router notice not edited: %s", type(exc).__name__)
+
+    def _callback(self, update_id: int, query: Dict[str, Any]) -> Dict[str, Any]:
+        """§3.4 / r0 rule: paired user in the paired chat, not a bot, known key, current gen, callback id not seen.
+        C2: the id window is the second guard; the first is the update cursor (poll_once never processes an
+        update_id at or below it, and Telegram does not resend a confirmed update)."""
+        sender = query.get("from") or {}
+        chat = ((query.get("message") or {}).get("chat") or {})
+        qid = str(query.get("id") or "")
+        handled = self.d.setdefault("callbacks", [])
+        reason = None
+        home = None
+        if not self.state.paired or sender.get("is_bot") or sender.get("id") != self.state.bound_user_id \
+                or chat.get("id") != self.state.bound_chat_id:
+            reason = "unrecognized_sender"
+        elif not qid or qid in handled:
+            reason = "callback_replayed"
+        else:
+            parts = str(query.get("data") or "").split(":")
+            home = next((h for h in self.homes if len(parts) == 3 and parts[0] == "sel" and h["key"] == parts[1]),
+                        None)
+            if home is None:
+                reason = "callback_unknown"
+            elif parts[2] != str(self._gen()) or not self.d.get("held"):
+                reason = "callback_stale"
+            elif home["key"] in self.down:
+                reason = "home_down"
+        if qid and reason != "unrecognized_sender":
+            handled.append(qid)
+            del handled[:-CALLBACK_WINDOW]
+        if reason is not None:
+            self.state.record_rejection(reason, update_id)
+            if reason != "unrecognized_sender":
+                self._answer(qid, "Out of date. Use the buttons below the message box.")
+            return {"processed": False, "reason": reason, "event_id": None}
+        self._save_selection(home, "inline", update_id)
+        self._answer(qid, None)
+        self.notice(TALKING_TO % home["button"])
+        result = self._release(home)
+        if result.get("reason") == "store_error":
+            return result
+        return {"processed": True, "reason": "selected", "event_id": None, "home": home["key"],
+                "released": result.get("released", 0)}
+
+    def _answer(self, qid: str, text: Optional[str]) -> None:
+        if not qid:
+            return
+        try:
+            self.client.answer_callback_query(qid, text)
+        except Exception as exc:
+            logger.warning("Callback not answered: %s", type(exc).__name__)
 
     # ---- typing indicator (F11: shared/status.json, never the Store) ----
 
@@ -791,9 +1098,13 @@ class HomesAdapter:
         from .telegram import OUTBOX_CHECK_INTERVAL
         cursor = self.state.update_cursor
         updates = self.client.get_updates(offset=cursor + 1 if cursor is not None else None,
-                                          timeout=OUTBOX_CHECK_INTERVAL)
+                                          timeout=OUTBOX_CHECK_INTERVAL,
+                                          allowed_updates=["message", "callback_query"] if self.chooser else None)
         ok = True
         for update in updates:
+            if cursor is not None and update["update_id"] <= cursor:
+                # C2: an update at or below the confirmed cursor is never processed again (cursor-based window).
+                continue
             result = self.process_update(update)
             if result.get("reason") == "store_error":
                 ok = False
@@ -852,6 +1163,12 @@ def _homes_state(base: Any) -> Any:
         def save(self) -> None:
             from .telegram import _atomic_write
             self._d["schema"] = STATE_SCHEMA
+            route_map = self._d.get("route_map")
+            if isinstance(route_map, dict) and len(route_map) > ROUTE_MAP_CAP:
+                # Bounded (Rowan #104 nit): the oldest entries go first (JSON keeps insertion order). A Reply to a
+                # dropped target is unmapped, so it is held, never guessed.
+                for stale in list(route_map)[:len(route_map) - ROUTE_MAP_CAP]:
+                    del route_map[stale]
             _atomic_write(self.path, self._d)
             guard = self._guard_path()
             if not guard.exists():
