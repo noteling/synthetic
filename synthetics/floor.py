@@ -31,12 +31,34 @@ WAIT_POLL = 0.5             # seconds between attach attempts while the yield ta
 WAIT_EXTRA = 60.0           # beyond the grace: how long attach waits for the stopped session to be recorded
 MEETING_CAP = 90 * 60.0     # F2: a meeting session ends after 90 minutes whatever Stand sends
 LINE_POLL = 1.0             # seconds between cap/hold/session checks while waiting for Stand's next line
+OPT_IN = "floor.json"       # F4 (R2): meetings are opt-in per home, off by default; owner/operator-set like click.json
 
 
 class Refused(Exception):
     def __init__(self, code, message):
         super().__init__(message)
         self.code = code
+
+
+def opt_in_state(home):
+    """F4: the home's floor.json as "enabled" | "absent" | "disabled" | "unreadable". Only "enabled" lets attach
+    proceed: the file is a JSON object with "enabled": true. A file that can't be read or isn't a JSON object is
+    "unreadable" and counts as not enabled (doctor shows it)."""
+    try:
+        with open(os.path.join(str(home), OPT_IN), encoding="utf-8") as handle:
+            value = json.load(handle)
+    except FileNotFoundError:
+        return "absent"
+    except (OSError, ValueError):
+        return "unreadable"
+    if not isinstance(value, dict):
+        return "unreadable"
+    return "enabled" if value.get("enabled") is True else "disabled"
+
+
+def enabled(home):
+    """True only when <home>/floor.json is a JSON object with "enabled": true. Off by default (F4, R2)."""
+    return opt_in_state(home) == "enabled"
 
 
 def _emit(stdout, obj):
@@ -93,6 +115,12 @@ def attach(home, key_file, stdin=None, stdout=None, renew_seconds=None, sleep=ti
                                         "session (%s is set)." % SESSION_ENV)
         with Store(home) as store:
             channel, credential = _authenticate(store, key_file)
+        state = opt_in_state(home)
+        if state != "enabled":
+            # F4 (R2): checked before the begin line is read, so a home that hasn't opted in gets no pending row,
+            # no yield of its running session and no hold.
+            raise Refused("not_enabled", "meetings are not enabled for this home (%s is %s); the owner opts a "
+                                         "home in with {\"enabled\": true}." % (OPT_IN, state))
     except Refused as exc:
         _audit_refusal(home, "attach", exc.code)
         _emit(stdout, dict(type="error", code=exc.code, message=str(exc)))

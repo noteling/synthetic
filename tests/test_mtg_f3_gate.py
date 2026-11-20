@@ -57,6 +57,7 @@ class Base(unittest.TestCase):
         with Store(self.home) as store:
             store.initialize("Vesper", "maintainer")
             store.channel_register("stand", Store.credential_hash(KEY), ["stand:"], "test")
+        (self.home / "floor.json").write_text('{"enabled": true}')  # F4: meetings are opt-in per home
         self.key_file = str(self.root / "stand.key")
         Path(self.key_file).write_bytes(KEY)
         os.chmod(self.key_file, 0o600)
@@ -79,7 +80,18 @@ class Base(unittest.TestCase):
                             dict(type="ask", id="a1", rev=1, question=question)] + list(extra) + [dict(type="end")],
                            meeting=meeting)
         answer = [o for o in out if o["type"] == "answer"][0]
+        self.last_wrap = (meeting, out[-1]["wrap_event"])
         return answer["commitments"][0]["cid"], out[-1]["wrap_event"]
+
+    def summary_call(self, meeting=None, wrap=None):
+        """F4 (R4): the one anchored `meeting summary` memory_put a wrap session writes (verify: present)."""
+        meeting, wrap = (meeting, wrap) if meeting else self.last_wrap
+        head = fj.head(self.home, meeting)
+        with Store(self.home) as store:
+            store.entity_put("meetings", "Meetings", "concept")
+        return ("memory_put", {"subject": "meetings", "predicate": "meeting summary", "source": wrap,
+                               "value": "Meeting %s: meetings/%s/journal.jsonl lines 1-%d, head %s. Decided: none. "
+                                        "Open: none." % (meeting, meeting, head["lines"], head["head_sha256"])})
 
     def wrap_run(self):
         """The ordinary session that receives the wrap event (it captures the pending inputs)."""
@@ -323,9 +335,11 @@ class MeetingRunTools(Base):
 
 
 class G2Verify(Base):
-    def run_with(self, calls):
+    def run_with(self, calls, summary=True):
         run = self.wrap_run()
         server = self.server(run)
+        if summary:  # F4: a wrap session also writes its meeting summary (last, so receipt lines stay as before)
+            calls = list(calls) + [self.summary_call()]
         out = [server.call(name, args) for name, args in calls]
         with Store(self.home) as store:
             store.run_finish(run, "wrap")
@@ -337,6 +351,7 @@ class G2Verify(Base):
         server = self.server(run)
         work = server.call("floor_accept", {"meeting": "m1", "cid": cid, "title": "Send review notes"})
         server.call("work_put", {"id": work["id"], "note": "From meeting m1 (journal meetings/m1)."})
+        server.call(*self.summary_call())
         with Store(self.home) as store:
             store.run_finish(run, "wrap")
         result = flooraccept.verify(self.home, run)

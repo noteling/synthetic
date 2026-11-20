@@ -52,6 +52,7 @@ class AttachMeetingTest(unittest.TestCase):
             store.initialize("Vesper", "maintainer")
             store.channel_register("stand", Store.credential_hash(KEY), ["stand:"], "test")
             self.work = store.work_put(title="Ship the review", status="ready")["id"]
+        (self.home / "floor.json").write_text('{"enabled": true}')  # F4: meetings are opt-in per home
         self.key_file = str(Path(self.temp.name) / "stand.key")
         Path(self.key_file).write_bytes(KEY)
         os.chmod(self.key_file, 0o600)
