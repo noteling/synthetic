@@ -18,10 +18,12 @@ from __future__ import annotations
 import collections
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import floorjournal as fj
 from . import floortools
@@ -42,6 +44,31 @@ sentences, plain words, no lists or markdown. Say what you know from your record
 
 TAIL_LINES = 40     # journal lines a restarted session is given (§4: a restart must not lose the thread)
 TAIL_TEXT = 400     # characters per tail line
+
+
+def provider_error_message(result):
+    """A safe operator diagnostic for a CLI-declared error, never arbitrary result text.
+
+    The result may contain account details, endpoints or tool output. Only known categories
+    and a narrowly parsed reset clock/timezone are allowed through the meeting channel.
+    """
+    text = result if isinstance(result, str) else ""
+    lower = text.lower()
+    if any(word in lower for word in ("weekly limit", "usage limit", "rate limit", "daily limit", "hit your limit")):
+        message = "The employee's Claude executor has reached its usage limit."
+        reset = re.search(r"\bresets\s+((?:1[0-2]|0?[1-9])(?::[0-5][0-9])?\s*(?:am|pm))"
+                          r"\s*\(([A-Za-z_]+/[A-Za-z_]+)\)", text, re.IGNORECASE)
+        if reset:
+            try:
+                ZoneInfo(reset.group(2))
+            except (ValueError, ZoneInfoNotFoundError):
+                pass
+            else:
+                message += " Provider reset: %s (%s)." % (reset.group(1).lower(), reset.group(2))
+        return message
+    if any(word in lower for word in ("not logged in", "authentication", "invalid api key", "unauthorized")):
+        return "The employee's Claude executor needs a valid login or provider credential."
+    return "The employee's Claude executor rejected the request; no answer was produced."
 
 
 def turn_text(ask):
@@ -161,6 +188,14 @@ class MeetingSession:
             self._write(turn_text(self.inflight))
 
     def _read(self, process, generation):
+        try:
+            self._read_results(process, generation)
+        finally:
+            # This thread owns stdout: close it here, including on a provider error or
+            # generation fence. Closing it from stop while readline blocks can hang.
+            process.stdout.close()
+
+    def _read_results(self, process, generation):
         for raw in process.stdout:
             try:
                 item = json.loads(raw)
@@ -177,8 +212,15 @@ class MeetingSession:
                 ask, self.inflight = self.inflight, None
                 text = item.get("result") if isinstance(item.get("result"), str) else ""
                 ok = not item.get("is_error") and text.strip()
+                rejected = bool(item.get("is_error"))
+            if rejected:
+                self._fail(provider_error_message(text))
             if ask is not None and ask.get("id") is not None:
                 self.on_answer(ask["id"], text.strip() if ok else None)
+            if rejected:
+                # Stop the queue here. The attach owner closes the meeting and model;
+                # queued asks must not consume more quota or get invented fallbacks.
+                return
             with self.lock:
                 if generation == self.generation:
                     self._next()

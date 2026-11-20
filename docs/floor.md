@@ -127,6 +127,10 @@ A `begin` line with `goal` (the human's brief for this meeting) runs the meeting
   still-open asks as `late`, close the journal, finish the run (with its cost), feed one wrap event through the
   stand channel (source `stand:meeting`, sender `stand`, body = pointer facts and the chain head, no text, no
   `question_id`), release the hold.
+- **Provider failure.** A CLI-declared error stops the meeting request queue. Known usage-limit and login
+  failures reach the adapter as safe operational messages; a provider reset clock/timezone is included when
+  recognized. Arbitrary error-result text is not forwarded. The failed ask produces no spoken answer, the
+  normal close still anchors the journal and releases the hold, and any reported usage remains recorded.
 - **Panel lines (G4).** `note` and `confirm` live only in the journal (`human-panel`). They never become store
   events, so they can't answer a question, approve a click or stand in for the default human. The wrap event's
   sender is the channel, not the human.

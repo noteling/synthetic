@@ -279,7 +279,7 @@ def _meeting(home, channel, credential, meeting, hold, goal, text_mode, started_
 
     def on_answer(ask_id, text):
         room = holder["meeting"]
-        lines = room.finish(ask_id, text) if text else room.fail(ask_id, "no usable answer")
+        lines = room.finish(ask_id, text) if text else room.fail(ask_id, failed[0] if failed else "no usable answer")
         for line in lines:
             emit(line)
 
