@@ -17,7 +17,12 @@ class GatewayFixtureTests(unittest.TestCase):
         if compressed:
             body = gzip.compress(body)
             headers['Content-Encoding'] = 'gzip'
-        with urlopen(Request(gateway.base_url + '/responses', data=body, headers=headers), timeout=3) as response:
+        try:
+            response = urlopen(Request(gateway.base_url + '/responses', data=body, headers=headers), timeout=3)
+        except HTTPError as error:
+            error.close()
+            raise
+        with response:
             return response.status, response.headers.get_content_type(), response.read().decode()
 
     @staticmethod
