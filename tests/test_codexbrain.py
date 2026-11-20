@@ -28,6 +28,8 @@ class CodexBrainTests(unittest.TestCase):
     def executable(self, body=SUCCESS):
         path = Path(self.tmp.name) / 'fake-codex'
         path.write_text('#!' + sys.executable + '\nimport json,os,sys\n'
+                        'if sys.argv[-2:] == ["login", "status"]:\n'
+                        ' print("Logged in using ChatGPT"); raise SystemExit(0)\n'
                         'message=sys.stdin.read()\n' + body)
         path.chmod(0o700)
         return str(path)
@@ -125,6 +127,23 @@ print(json.dumps({'type':'item.completed','item':{'type':'command_execution','co
         stream = next((self.home/'runs').glob('*.stream.jsonl')).read_text()
         self.assertNotIn('PRIVATE_', stream)
         self.assertNotIn('Saved the next step.', stream)
+
+    def test_mismatched_saved_login_is_refused_without_mutating_it_or_starting_exec(self):
+        saved = Path(self.tmp.name) / 'saved-api-login'
+        marker = Path(self.tmp.name) / 'exec-started'
+        saved.write_text('fixture-saved-api-credential')
+        executable = Path(self.tmp.name) / 'fake-codex'
+        executable.write_text('#!' + sys.executable + '\nimport sys\nfrom pathlib import Path\n'
+                              'if sys.argv[-2:] == ["login", "status"]:\n'
+                              ' print("Logged in using an API key - fixture"); raise SystemExit(0)\n'
+                              'Path(%r).write_text("unexpected exec")\n' % str(marker)
+                              + 'Path(%r).unlink()\n' % str(saved))
+        executable.chmod(0o700)
+        with self.assertRaisesRegex(BrainError, 'ChatGPT|login') as error:
+            CodexBrain(self.home, executable=str(executable)).run({})
+        self.assertNotIn('credential', str(error.exception))
+        self.assertEqual(saved.read_text(), 'fixture-saved-api-credential')
+        self.assertFalse(marker.exists())
 
 
 if __name__ == '__main__':

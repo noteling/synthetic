@@ -35,6 +35,8 @@ class CodexReviewTests(unittest.TestCase):
     def executable(self, body):
         path = self.root / 'fake-codex'
         path.write_text('#!' + sys.executable + '\nimport json,sys,time\n'
+                        'if sys.argv[-2:] == ["login", "status"]:\n'
+                        ' print("Logged in using ChatGPT"); raise SystemExit(0)\n'
                         'sys.stdin.read()\n' + body)
         path.chmod(0o700)
         return str(path)
@@ -64,7 +66,7 @@ class CodexReviewTests(unittest.TestCase):
 
         def capture(*args, **kwargs):
             child = real_popen(*args, **kwargs)
-            if args and args[0] and args[0][0] == fake:
+            if args and args[0] and args[0][0] == fake and 'exec' in args[0][1:]:
                 processes.append(child)
             return child
 
@@ -84,7 +86,9 @@ class CodexReviewTests(unittest.TestCase):
 
     def test_thread_failure_after_valid_stream_is_not_a_successful_artifact(self):
         fake = self.root / 'fake-codex'
-        fake.write_text('#!' + sys.executable + '\nimport json\n' + SUCCESS)
+        fake.write_text('#!' + sys.executable + '\nimport json,sys\n'
+                        'if sys.argv[-2:] == ["login", "status"]:\n'
+                        ' print("Logged in using ChatGPT"); raise SystemExit(0)\n' + SUCCESS)
         fake.chmod(0o700)
         read_done = threading.Event()
         real_start = threading.Thread.start
