@@ -89,6 +89,7 @@ class P1ContractTests(unittest.TestCase):
         bad = [
             "not an object", [1], {}, {"Message_id": 1}, {"message_id": True}, {"message_id": 1.5},
             {"message_id": {"nested": 1}}, {"message_id": ""}, {"message_id": "x" * 65},
+            {"chat_id\n": 1}, {"message_id": "   "}, {"message_id": 2 ** 63}, {"message_id": -2 ** 63 - 1},
             {"k%d" % i: i for i in range(9)},
             {"a": "x" * 64, "b": "x" * 64, "c": "x" * 64, "d": "x" * 64},  # over 256 bytes
         ]
@@ -102,6 +103,10 @@ class P1ContractTests(unittest.TestCase):
         # Null values and short text are fine.
         code, rows = self.contract("inbound", lines=[line(external_id="tg:ok", provider={
             "message_id": 5, "reply_to_message_id": None, "thread": "topic-1"})])
+        self.assertEqual(rows[0]["result"], "accepted")
+        # The signed 64-bit edges are accepted.
+        code, rows = self.contract("inbound", lines=[line(external_id="tg:edge", provider={
+            "chat_id": -2 ** 63, "message_id": 2 ** 63 - 1})])
         self.assertEqual(rows[0]["result"], "accepted")
 
     def test_identity(self):
