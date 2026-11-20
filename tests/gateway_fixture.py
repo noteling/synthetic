@@ -25,6 +25,14 @@ MAX_TOOLS = 256
 SAFE_NAME = re.compile(r"[A-Za-z0-9_.:/-]{1,256}\Z")
 
 
+def model_fact(value):
+    """A bounded route/model alias, never an arbitrary object or control text."""
+    if (not isinstance(value, str) or not value or len(value) > 512
+            or any(ord(char) < 32 or ord(char) == 127 or 0xD800 <= ord(char) <= 0xDFFF for char in value)):
+        return None
+    return value
+
+
 def offered_functions(tools, namespace=None, _depth=0):
     """The supported flat/namespace function names, never their schemas or descriptions."""
     found = []
@@ -229,6 +237,7 @@ class GatewayFixture:
                                                        and isinstance(item.get('output'), (str, list))
                                                        for item in outputs)
             fact = {'route': '/v1/responses', 'auth_ok': True, 'request': self._request_count,
+                    'model': model_fact(request.get('model')),
                     'tool_count': len(offered), 'input_count': len(inputs),
                     'function_output_count': len(outputs), 'matched_tool_output': matched}
             if self._finished:

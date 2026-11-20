@@ -94,6 +94,20 @@ class GatewayFixtureTests(unittest.TestCase):
             self.assertEqual((status, content_type), (200, 'application/json'))
             self.assertEqual(json.loads(body)['output'][0]['type'], 'message')
 
+    def test_safe_facts_record_the_configured_model_route_verbatim(self):
+        alias = 'organization/gateway:an-unusual model alias.v2'
+        with GatewayFixture(tool_pattern=None) as gateway:
+            self.request(gateway, {'model': alias})
+            self.assertEqual(gateway.facts[0]['model'], alias)
+
+    def test_model_fact_is_bounded_and_rejects_control_text_or_objects(self):
+        for value in ('a' * 513, 'route\nPRIVATE-INJECTION', {'secret': 'PRIVATE-OBJECT'}, ''):
+            with self.subTest(value=type(value).__name__):
+                with GatewayFixture(tool_pattern=None) as gateway:
+                    self.request(gateway, {'model': value})
+                    self.assertIsNone(gateway.facts[0]['model'])
+                    self.assertNotIn('PRIVATE', json.dumps(gateway.facts))
+
     def test_missing_tool_and_excess_requests_are_bounded_failures(self):
         with GatewayFixture(max_requests=1) as gateway:
             with self.assertRaises(HTTPError) as raised:
