@@ -129,14 +129,32 @@ class Engine:
         self.runtime = runtime  # M19 runtime.Controller, or None for a fixed argv configuration
         self.retention = {"keep_days": 30.0, "max_mb": 200.0}  # E4 runs/ retention (runtime.json runs_keep_days/_max_mb)
 
+    def _run_executor(self):
+        result = {"executor": getattr(self.brain, "backend", "claude")}
+        configuration = getattr(self.brain, "configuration", None)
+        if configuration is not None:
+            result["executor_config"] = configuration.metadata()
+        return result
+
     def apply_runtime(self, effective):
         """Use the effective persisted settings for brain, limits and polling."""
-        self.brain.executable = str(effective["claude"])
-        self.brain.model = effective["model"]
-        self.brain.timeout = float(effective["timeout"])
-        self.brain.budget = float(effective["budget"])
+        backend = effective.get("brain", "claude")
+        if backend != getattr(self.brain, "backend", "claude"):
+            from .brain import make_brain
+            self.brain = make_brain(self.home, brain=backend, claude=effective["claude"],
+                                    codex=effective.get("codex") or "codex", model=effective["model"],
+                                    timeout=effective["timeout"], budget=effective["budget"],
+                                    brain_config=effective.get("brain_config"))
+        if backend == "configured":
+            self.brain.apply_runtime(effective)
+        else:
+            self.brain.executable = str(effective.get("codex") if backend == "codex" else effective["claude"])
+            self.brain.model = effective["model"]
+            self.brain.timeout = float(effective["timeout"])
+            self.brain.budget = float(effective["budget"])
         from . import runtime as runtime_settings
-        self.brain.stream_output = bool(runtime_settings.setting(effective, "stream_output"))  # E4 C1 switch
+        if backend != "configured":
+            self.brain.stream_output = bool(runtime_settings.setting(effective, "stream_output"))  # E4 C1 switch
         self.retention = {"keep_days": float(runtime_settings.setting(effective, "runs_keep_days")),
                           "max_mb": float(runtime_settings.setting(effective, "runs_max_mb"))}
         self.daily_limit = float(effective["daily_limit"]) or None
@@ -232,7 +250,7 @@ class Engine:
                     sharedstatus.write(store, paused=None)  # VIS: the pause ended
                 self._last_pause = None
                 try:
-                    run = store.run_begin()
+                    run = store.run_begin(**self._run_executor())
                 except WorkerHeld:
                     return None
             else:
@@ -251,7 +269,7 @@ class Engine:
                 if not allowed:
                     return None
                 try:
-                    run = store.run_begin(event_ids=allowed)
+                    run = store.run_begin(event_ids=allowed, **self._run_executor())
                 except WorkerHeld:
                     return None
         yielded = {}
@@ -273,6 +291,9 @@ class Engine:
             context["pending_events"] = events
             context["run"] = run
             context["workspace"] = str(self.home / "workspace")
+            capabilities = getattr(self.brain, "capabilities", None)
+            if isinstance(capabilities, dict):
+                context["executor"] = capabilities
             self.on_update({"type": "started", "run_id": run["id"]})
             result = self._run_yieldable(run["id"], context, yielded)
             with Store(self.home) as store:

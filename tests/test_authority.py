@@ -375,7 +375,7 @@ class WarrantTest(unittest.TestCase):
         state = {"policy": {"allowed_models": None, "allowed_claude": None, "baseline": {"budget": 1}},
                  "effective": {"timeout": 600.0}}
         with mock.patch("synthetics.runtime.read_state", return_value=state), \
-                mock.patch("synthetics.runtime.validate", side_effect=lambda c, *a: c), \
+                mock.patch("synthetics.runtime.validate", side_effect=lambda c, *a, **kw: c), \
                 mock.patch("synthetics.runtime.merge", side_effect=lambda e, s: dict(e, **s)), \
                 mock.patch("synthetics.runtime.digest", return_value="d"):
             with Store(self.homes["rowan"]) as s:
@@ -970,7 +970,7 @@ class WarrantTest(unittest.TestCase):
                  "effective": {"daily_limit": 100.0}}
         with mock.patch("synthetics.install._control") as ctl, \
                 mock.patch("synthetics.runtime.read_state", return_value=state), \
-                mock.patch("synthetics.runtime.validate", side_effect=lambda c, *a: c), \
+                mock.patch("synthetics.runtime.validate", side_effect=lambda c, *a, **kw: c), \
                 mock.patch("synthetics.runtime.merge", side_effect=lambda e, s: dict(e, **s)), \
                 mock.patch("synthetics.runtime.digest", return_value="d"):
             out = self.ok("rowan", "worker", "restart", session="codex")
@@ -1176,7 +1176,7 @@ class WarrantTest(unittest.TestCase):
         state = {"policy": {"allowed_models": None, "allowed_claude": None, "baseline": {"budget": 1}},
                  "effective": {"daily_limit": 100.0}}
         with mock.patch("synthetics.runtime.read_state", return_value=state), \
-                mock.patch("synthetics.runtime.validate", side_effect=lambda c, *a: c), \
+                mock.patch("synthetics.runtime.validate", side_effect=lambda c, *a, **kw: c), \
                 mock.patch("synthetics.runtime.merge", side_effect=lambda e, s: dict(e, **s)), \
                 mock.patch("synthetics.runtime.digest", return_value="d"):
             rec = self.ok("codex", "limit", "raise", "150", "--persistent", "--key", "p1", session="codex")

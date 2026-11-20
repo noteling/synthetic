@@ -118,8 +118,8 @@ class ThreadTests(unittest.TestCase):
         original_begin = Store.run_begin
         late_ids = []
 
-        def begin_then_deliver(store):
-            run = original_begin(store)
+        def begin_then_deliver(store, **kwargs):
+            run = original_begin(store, **kwargs)
             late_ids.append(store.feed("david", "LATE SAME THREAD", thread="a")["id"])
             late_ids.append(store.feed("david", "LATE OTHER THREAD", thread="late")["id"])
             return run

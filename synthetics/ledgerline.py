@@ -604,13 +604,14 @@ def _chain(pages, start, cutoff, judge, chunks, breaks, name):
 STREAM_SUFFIX = ".stream.jsonl"
 STREAM_TYPES = ("system", "assistant", "user", "result")
 SHAPES = ("full", "spilled", "preview", "error", "unknown")
-STREAM_COMMON = frozenset({"kind", "seq", "prev_sha256"})
+STREAM_COMMON = frozenset({"kind", "seq", "prev_sha256", "provider"})
 STREAM_ALLOWED = {
     "init": frozenset({"model", "claude_code_version", "tools", "mcp_servers"}),
     "tool_use": frozenset({"tool_use_id", "name", "input_bytes", "input_sha256"}),
     "displayed": frozenset({"tool_use_id", "bytes", "sha256", "shape", "reported_chars", "saved_outside_home"}),
     "turn": frozenset({"text_blocks", "text_bytes"}),
-    "result": frozenset({"subtype", "is_error", "num_turns", "total_cost_usd", "duration_ms"}),
+    "result": frozenset({"subtype", "is_error", "num_turns", "total_cost_usd", "duration_ms", "usage"}),
+    "tool": frozenset({"item_type", "state"}),
     "stream_error": frozenset({"stage", "type"}),
     # E4-r2 (Rowan B1): the pipe was still held open after the CLI exited (an escaped descendant); the reader was
     # left to its daemon thread and later lines are ignored. join_seconds is how long the worker waited for it.
@@ -824,4 +825,9 @@ def export_stream(home_id, run_id, seq, fact, raw):
     out.update(stream_kind=fact["kind"], prev_sha256=fact.get("prev_sha256"))
     out["facts"] = {k: (v if k in allowed else text_facts(canonical(v)))
                     for k, v in fact.items() if k not in STREAM_COMMON}
+    if "usage" in out["facts"]:
+        usage = fact.get("usage")
+        token_keys = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens")
+        out["facts"]["usage"] = {k: v for k, v in (usage.items() if isinstance(usage, dict) else ())
+                                 if k in token_keys and isinstance(v, int) and not isinstance(v, bool) and v >= 0}
     return out
