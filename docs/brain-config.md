@@ -80,7 +80,8 @@ session, keeping unfinished work and already-recorded tool effects for recovery.
 This uses the runtime's saved ChatGPT login and its default model. An optional
 `connection.model` selects a named model. A read-only login-status preflight
 refuses an incompatible or missing saved login before starting the session.
-Inherited API-key and endpoint overrides are excluded.
+The status check has its own ten-second limit; the configured reasoning timeout
+starts afterward. Inherited API-key and endpoint overrides are excluded.
 
 ```json
 {

@@ -78,7 +78,7 @@ class CodexBrain(ClaudeBrain):
         command = [self.executable, "login", "status"]
         try:
             result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True,
-                                    text=True, timeout=min(self.timeout, 10),
+                                    text=True, timeout=10,
                                     env=self._environment("login-check"))
         except (OSError, subprocess.SubprocessError):
             raise BrainError("Could not verify the selected runtime's saved ChatGPT login.") from None
