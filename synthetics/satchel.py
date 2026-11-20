@@ -85,9 +85,11 @@ PATTERNS = (
     ("github", re.compile(r"(?<![A-Za-z0-9_])(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,}")),
     ("aws", re.compile(r"(?<![A-Z0-9])AKIA[0-9A-Z]{16}(?![A-Z0-9])")),
     ("slack", re.compile(r"(?<![%s])xox[abprs]-[A-Za-z0-9-]{10,}" % _EDGE)),
-    # C2: lookarounds instead of \b, so a token ending in '-' or '_' is still matched whole.
-    ("telegram", re.compile(r"(?<![%s])\d{6,12}:[A-Za-z0-9_-]{35}(?![%s])" % (_EDGE, _EDGE))),
-    ("bearer", re.compile(r"(?i)\bauthorization\s*[:=]\s*(?:(?:bearer|basic|token)\s+)?(?P<v>[^\s\"'«]{8,})"
+    # C2: lookarounds instead of \b, so a token ending in '-' or '_' is still matched whole. r2 F1: the leading
+    # boundary is "not a digit" only, so the token inside its own API URL (https://api.telegram.org/bot<id>:<35>/...,
+    # telegram.py builds that and HTTP errors quote it) is matched; the whole digit run must be the bot id.
+    ("telegram", re.compile(r"(?<![0-9])\d{6,12}:[A-Za-z0-9_-]{35}(?![%s])" % _EDGE)),
+    ("bearer", re.compile(r"(?i)\bauthorization[\"']?\s*[:=]\s*[\"']?(?:(?:bearer|basic|token)\s+)?(?P<v>[^\s\"'«]{8,})"
                           r"|\bbearer\s+(?P<w>[A-Za-z0-9._~+/=-]{16,})")),
     ("jwt", re.compile(r"(?<![%s])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}" % _EDGE)),
     ("userinfo", re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s/:@«]+:(?P<v>[^\s/@«]+)@")),
@@ -98,8 +100,22 @@ PATTERNS = (
                           r"(?:\"(?P<v>[^\"«\n]{4,})\"|'(?P<w>[^'«\n]{4,})'|(?P<x>[^\s\"'«,;}\]]{4,}))")),
 )
 _CANDIDATE = re.compile(r"(?<![%s])[A-Za-z0-9_-]{16,}(?![%s])" % (_EDGE, _EDGE))
-_HEX64 = re.compile(r"[0-9a-fA-F]{64}")
+# r2 F4: every 64-hex window of a hex run is hashed too, so a key glued to '_', '-' or other hex is still found.
+_HEXRUN = re.compile(r"[0-9a-fA-F]{64,}")
 MARKER = re.compile(r"«masked:([a-z-]+):(\d+)»")
+# r2 n1: a marker-shaped text already in the home is rewritten to this, so every «masked:…» in an archive is a mask.
+LITERAL_MARKER = "«masked-literal:"
+# r2 F2: a JSON object member whose key names a secret has its whole value masked (kind assign), whatever its shape.
+# The key is split at camelCase and compared on its last word(s): DB_PASSWORD, apiKey, X-Api-Key, access_token.
+_SECRET_KEY = re.compile(r"(?:\A|[_\-. ])(?:password|passwd|passphrase|secret|secret[_-]?key|client[_-]?secret"
+                         r"|secret[_-]?access[_-]?key|token|api[_-]?key|apikey|private[_-]?key|authorization)\Z")
+
+
+def secret_key(key):
+    """True when a JSON object key names a secret (r2 F2)."""
+    if not isinstance(key, str):
+        return False
+    return bool(_SECRET_KEY.search(re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key).lower()))
 
 
 def _span(match):
@@ -118,19 +134,33 @@ def detect(text, channel_hashes=frozenset()):
             if end > start:
                 hits.append((start, end, kind))
     if channel_hashes:
-        for match in _HEX64.finditer(text):
-            if match.group().lower() in channel_hashes:
-                hits.append((match.start(), match.end(), "channel-key-hash"))
+        for match in _HEXRUN.finditer(text):
+            run, base = match.group(), match.start()
+            for i in range(len(run) - 63):
+                window = run[i:i + 64]
+                if window.lower() in channel_hashes:
+                    hits.append((base + i, base + i + 64, "channel-key-hash"))
+                elif hashlib.sha256(window.encode("utf-8")).hexdigest() in channel_hashes:
+                    hits.append((base + i, base + i + 64, "channel-key"))
         for match in _CANDIDATE.finditer(text):
             if hashlib.sha256(match.group().encode("utf-8")).hexdigest() in channel_hashes:
                 hits.append((match.start(), match.end(), "channel-key"))
-    hits.sort(key=lambda h: (h[0], -(h[1] - h[0])))
-    out, end = [], -1
-    for hit in hits:
-        if hit[0] >= end:
-            out.append(hit)
-            end = hit[1]
-    return out
+    return merge(hits)
+
+
+def merge(hits):
+    """r2 F5: overlapping hits become one span (their union), so no part of a longer secret survives next to a
+    shorter hit. The merged span keeps the kind of its longest member. Touching spans stay separate."""
+    out = []
+    for start, end, kind in sorted(hits, key=lambda h: (h[0], -(h[1] - h[0]))):
+        if out and start < out[-1][1]:
+            first, last, longest, size = out[-1]
+            if end - start > size:
+                longest, size = kind, end - start
+            out[-1] = (first, max(last, end), longest, size)
+        else:
+            out.append((start, end, kind, end - start))
+    return [(start, end, kind) for start, end, kind, _ in out]
 
 
 class Masker:
@@ -139,20 +169,43 @@ class Masker:
     def __init__(self, channel_hashes=frozenset()):
         self.channel_hashes = frozenset(h.lower() for h in channel_hashes if isinstance(h, str))
         self.masks = []
+        self.literals = []
+
+    def _add(self, location, kind, offset, length):
+        n = len(self.masks) + 1
+        self.masks.append(dict(location, n=n, kind=kind, offset=offset, length=length))
+        return "«masked:%s:%d»" % (kind, n)
 
     def text(self, text, location):
-        hits = detect(text, self.channel_hashes)
-        if not hits:
+        hits = [(s, e, k) for s, e, k in detect(text, self.channel_hashes)]
+        literal = [(m.start(), m.start() + len("«masked:"), None) for m in MARKER.finditer(text)]
+        if not hits and not literal:
             return text, False
         parts, last = [], 0
-        for start, end, kind in hits:
-            n = len(self.masks) + 1
-            self.masks.append(dict(location, n=n, kind=kind, offset=start, length=end - start))
+        for start, end, kind in sorted(hits + literal, key=lambda h: (h[0], h[1])):
+            if start < last:  # a literal marker inside a masked span is masked with it
+                continue
             parts.append(text[last:start])
-            parts.append("«masked:%s:%d»" % (kind, n))
+            if kind is None:
+                # n1: a marker-shaped text in the home (a note about Satchel) is not a mask; it is rewritten so
+                # verify can tell the two apart, and listed in the manifest.
+                self.literals.append(dict(location, offset=start))
+                parts.append(LITERAL_MARKER)
+            else:
+                parts.append(self._add(location, kind, start, end - start))
             last = end
         parts.append(text[last:])
         return "".join(parts), True
+
+    def secret_value(self, value, location):
+        """r2 F2: the value of a secret-named JSON key: a non-empty string or a number is masked whole."""
+        if isinstance(value, bool) or value is None:
+            return value, False
+        if isinstance(value, (int, float)):
+            return self._add(location, "assign", 0, len(json.dumps(value))), True
+        if isinstance(value, str) and value and not MARKER.fullmatch(value):
+            return self._add(location, "assign", 0, len(value)), True
+        return None
 
     def value(self, value, location, path="$"):
         """Walk a parsed JSON value: every string and every dict key. Returns (value, changed)."""
@@ -169,7 +222,12 @@ class Masker:
             changed, out = False, {}
             for key, item in value.items():
                 new_key, key_hit = self.text(key, dict(location, json_path="%s.<key %s>" % (path, len(out))))
-                item, hit = self.value(item, location, "%s.%s" % (path, new_key))
+                masked = self.secret_value(item, dict(location, json_path="%s.%s" % (path, new_key))) \
+                    if secret_key(key) else None
+                if masked is not None:
+                    item, hit = masked
+                else:
+                    item, hit = self.value(item, location, "%s.%s" % (path, new_key))
                 out[new_key] = item
                 changed = changed or key_hit or hit
             return out, changed
@@ -471,6 +529,8 @@ def extract(home, out, timeout=DEFAULT_TIMEOUT, temp_base=None, now=None):
             identity = json.loads(ident[0]) if ident else {}
             channels, hashes = _read_channels(conn)
             masker = Masker(hashes)
+            # Belt (Codex r2): overwrite freed cells as they are freed; the second VACUUM INTO below is the guard.
+            conn.execute("PRAGMA secure_delete=ON")
             conn.execute("BEGIN")
             conn.execute("DELETE FROM channels")
             counts = mask_database(conn, masker)
@@ -504,12 +564,6 @@ def extract(home, out, timeout=DEFAULT_TIMEOUT, temp_base=None, now=None):
             members.append(member)
         (member_dir / "runs.jsonl").write_bytes(_export_runs(home, masker))
         members.append("runs.jsonl")
-        if hashes:
-            # The detectors must have removed every stored key hash from every member.
-            for member in members:
-                blob = (member_dir / member).read_bytes()
-                if any(h.encode() in blob for h in hashes):
-                    raise SatchelError("leak", "a channel key hash survived masking in %s" % member)
         kinds = {}
         for mask in masker.masks:
             kinds[mask["kind"]] = kinds.get(mask["kind"], 0) + 1
@@ -526,11 +580,13 @@ def extract(home, out, timeout=DEFAULT_TIMEOUT, temp_base=None, now=None):
                                        for g in grants],
                             "launchd_label": "com.synthetics.worker." + hashlib.sha256(
                                 employee.encode("utf-8")).hexdigest()[:16]},
-            "masks": masker.masks, "mask_counts": kinds,
+            "masks": masker.masks, "mask_counts": kinds, "literal_markers": masker.literals,
             "premask": {"journals": premask},
             "limits": ["Masked values are replaced by markers; nothing un-masks them.",
                        "Detectors are patterns plus exact channel keys: a secret with no recognisable shape is "
-                       "not masked.", "Everything else is plaintext (no encryption, owner's choice)."],
+                       "not masked.", "Everything else is plaintext (no encryption, owner's choice).",
+                       "Marker-shaped text already in the home is rewritten to «masked-literal:… and listed in "
+                       "literal_markers."],
         }
         (member_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True,
                                                              ensure_ascii=False) + "\n", encoding="utf-8")
@@ -550,6 +606,12 @@ def extract(home, out, timeout=DEFAULT_TIMEOUT, temp_base=None, now=None):
                 info.mode = 0o600
                 with open(str(member_dir / member), "rb") as handle:
                     tar.addfile(info, handle)
+        # r2 F3 (M4): the finished archive passes the same verify a reader runs, plus the exact channel-key checks,
+        # before anything reaches --out. Any hit refuses; the problems name kinds and members, never values.
+        check = verify(local_tar, temp_base=work, channel_hashes=hashes)
+        if not check["ok"]:
+            raise SatchelError("leak", "the masked archive fails its own verify; nothing was written to --out: %s"
+                               % "; ".join(check["problems"][:10]))
         digest = _sha256_file(local_tar)
         # Only the finished, masked tar reaches --out: temp name in --out, then rename (C1).
         partial = out / (PARTIAL_PREFIX + name)
@@ -616,8 +678,10 @@ def _verify_runs(data):
     return out
 
 
-def verify(archive, temp_base=None):
-    """Read-only check of an archive. Returns a report with ok True/False and the reasons."""
+def verify(archive, temp_base=None, channel_hashes=frozenset()):
+    """Read-only check of an archive. Returns a report with ok True/False and the reasons. Extract passes the home's
+    channel key hashes (r2 F3), so its own check also finds a pasted key or a stored key hash; a reader has none."""
+    channel_hashes = frozenset(h.lower() for h in channel_hashes if isinstance(h, str))
     archive = Path(archive).expanduser().resolve()
     problems, report = [], {"archive": str(archive)}
     with _workdir(temp_base) as (work, _):
@@ -685,7 +749,9 @@ def verify(archive, temp_base=None):
                 if key not in listed_masks:
                     problems.append("marker %s in %s is not listed in masks[]" % (match.group(), name))
                 seen.add(key)
-            hits = detect(text)
+            hits = detect(text, channel_hashes)
+            if any(h.encode() in blob for h in channel_hashes):
+                problems.append("a channel key hash is in the raw bytes of %s" % name)
             if hits:
                 problems.append("%d detector hit(s) left in %s (%s)" % (len(hits), name,
                                                                         ", ".join(sorted({h[2] for h in hits}))))
