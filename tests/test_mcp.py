@@ -141,7 +141,9 @@ class MCPTests(unittest.TestCase):
         responses = [json.loads(line) for line in process.stdout.splitlines()]
         self.assertEqual(len(responses), 2)
         context = json.loads(responses[1]["result"]["content"][0]["text"])
-        self.assertEqual(context["identity"]["name"], "Morgan")
+        self.assertIn("identity", context["sections"])
+        identity = next(entry["value"] for entry in context["entries"] if entry["key"] == "identity")
+        self.assertEqual(identity["name"], "Morgan")
 
 
 if __name__ == "__main__":
