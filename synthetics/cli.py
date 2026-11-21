@@ -853,8 +853,32 @@ def parser():
     hext = homes_.add_parser("extract", help="write satchel-<id>-<stamp>.tar into --out (read-only on the home)")
     hext.add_argument("--out", required=True, help="existing directory for the finished archive")
     hext.add_argument("--timeout", type=float, default=None, help="snapshot timeout in seconds (default 600)")
+    hext.add_argument("--move", action="store_true",
+                      help="deliberate migration: refuse while the worker/adapters run, then seal this home")
     hver = homes_.add_parser("verify", help="check an archive: sums, database, row counts, run chains, masks")
     hver.add_argument("archive")
+    hrec = homes_.add_parser("recreate", help="recreate the archived employee into the empty home --home; never "
+                                              "starts, installs or re-grants anything (see REPROVISION.md)")
+    hrec.add_argument("archive")
+    hrec.add_argument("--into", required=True, help="the new, empty home directory (not --home, so a forgotten "
+                                                    "flag cannot fall back to the default home)")
+    hrec.add_argument("--map", action="append", default=[], metavar="OLD=NEW",
+                      help="rewrite a path prefix in the re-provision commands (repeatable)")
+    hrec_kind = hrec.add_mutually_exclusive_group(required=True)
+    hrec_kind.add_argument("--from-move", action="store_true", help="the archive came from `home extract --move`")
+    hrec_kind.add_argument("--source-lost", action="store_true",
+                           help="restore a backup archive because the source home is lost (needs --attest)")
+    hrec.add_argument("--attest", help="why the source is lost; written to the new home's audit log")
+    homes_.add_parser("held", help="list outbox messages held after a backup restore")
+    hrel = homes_.add_parser("release", help="release a held message so adapters may deliver it")
+    hrel.add_argument("id")
+    hrel.add_argument("--by", help="default: humans.json default_human")
+    hdrop = homes_.add_parser("drop", help="drop a held message: it is never sent (recorded failed)")
+    hdrop.add_argument("id")
+    hdrop.add_argument("--reason", required=True)
+    hdrop.add_argument("--by", help="default: humans.json default_human")
+    hcap = homes_.add_parser("release-captures", help="release project captures held after a backup restore")
+    hcap.add_argument("--by", help="default: humans.json default_human")
     proj = sub.add_parser("project", help="project memory (M21): bindings, capture, grants, redaction, export")
     ps = proj.add_subparsers(dest="project_command", required=True)
     pbind = ps.add_parser("bind", help="capture a thread/source into project P from now on (allowed in a session; "
@@ -1215,7 +1239,31 @@ def main(argv=None):
             _refuse_in_session("home %s" % args.home_command)
             from . import satchel
             if args.home_command == "extract":
-                output(satchel.extract(home, args.out, timeout=args.timeout or satchel.DEFAULT_TIMEOUT))
+                run = satchel.extract_move if args.move else satchel.extract
+                output(run(home, args.out, timeout=args.timeout or satchel.DEFAULT_TIMEOUT))
+                return 0
+            if args.home_command == "recreate":
+                maps = []
+                for item in args.map:
+                    old, sep, new = item.partition("=")
+                    if not sep or not old or not new:
+                        raise ValueError("--map takes OLD=NEW")
+                    maps.append((old, new))
+                output(satchel.recreate(args.archive, args.into, from_move=args.from_move, source_lost=args.source_lost,
+                                        attest=args.attest, maps=maps))
+                return 0
+            if args.home_command in ("held", "release", "drop", "release-captures"):
+                with Store(home) as store:
+                    store.identity()
+                    if args.home_command == "held":
+                        output(store.outbox_held())
+                    elif args.home_command == "release":
+                        output(store.outbox_release(args.id, by=_human_or_fail(home, args.by, "--by")))
+                    elif args.home_command == "drop":
+                        output(store.outbox_drop(args.id, by=_human_or_fail(home, args.by, "--by"),
+                                                 reason=args.reason))
+                    else:
+                        output(store.capture_release_held(by=_human_or_fail(home, args.by, "--by")))
                 return 0
             report = satchel.verify(args.archive)
             output(report)

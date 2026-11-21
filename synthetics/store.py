@@ -1969,7 +1969,8 @@ class Store:
 
     @staticmethod
     def delivery_summary(message):
-        """Message-level outcome: delivered > uncertain > failed (all channels) > pending."""
+        """Message-level outcome: delivered > uncertain > failed (all channels) > pending.
+        Satchel P2: a message the operator dropped after a restore is failed unless a channel delivered it."""
         current = message.get("channel_states") or {}
         states = [s["state"] for s in current.values()]
         # Channels with no state entry: legacy M22 acks (delivered|failed) are final.
@@ -1977,6 +1978,8 @@ class Store:
                    if d.get("channel") not in current and d.get("status") in FINAL_STATES]
         if "delivered" in states:
             return "delivered"
+        if message.get("dropped"):
+            return "failed"
         if "uncertain" in states:
             return "uncertain"
         if states and all(s == "failed" for s in states):
@@ -2036,6 +2039,8 @@ class Store:
             for message in self._all("messages"):
                 if message["to"] not in routes or self.delivery_summary(message) == "delivered":
                     continue
+                if message.get("held") or message.get("dropped"):
+                    continue  # Satchel P2: held after a backup restore until the operator releases it
                 state = self._chan_state(dict(message), channel["id"])
                 if state["state"] == "pending" and state.get("retry_after", "") <= now:
                     out.append(self._contract_view(message, channel["id"]))
@@ -2050,6 +2055,11 @@ class Store:
             if state["state"] == "claimed":
                 raise ChannelError("conflict", "Message %s is already claimed on channel %s."
                                    % (message["id"], channel["id"]))
+            if message.get("held"):
+                raise ChannelError("invalid_state", "Message %s is held (%s); the operator releases or drops it."
+                                   % (message["id"], message["held"].get("reason")))
+            if message.get("dropped"):
+                raise ChannelError("invalid_state", "Message %s was dropped after a restore." % message["id"])
             if self.delivery_summary(message) == "delivered" or state["state"] != "pending":
                 raise ChannelError("invalid_state", "Message %s is %s on channel %s, not pending." % (
                     message["id"], "delivered" if self.delivery_summary(message) == "delivered" else state["state"],
@@ -2146,6 +2156,74 @@ class Store:
                     view.update(reason=state.get("reason"), claim_instance=state.get("instance"))
                     out.append(view)
             return out
+
+    # ---- Satchel P2 (docs/satchel.md §Recreate): messages held after a backup restore ----
+
+    HELD_STATES = ("pending", "uncertain")
+
+    def outbox_hold_unfinished(self, reason):
+        """Hold every message whose delivery is not final (pending, claimed or uncertain on any channel): after a
+        backup restore it may already have been delivered by the lost home. Operator-only. Returns the held IDs."""
+        if self.run_id is not None:
+            raise ValueError("Only an operator may hold outbox messages.")
+        reason = _text(reason, "reason")
+        held = []
+        with self._tx():
+            now = timestamp()
+            for message in self._all("messages"):
+                if message.get("held") or self.delivery_summary(message) not in self.HELD_STATES:
+                    continue
+                message["held"] = dict(reason=reason, at=now)
+                self._save("messages", message, "message.held")
+                held.append(message["id"])
+        return held
+
+    def outbox_held(self):
+        return [dict(id=m["id"], to=m["to"], created_at=m["created_at"], kind=m.get("kind", "message"),
+                     question_id=m.get("question_id"), state=self.delivery_summary(m), held=m["held"])
+                for m in self._all("messages") if m.get("held")]
+
+    def outbox_release(self, message_id, by):
+        """Release a held message: adapters may deliver it again (claimed states stay uncertain)."""
+        return self._unhold(message_id, by, None)
+
+    def outbox_drop(self, message_id, by, reason):
+        """Drop a held message: every channel not final records failed with the reason; nothing is sent."""
+        return self._unhold(message_id, by, _text(reason, "reason"))
+
+    def _unhold(self, message_id, by, drop_reason):
+        if self.run_id is not None:
+            raise ValueError("Only an operator may release or drop held messages.")
+        by = _text(by, "by")
+        with self._tx():
+            message = self._find("messages", _text(message_id, "message_id"))
+            if message is None:
+                raise ValueError("No message %s." % message_id)
+            if not message.get("held"):
+                raise ValueError("Message %s is not held." % message["id"])
+            now = timestamp()
+            record = dict(message.pop("held"), released_at=now, released_by=by,
+                          outcome="dropped" if drop_reason else "released")
+            if drop_reason:
+                record["drop_reason"] = drop_reason
+                for state in (message.get("channel_states") or {}).values():
+                    if state.get("state") not in FINAL_STATES:
+                        state.update(state="failed", updated_at=now, reason="dropped after restore: " + drop_reason)
+                        for key in ("lease_until", "claimed_at", "retry_after"):
+                            state.pop(key, None)
+                message["dropped"] = True
+            message.setdefault("hold_history", []).append(record)
+            return self._save("messages", message, "message.dropped" if drop_reason else "message.released")
+
+    def capture_release_held(self, by):
+        """Satchel P2: release project captures held after a backup restore (capture_outbox held → pending)."""
+        if self.run_id is not None:
+            raise ValueError("Only an operator may release held captures.")
+        by = _text(by, "by")
+        with self._tx():
+            count = self.db.execute("UPDATE capture_outbox SET status='pending' WHERE status='held'").rowcount
+            self._audit("capture.released", self.identity()["id"], {"by": by, "count": count})
+        return {"released": count}
 
     EVENT_LOOKUP_HIDDEN = "No event with that source and external_id was accepted through channel %s."
     EVENT_LOOKUP_MAX = 256  # Vesper's #71 n1: --source/--external-id are bounded before they reach the audit row
