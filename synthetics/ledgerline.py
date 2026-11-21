@@ -10,6 +10,8 @@ environment and rewrite its own runs/ files; the anchor makes a rewrite visible,
 (docs/authority.md §0).
 """
 
+import contextlib
+import contextvars
 import hashlib
 import json
 import os
@@ -28,8 +30,32 @@ def sha256_text(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+_TEXT_GUARD = contextvars.ContextVar("ledgerline_text_guard", default=None)
+
+
+@contextlib.contextmanager
+def text_guard(guard):
+    """Satchel (F8): while active, guard(text) -> list of mask kinds is called for every free-text value exported as
+    {bytes, sha256}; a value with a hit is exported as {bytes, sha256: None, masked: [kinds]}, so an unsalted hash
+    of a secret never leaves the home."""
+    token = _TEXT_GUARD.set(guard)
+    try:
+        yield
+    finally:
+        _TEXT_GUARD.reset(token)
+
+
+def _guarded_sha256(text):
+    guard = _TEXT_GUARD.get()
+    return None if guard is not None and guard(text) else sha256_text(text)
+
+
 def text_facts(text):
     data = text.encode("utf-8")
+    guard = _TEXT_GUARD.get()
+    kinds = guard(text) if guard is not None else None
+    if kinds:
+        return {"bytes": len(data), "sha256": None, "masked": list(kinds)}
     return {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
 
 
@@ -211,7 +237,7 @@ def export_receipt(home_id, run_id, seq, record, raw):
     arguments = record.get("arguments")
     line = {"kind": "mcp.call", "home_id": home_id, "run_id": run_id, "seq": seq, "at": record.get("at"),
             "tool": record.get("tool"), "success": record.get("success"), "args": project_args(arguments),
-            "args_sha256": sha256_text(canonical(arguments)), "line_sha256": hashlib.sha256(raw).hexdigest()}
+            "args_sha256": _guarded_sha256(canonical(arguments)), "line_sha256": hashlib.sha256(raw).hexdigest()}
     if "prev_sha256" in record:
         line["prev_sha256"] = record["prev_sha256"]
     if record.get("error") is not None:
