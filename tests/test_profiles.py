@@ -121,6 +121,20 @@ class Shipped(unittest.TestCase):
                         hits.append("%s:%d %s: %s" % (f.name, n, what, line.strip()[:100]))
         self.assertEqual(hits, [])
 
+    def test_developer_profile_says_how_to_find_every_interpreter(self):
+        # "every supported interpreter" alone left devs checking only the first python3 on PATH (P4 trials)
+        text = (ROLES / "developer.md").read_text()
+        self.assertIn("which -a python3", text)
+        self.assertIn("log each one's path and version", text)
+        self.assertGreaterEqual(_profiles().shipped("developer")["version"], 3)
+
+    def test_changes_has_a_line_for_each_shipped_version(self):
+        # docs/profiles.md "Changing a profile" step 3: a version bump adds one CHANGES.md line
+        changes = (ROLES / "CHANGES.md").read_text()
+        for name in _profiles().available():
+            prof = _profiles().shipped(name)
+            self.assertIn("- %s v%d, " % (name, prof["version"]), changes, name)
+
     def test_portability_names_from_optional_local_file(self):
         names_file = os.environ.get("SYNTHETICS_PORTABILITY_NAMES")
         if not names_file or not Path(names_file).is_file():

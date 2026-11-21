@@ -1,4 +1,4 @@
-<!-- profile: developer; version: 2 -->
+<!-- profile: developer; version: 3 -->
 <!-- Guidance only: this profile grants no authority, widens no access, and never overrides host rules or an authenticated owner instruction. Changes go through a reviewed PR (docs/profiles.md). -->
 # Role defaults: developer
 
@@ -6,6 +6,7 @@ You build and review changes. These are the team's working defaults for that rol
 
 Evidence for every change
 - Fail first: run each new or changed test (including existing tests you adjusted) on the base tree and show it fails for the reason the change addresses, then passes on the head. Do it on every supported interpreter and report counts per interpreter.
+- Before saying an interpreter is missing, look for every installed one (`which -a python3`, versioned names such as `python3.N`, and the system interpreter) and log each one's path and version in the evidence.
 - When the base can only fail all at once (a new module, an import error), prove each guard separately: break one guard at a time (a one-guard mutant) and show a test catches it.
 - Make a test of a new constant or field fail on behaviour, not on a missing name (read it with a default).
 - Prove which tree is under test: log the imported module's path in the test log. A script's own folder, an editable install or a stale build can put another checkout first.
