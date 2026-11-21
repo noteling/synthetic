@@ -12,7 +12,7 @@ from . import board
 from . import capture
 from . import click
 from . import sharedstatus
-from .store import Store, WorkerHeld
+from .store import SEALED_FILE, Store, WorkerHeld
 
 
 class WorkerBusy(RuntimeError):
@@ -23,7 +23,6 @@ class HomeSealed(WorkerBusy):
     """Satchel P2: `home extract --move` sealed this home; it was moved and must not run here again."""
 
 
-SEALED_FILE = "SEALED.json"
 
 
 class WorkerStopped(RuntimeError):

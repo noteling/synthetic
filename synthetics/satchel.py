@@ -881,8 +881,10 @@ def extract_move(home, out, timeout=DEFAULT_TIMEOUT, temp_base=None, now=None):
     if _label_loaded(label):
         raise SatchelError("live", "the worker LaunchAgent %s is loaded; unload it (synthetics uninstall) before "
                                    "--move" % label)
-    if _lock_held(home / "telegram.lock"):
-        raise SatchelError("live", "a Telegram adapter of this home is running; stop it before --move")
+    for path in _telegram_locks(home):
+        if _lock_held(path):
+            raise SatchelError("live", "a Telegram adapter of this home is running (lock %s); stop it before --move"
+                               % path)
     try:
         lock = WorkerLock(home)
         lock.__enter__()
@@ -899,6 +901,30 @@ def extract_move(home, out, timeout=DEFAULT_TIMEOUT, temp_base=None, now=None):
         return result
     finally:
         lock.__exit__(None, None, None)
+
+
+def _telegram_locks(home):
+    """Lock files a Telegram adapter of this home would hold (Rowan #111 L3): <home>/telegram.lock and the
+    lock_file configured in <home>/telegram.json (v1: as written, relative to the home; v2: relative to the config,
+    as telegram_homes resolves it). A telegram.json that does not parse refuses (fail-closed). Limit: a v2 homes
+    config kept outside this home is not seen."""
+    paths = [home / "telegram.lock"]
+    config = home / "telegram.json"
+    if config.exists():
+        try:
+            data = json.loads(config.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise SatchelError("telegram_config", "cannot read %s to find its lock_file: %s" % (config, error))
+        lock = data.get("lock_file") if isinstance(data, dict) else None
+        if isinstance(lock, str) and lock:
+            path = Path(lock).expanduser()
+            paths.append(path if path.is_absolute() else home / path)
+    out = []
+    for path in paths:
+        path = path.resolve()
+        if path not in out:
+            out.append(path)
+    return out
 
 
 def _read_archive(archive):
@@ -945,7 +971,27 @@ def recreate(archive, home, from_move=False, source_lost=False, attest=None, map
     if _label_loaded(label):
         raise SatchelError("live_here", "the worker LaunchAgent %s for %s is loaded on this machine" % (label, employee))
     maps = [tuple(m) for m in maps]
-    home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # #111 r1 F1: build in a 0700 staging sibling on the same filesystem and rename it into place only when the
+    # store is restored, unfinished messages are held (same transaction) and REPROVISION.md is written. On any
+    # error the staging directory is removed, so NEW is never left half-built and a retry works.
+    home.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".%s.partial-" % home.name, dir=str(home.parent)))
+    try:
+        os.chmod(str(staging), 0o700)
+        changes, notes = _build_home(staging, data, manifest, employee, kind, attest, archive.name, report)
+        lines = _reprovision(manifest, maps, changes, notes, home)
+        (staging / REPROVISION).write_text(lines, encoding="utf-8")
+        if home.exists():
+            home.rmdir()  # empty (checked above); os.rename onto a directory needs it gone on some systems
+        os.rename(str(staging), str(home))
+    except BaseException:
+        shutil.rmtree(str(staging), ignore_errors=True)
+        raise
+    return dict(home=str(home), employee_id=employee, kind=kind, reprovision=str(home / REPROVISION), **changes)
+
+
+def _build_home(home, data, manifest, employee, kind, attest, archive_name, report):
+    from .store import Store
     (home / "state.sqlite3").write_bytes(data["state.sqlite3"])
     restored = home / RESTORED_DIR
     restored.mkdir(mode=0o700)
@@ -968,10 +1014,8 @@ def recreate(archive, home, from_move=False, source_lost=False, attest=None, map
     with Store(home) as store:
         if store.identity()["id"] != employee:
             raise SatchelError("identity_mismatch", "the archived database is not employee %s" % employee)
-        changes = _restore_store(store, kind, created, attest, archive.name, report)
-    lines = _reprovision(manifest, maps, changes, notes, home)
-    (home / REPROVISION).write_text(lines, encoding="utf-8")
-    return dict(home=str(home), employee_id=employee, kind=kind, reprovision=str(home / REPROVISION), **changes)
+        changes = _restore_store(store, kind, created, attest, archive_name, report)
+    return changes, notes
 
 
 def _runtime_json(blob):
@@ -1007,11 +1051,12 @@ def _restore_store(store, kind, created, attest, archive_name, report):
         if kind == "backup":
             cur = store.db.execute("UPDATE capture_outbox SET status='held' WHERE status='pending'")
             out["held_captures"] = cur.rowcount
+        if kind == "backup":
+            # #111 r1 (Rowan P1b): inside the same transaction, so a failed hold commits nothing.
+            out["held_messages"] = store.outbox_hold_unfinished("restored from backup %s" % created, in_tx=True)
         store._audit("satchel.restored", store.identity()["id"], {"kind": kind, "archive": archive_name, "created_at": created,
                                                 "attest": attest, "runs": report.get("runs"),
                                                 "journals": report.get("journals")})
-    if kind == "backup":
-        out["held_messages"] = store.outbox_hold_unfinished("restored from backup %s" % created)
     return out
 
 

@@ -117,10 +117,19 @@ no key hashes (extract's own verify does, step 5).
 
 A deliberate migration. `--move` refuses while anything of the home runs: the worker LaunchAgent label
 `com.synthetics.worker.<sha256(id)[:16]>` is loaded, the worker lock is held, or a Telegram adapter holds
-`telegram.lock`. Satchel never stops or unloads anything itself; the operator does (`synthetics uninstall`, stop the
+`telegram.lock` or the `lock_file` named in the home's `telegram.json` (relative paths taken from the home; a
+`telegram.json` that does not parse refuses with `telegram_config`). Satchel never stops or unloads anything itself; the operator does (`synthetics uninstall`, stop the
 adapter). It then holds the worker lock for the whole extract and, only once the archive is in `--out`, writes
-`SEALED.json` (archive name and sha256) into the home. A sealed home refuses to start a worker (`WorkerLock`); a failed
-extract leaves no seal. The archive's manifest says `kind: move`.
+`SEALED.json` (archive name and sha256) into the home. A failed extract leaves no seal. The archive's manifest says
+`kind: move`.
+
+A sealed home takes nothing new, so nothing is silently lost in a home nobody runs:
+- a worker refuses to start (`WorkerLock`); `serve` exits 0 so a LaunchAgent's KeepAlive does not relaunch it in a loop;
+- `Store.feed` (every inbound event) and the channel contract (`pending`, `claim`, `ack`, `reconcile`, `uncertain`,
+  and any keyed `synthetics channel` command, which fails as a whole with exit 2) refuse with code `sealed`, so the
+  sender's adapter sees a failure and keeps or reports the message instead of recording it delivered.
+
+Limit: a v2 Telegram homes config kept outside this home is not checked; stop that adapter by hand.
 
 ## Recreate
 
@@ -130,15 +139,20 @@ machine, when a move archive lacks `--from-move` (or a backup archive has it), a
 `--source-lost --attest "<why>"`. A backup means the source may still be running somewhere, so it is restored only for
 a lost source; the attestation goes into the new home's audit log (`satchel.restored`).
 
-It writes the database (migrated by the normal store migration), the config files, meeting journals and
-`restored/{manifest.json,runs.jsonl}` (the Ledgerline export, kept for reference), then:
+It builds the new home in a private 0700 staging directory next to `--into` (`.<name>.partial-*`, same filesystem),
+writes the database (migrated by the normal store migration), the config files, meeting journals and
+`restored/{manifest.json,runs.jsonl}` (the Ledgerline export, kept for reference), checks the database's identity, then
+does the following in **one** database transaction and writes `REPROVISION.md`; only then is the staging directory
+renamed to `--into`. On any error (identity mismatch, a failed hold, …) the staging directory is removed: `--into` is
+never left half-built and a retry works.
 
 - runs recorded `running` at the snapshot become `interrupted` ("restored: interrupted at extract");
 - every live access grant is revoked (`revoked_by: satchel-restore`); nothing is re-granted;
 - no channel exists (keys were never archived), so old adapters cannot authenticate to the new home;
 - a `runtime.json` `claude` path that is not executable here is removed (the default applies);
-- for a **backup**, every outbox message not delivered or failed is **held**: it may already have been delivered by
-  the lost home. Adapters don't see held messages and can't claim them. The operator lists them with `home held` and
+- for a **backup**, every outbox message that some channel has not finished (`pending`, `claimed` or `uncertain` on
+  any channel, so delivered on one channel but pending on another counts) or that no channel has handled yet is
+  **held**: it may already have been delivered by the lost home. Adapters don't see held messages and can't claim them. The operator lists them with `home held` and
   either `home release ID` (adapters may deliver it) or `home drop ID --reason` (never sent; recorded failed, also on
   channels provisioned later). Pending project captures are held too, released with `home release-captures`.
 - `REPROVISION.md` in the new home lists the operator's steps: the grant commands (paths rewritten by `--map`),

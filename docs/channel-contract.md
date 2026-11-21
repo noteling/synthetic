@@ -106,7 +106,7 @@ an employee session.
 - Every other command needs `--key-file`. The key selects the channel record.
 - Exit status: `0` when every line was processed, including per-line
   rejections; `2` for a whole-command failure (`auth_failed`, `in_session`,
-  usage). A whole-command failure prints one line
+  `sealed`, usage). A whole-command failure prints one line
   `{"v":1,"result":"rejected","error":{"code":…,"message":…}}`.
 - Commands are refused inside an employee session (`SYNTHETICS_SESSION_RUN`
   set). They are adapter and operator operations, never model tools.
@@ -126,6 +126,7 @@ an employee session.
 | `conflict` | the same idempotency key with different content, or a competing claim/outcome |
 | `invalid_state` | the operation is not allowed in the current delivery state |
 | `in_session` | refused inside an employee session |
+| `sealed` | the home was sealed by `synthetics home extract --move` (docs/satchel.md §Move); it takes no inputs or deliveries |
 
 ## 3. Inbound
 

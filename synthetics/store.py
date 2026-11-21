@@ -96,7 +96,7 @@ class ChannelError(ValueError):
     """M25 contract error with a closed-set code (docs/channel-contract.md)."""
 
     CODES = ("bad_version", "bad_line", "auth_failed", "source_not_allowed", "not_routed", "unknown_message",
-             "conflict", "invalid_state", "in_session")
+             "conflict", "invalid_state", "in_session", "sealed")
 
     def __init__(self, code, message):
         assert code in self.CODES, code
@@ -105,6 +105,7 @@ class ChannelError(ValueError):
 
 
 CLAIM_LEASE_SECONDS = 600
+SEALED_FILE = "SEALED.json"  # Satchel P2: written by `home extract --move`; engine.WorkerLock refuses it too
 RETRY_AFTER_SECONDS = 60
 FINAL_STATES = ("delivered", "failed")
 
@@ -1708,6 +1709,7 @@ class Store:
              route=None, provider=None):
         """route: the routed_by label of a relayed answer (channel C1). The question_routed stamp is then
         made inside this feed's transaction, so a rejected feed leaves no stamp (issue #9)."""
+        self._refuse_sealed()
         sender, body, source = _text(sender, "sender"), _text(body, "body"), _text(source, "source")
         if route is not None:
             route = _text(route, "route")
@@ -2022,9 +2024,17 @@ class Store:
             view["state"] = state
         return view
 
+    def _refuse_sealed(self):
+        """Satchel P2 (Rowan #111 L2): a home sealed by `home extract --move` takes no new inputs or deliveries,
+        so a sender sees a failure instead of writing into a home nobody runs."""
+        if (self.home / SEALED_FILE).exists():
+            raise ChannelError("sealed", "This home was sealed by `synthetics home extract --move` (%s); it was "
+                                         "moved and accepts no inputs or deliveries here." % (self.home / SEALED_FILE))
+
     def _begin(self, credential, instance):
         if self.run_id is not None:
             raise ChannelError("in_session", "Channel commands are adapter/operator operations, not model tools.")
+        self._refuse_sealed()
         now = timestamp()
         channel = self._adopt_instance(self._channel_by_key(credential), instance, now)
         self._expire_claims(channel, now)
@@ -2159,23 +2169,41 @@ class Store:
 
     # ---- Satchel P2 (docs/satchel.md §Recreate): messages held after a backup restore ----
 
-    HELD_STATES = ("pending", "uncertain")
+    HELD_STATES = ("pending", "claimed", "uncertain")  # per channel_state, not delivery_summary (#111 r1 (b))
 
-    def outbox_hold_unfinished(self, reason):
-        """Hold every message whose delivery is not final (pending, claimed or uncertain on any channel): after a
-        backup restore it may already have been delivered by the lost home. Operator-only. Returns the held IDs."""
+    @classmethod
+    def _unfinished(cls, message):
+        """True when any channel of the message is not final (pending, claimed or uncertain), or the message has
+        no channel outcome at all yet. A message delivered on A but pending on B counts (#111 r1 (b))."""
+        if message.get("dropped"):
+            return False
+        states = [s.get("state") for s in (message.get("channel_states") or {}).values()]
+        if states:
+            return any(state in cls.HELD_STATES for state in states)
+        return cls.delivery_summary(message) == "pending"  # no channel has seen it (legacy final acks are final)
+
+    def outbox_hold_unfinished(self, reason, in_tx=False):
+        """Hold every message whose delivery is not final on some channel (pending, claimed or uncertain), or that
+        no channel has handled yet: after a backup restore it may already have been delivered by the lost home.
+        Operator-only. Returns the held IDs. in_tx: the caller already holds a transaction (Satchel recreate runs
+        the hold inside _restore_store's, so a failed hold commits nothing)."""
         if self.run_id is not None:
             raise ValueError("Only an operator may hold outbox messages.")
         reason = _text(reason, "reason")
-        held = []
+        if in_tx:
+            return self._hold_unfinished(reason)
         with self._tx():
-            now = timestamp()
-            for message in self._all("messages"):
-                if message.get("held") or self.delivery_summary(message) not in self.HELD_STATES:
-                    continue
-                message["held"] = dict(reason=reason, at=now)
-                self._save("messages", message, "message.held")
-                held.append(message["id"])
+            return self._hold_unfinished(reason)
+
+    def _hold_unfinished(self, reason):
+        held = []
+        now = timestamp()
+        for message in self._all("messages"):
+            if message.get("held") or not self._unfinished(message):
+                continue
+            message["held"] = dict(reason=reason, at=now)
+            self._save("messages", message, "message.held")
+            held.append(message["id"])
         return held
 
     def outbox_held(self):

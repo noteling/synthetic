@@ -189,6 +189,7 @@ def run(args, home, stdin=None, stdout=None):
         with Store(home) as store:
             try:
                 channel = store._channel_by_key(credential)
+                store._refuse_sealed()  # Satchel P2 (#111 L2): a moved home refuses every keyed command
             except ChannelError as exc:
                 raise UsageFailure(exc.code, str(exc))
             instance = getattr(args, "instance", None)

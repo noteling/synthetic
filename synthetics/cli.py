@@ -10,7 +10,7 @@ import sys
 from pathlib import Path
 
 from . import __version__, capture
-from .engine import Engine, WorkerStopped, failure_streak, status, utc_day, worker_status, write_limit_override
+from .engine import Engine, HomeSealed, WorkerStopped, failure_streak, status, utc_day, worker_status, write_limit_override
 from .runtime import EXIT_RESTART, SelfRestart
 from . import channel as channel_contract
 from .store import DEFAULT_CHANNEL_DIR, SESSION_ENV, WORK_ID, Store, read_credential_file
@@ -1152,6 +1152,9 @@ def main(argv=None):
                 )
             except WorkerStopped as error:
                 # Deliberate stop: exit 0 so launchd KeepAlive{SuccessfulExit:false} leaves it stopped.
+                print("synthetics: %s" % error, file=sys.stderr)
+            except HomeSealed as error:
+                # Satchel P2 (Rowan #111 L1): a sealed (moved) home stays stopped; exit 0 so KeepAlive doesn't loop.
                 print("synthetics: %s" % error, file=sys.stderr)
             except SelfRestart as error:
                 print("synthetics: restarting for runtime request %s (exit %d)" % (error, EXIT_RESTART), file=sys.stderr)
