@@ -207,6 +207,30 @@ class Masker:
             return self._add(location, "assign", 0, len(value)), True
         return None
 
+    def secret_tree(self, value, location, path):
+        """r3 (Rowan's finding A): everything under a secret-named key. Every non-empty string and number leaf is
+        masked whole, however deep in lists and dicts; dict keys there are still scanned as text; booleans, null,
+        empty strings and markers are left to the normal walk. Returns (value, changed)."""
+        if isinstance(value, list):
+            changed, out = False, []
+            for index, item in enumerate(value):
+                item, hit = self.secret_tree(item, location, "%s[%d]" % (path, index))
+                out.append(item)
+                changed = changed or hit
+            return out, changed
+        if isinstance(value, dict):
+            changed, out = False, {}
+            for key, item in value.items():
+                new_key, key_hit = self.text(key, dict(location, json_path="%s.<key %s>" % (path, len(out))))
+                item, hit = self.secret_tree(item, location, "%s.%s" % (path, new_key))
+                out[new_key] = item
+                changed = changed or key_hit or hit
+            return out, changed
+        masked = self.secret_value(value, dict(location, json_path=path))
+        if masked is not None:
+            return masked
+        return self.value(value, location, path)
+
     def value(self, value, location, path="$"):
         """Walk a parsed JSON value: every string and every dict key. Returns (value, changed)."""
         if isinstance(value, str):
@@ -222,10 +246,8 @@ class Masker:
             changed, out = False, {}
             for key, item in value.items():
                 new_key, key_hit = self.text(key, dict(location, json_path="%s.<key %s>" % (path, len(out))))
-                masked = self.secret_value(item, dict(location, json_path="%s.%s" % (path, new_key))) \
-                    if secret_key(key) else None
-                if masked is not None:
-                    item, hit = masked
+                if secret_key(key):
+                    item, hit = self.secret_tree(item, location, "%s.%s" % (path, new_key))
                 else:
                     item, hit = self.value(item, location, "%s.%s" % (path, new_key))
                 out[new_key] = item

@@ -65,8 +65,9 @@ Detectors (kind names appear in markers and in `masks[]`):
 - JSON key names: in a config file, a journal line, a JSON row or a run line, an object member whose key names a
   secret (`password`, `passwd`, `passphrase`, `secret`, `secret_key`, `client_secret`, `secret_access_key`, `token`,
   `api_key`/`apikey`, `private_key`, `authorization`, also as the last word: `DB_PASSWORD`, `apiKey`, `X-Api-Key`,
-  `access_token`) has its whole string or number value masked as `assign`, whatever its shape. `token_budget`,
-  `input_tokens` or `token_file` are not secret names. `pwd` is not a key name here (shell environments use `PWD`
+  `access_token`) has its whole string or number value masked as `assign`; when the value is a list or an object,
+  every non-empty string and number inside it, at any depth, is masked the same way (booleans and `null` are kept).
+  `token_budget`, `input_tokens` or `token_file` are not secret names. `pwd` is not a key name here (shell environments use `PWD`
   for the working directory), though `pwd=` in text is still masked.
 - exact channel keys: every token of 16+ characters, and every 64-hex window of a hex run (a key glued to `_`, `-` or
   other hex), is hashed and compared with the key hashes the home stored for its channels (current rows and every
