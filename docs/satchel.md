@@ -1,8 +1,7 @@
-# Satchel: extract and verify an employee home
+# Satchel: extract, verify and recreate an employee home
 
 An employee's memory, work and history live only in its home on this machine. Satchel writes the home into one
-archive that can be kept elsewhere and checked later. P1 covers `extract` and `verify`; `recreate` (restore into a
-fresh home) comes in P2.
+archive that can be kept elsewhere, checked later, and recreated into a fresh home (on this or another machine).
 
 Owner rulings: archives are **not encrypted**; secrets and passwords are **masked**, fail-closed (David,
 event-2f2c8899). Migration is rare: there is no schedule, retention or built-in destination (event-40c88c60).
@@ -10,8 +9,10 @@ event-2f2c8899). Migration is rare: there is no schedule, retention or built-in 
 ## Commands (operator only; refused inside an employee session)
 
 ```
-synthetics --home H home extract --out DIR [--timeout SECONDS]
+synthetics --home H home extract --out DIR [--timeout SECONDS] [--move]
 synthetics home verify ARCHIVE
+synthetics home recreate ARCHIVE --into NEW (--from-move | --source-lost --attest "<why>") [--map OLD=NEW ...]
+synthetics --home H home held | release ID [--by HUMAN] | drop ID --reason TEXT [--by HUMAN] | release-captures
 ```
 
 `extract` writes `DIR/satchel-<employee-id>-<UTC stamp>.tar` (mode 0600) and prints the archive path, its sha256 and
@@ -111,3 +112,54 @@ What a pass guarantees: the members are the extracted ones, the database is cons
 every mask is accounted for and no pattern is left. It does not mean the content equals the source home (masked
 values differ by design), and a reader's verify does not repeat the exact channel-key check because the archive keeps
 no key hashes (extract's own verify does, step 5).
+
+## Move (`extract --move`)
+
+A deliberate migration. `--move` refuses while anything of the home runs: the worker LaunchAgent label
+`com.synthetics.worker.<sha256(id)[:16]>` is loaded, the worker lock is held, or a Telegram adapter holds
+`telegram.lock` or the `lock_file` named in the home's `telegram.json` (relative paths taken from the home; a
+`telegram.json` that does not parse refuses with `telegram_config`). Satchel never stops or unloads anything itself; the operator does (`synthetics uninstall`, stop the
+adapter). It then holds the worker lock for the whole extract and, only once the archive is in `--out`, writes
+`SEALED.json` (archive name and sha256) into the home. A failed extract leaves no seal. The archive's manifest says
+`kind: move`.
+
+A sealed home takes nothing new, so nothing is silently lost in a home nobody runs:
+- a worker refuses to start (`WorkerLock`); `serve` exits 0 so a LaunchAgent's KeepAlive does not relaunch it in a loop;
+- `Store.feed` (every inbound event) and the channel contract (`pending`, `claim`, `ack`, `reconcile`, `uncertain`,
+  and any keyed `synthetics channel` command, which fails as a whole with exit 2) refuse with code `sealed`, so the
+  sender's adapter sees a failure and keeps or reports the message instead of recording it delivered.
+
+Limit: a v2 Telegram homes config kept outside this home is not checked; stop that adapter by hand.
+
+## Recreate
+
+`recreate` verifies the archive first and refuses when it doesn't verify, when the archive's store version is newer
+than this code, when `--into` exists and is not empty, when this employee's worker LaunchAgent is loaded on this
+machine, when a move archive lacks `--from-move` (or a backup archive has it), and when a backup archive lacks
+`--source-lost --attest "<why>"`. A backup means the source may still be running somewhere, so it is restored only for
+a lost source; the attestation goes into the new home's audit log (`satchel.restored`).
+
+It builds the new home in a private 0700 staging directory next to `--into` (`.<name>.partial-*`, same filesystem),
+writes the database (migrated by the normal store migration), the config files, meeting journals and
+`restored/{manifest.json,runs.jsonl}` (the Ledgerline export, kept for reference), checks the database's identity, then
+does the following in **one** database transaction and writes `REPROVISION.md`; only then is the staging directory
+renamed to `--into`. On any error (identity mismatch, a failed hold, …) the staging directory is removed: `--into` is
+never left half-built and a retry works.
+
+- runs recorded `running` at the snapshot become `interrupted` ("restored: interrupted at extract");
+- every live access grant is revoked (`revoked_by: satchel-restore`); nothing is re-granted;
+- no channel exists (keys were never archived), so old adapters cannot authenticate to the new home;
+- a `runtime.json` `claude` path that is not executable here is removed (the default applies);
+- for a **backup**, every outbox message that some channel has not finished (`pending`, `claimed` or `uncertain` on
+  any channel, so delivered on one channel but pending on another counts) or that no channel has handled yet is
+  **held**: it may already have been delivered by the lost home. Adapters don't see held messages and can't claim them. The operator lists them with `home held` and
+  either `home release ID` (adapters may deliver it) or `home drop ID --reason` (never sent; recorded failed, also on
+  channels provisioned later). Pending project captures are held too, released with `home release-captures`.
+- `REPROVISION.md` in the new home lists the operator's steps: the grant commands (paths rewritten by `--map`),
+  the channels to provision with their prefixes and routes, Telegram and LaunchAgent install, held items, and the
+  mask counts per kind. Satchel runs none of them and never installs or starts a worker.
+
+Limits: "live elsewhere" cannot be proven absent from another machine. A move seals the source; a backup restore needs
+a written attestation; channels are never carried; REPROVISION.md tells the operator to revoke the Telegram bot token
+if the old machine might come back. Answers that reached a lost home after the snapshot are lost. Masked values stay
+markers. A move seal is a file: deleting `SEALED.json` by hand un-seals the home.

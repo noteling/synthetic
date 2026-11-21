@@ -530,7 +530,7 @@ def _git_commit():
         return None
 
 
-def extract(home, out, timeout=DEFAULT_TIMEOUT, temp_base=None, now=None):
+def extract(home, out, timeout=DEFAULT_TIMEOUT, temp_base=None, now=None, kind="backup"):
     """Write satchel-<id>-<stamp>.tar into `out`. Returns a summary (path, sha256, mask counts per kind)."""
     home = Path(home).expanduser().resolve()
     out = Path(out).expanduser().resolve()
@@ -590,7 +590,7 @@ def extract(home, out, timeout=DEFAULT_TIMEOUT, temp_base=None, now=None):
         for mask in masker.masks:
             kinds[mask["kind"]] = kinds.get(mask["kind"], 0) + 1
         manifest = {
-            "format": FORMAT, "kind": "backup", "employee_id": employee, "employee_name": identity.get("name"),
+            "format": FORMAT, "kind": kind, "employee_id": employee, "employee_name": identity.get("name"),
             "user_version": version, "created_at": created,
             "source_host": hashlib.sha256(socket.gethostname().encode("utf-8")).hexdigest()[:16],
             "code_commit": _git_commit(), "row_counts": counts,
@@ -820,3 +820,280 @@ def _db_text(db):
         return "\n".join(parts)
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------------------------------------
+# P2: --move seal and recreate (docs/satchel.md §Recreate; P0 r1 §4)
+
+LAUNCHCTL = "/bin/launchctl"
+RESTORED_DIR = "restored"
+REPROVISION = "REPROVISION.md"
+
+
+def launchd_label(employee_id):
+    return "com.synthetics.worker." + hashlib.sha256(employee_id.encode("utf-8")).hexdigest()[:16]
+
+
+def _label_loaded(label):
+    """True when the worker LaunchAgent for this employee id is loaded on this machine."""
+    import subprocess
+    try:
+        done = subprocess.run([LAUNCHCTL, "print", "gui/%d/%s" % (os.getuid(), label)],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=20)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise SatchelError("launchctl", "cannot check launchd label %s: %s" % (label, error))
+    return done.returncode == 0
+
+
+def _lock_held(path):
+    import fcntl
+    try:
+        handle = open(str(path), "r")
+    except FileNotFoundError:
+        return False
+    with handle:
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return False
+
+
+def extract_move(home, out, timeout=DEFAULT_TIMEOUT, temp_base=None, now=None):
+    """Deliberate migration: refuse while anything of this home runs, hold the worker lock for the whole extract,
+    and seal the home (SEALED.json) only after the archive is in --out. A failed extract leaves no seal."""
+    from .engine import SEALED_FILE, WorkerBusy, WorkerLock
+    home = Path(home).expanduser().resolve()
+    if not (home / "state.sqlite3").is_file():
+        raise SatchelError("no_home", "%s has no state.sqlite3" % home)
+    if (home / SEALED_FILE).exists():
+        raise SatchelError("sealed", "%s is already sealed" % home)
+    conn = sqlro.connect_ro(home / "state.sqlite3")
+    try:
+        row = conn.execute("SELECT data FROM identity LIMIT 1").fetchone()
+    finally:
+        conn.close()
+    employee = json.loads(row[0]).get("id") if row else None
+    if not employee:
+        raise SatchelError("no_identity", "the home has no identity row")
+    label = launchd_label(employee)
+    if _label_loaded(label):
+        raise SatchelError("live", "the worker LaunchAgent %s is loaded; unload it (synthetics uninstall) before "
+                                   "--move" % label)
+    for path in _telegram_locks(home):
+        if _lock_held(path):
+            raise SatchelError("live", "a Telegram adapter of this home is running (lock %s); stop it before --move"
+                               % path)
+    try:
+        lock = WorkerLock(home)
+        lock.__enter__()
+    except WorkerBusy as error:
+        raise SatchelError("live", "%s Stop it before --move." % error)
+    try:
+        result = extract(home, out, timeout=timeout, temp_base=temp_base, now=now, kind="move")
+        seal = {"sealed_at": _now(), "archive": Path(result["archive"]).name, "archive_sha256": result["sha256"],
+                "employee_id": employee}
+        partial = home / (".%s.partial" % SEALED_FILE)
+        partial.write_text(json.dumps(seal, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(str(partial), str(home / SEALED_FILE))
+        result["sealed"] = str(home / SEALED_FILE)
+        return result
+    finally:
+        lock.__exit__(None, None, None)
+
+
+def _telegram_locks(home):
+    """Lock files a Telegram adapter of this home would hold (Rowan #111 L3): <home>/telegram.lock and the
+    lock_file configured in <home>/telegram.json (v1: as written, relative to the home; v2: relative to the config,
+    as telegram_homes resolves it). A telegram.json that does not parse refuses (fail-closed). Limit: a v2 homes
+    config kept outside this home is not seen."""
+    paths = [home / "telegram.lock"]
+    config = home / "telegram.json"
+    if config.exists():
+        try:
+            data = json.loads(config.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            raise SatchelError("telegram_config", "cannot read %s to find its lock_file: %s" % (config, error))
+        lock = data.get("lock_file") if isinstance(data, dict) else None
+        if isinstance(lock, str) and lock:
+            path = Path(lock).expanduser()
+            paths.append(path if path.is_absolute() else home / path)
+    out = []
+    for path in paths:
+        path = path.resolve()
+        if path not in out:
+            out.append(path)
+    return out
+
+
+def _read_archive(archive):
+    with tarfile.open(str(archive), "r:") as tar:
+        return {info.name: tar.extractfile(info).read() for info in tar.getmembers()
+                if info.isfile() and _safe_member(info.name)}
+
+
+def _map_path(path, maps):
+    for old, new in maps:
+        if path == old or path.startswith(old.rstrip("/") + "/"):
+            return new.rstrip("/") + path[len(old.rstrip("/")):]
+    return path
+
+
+def recreate(archive, home, from_move=False, source_lost=False, attest=None, maps=(), temp_base=None):
+    """Recreate a home from a verified archive into an empty NEW home. Returns a summary. Never starts a worker,
+    installs a LaunchAgent or re-grants anything: REPROVISION.md lists the operator's steps."""
+    from .store import Store
+    archive = Path(archive).expanduser().resolve()
+    home = Path(home).expanduser().resolve()
+    report = verify(archive, temp_base=temp_base)
+    if not report["ok"]:
+        raise SatchelError("verify_failed", "the archive does not verify: %s" % "; ".join(report["problems"][:5]))
+    data = _read_archive(archive)
+    manifest = json.loads(data["manifest.json"].decode("utf-8"))
+    kind = manifest.get("kind")
+    if kind == "move" and not from_move:
+        raise SatchelError("flag_mismatch", "this is a move archive; pass --from-move")
+    if kind == "backup" and from_move:
+        raise SatchelError("flag_mismatch", "this is a backup archive, not a move; use --source-lost --attest")
+    if kind == "backup" and not (source_lost and attest and attest.strip()):
+        raise SatchelError("attest_required", "a backup archive is restored only when the source is lost: pass "
+                                              "--source-lost --attest \"<why>\"")
+    if kind not in ("backup", "move"):
+        raise SatchelError("unknown_kind", "unknown archive kind %r" % kind)
+    if (manifest.get("user_version") or 0) > Store.SCHEMA_VERSION:
+        raise SatchelError("newer_schema", "archive store version %s is newer than this code (%s)"
+                           % (manifest.get("user_version"), Store.SCHEMA_VERSION))
+    if home.exists() and (not home.is_dir() or any(home.iterdir())):
+        raise SatchelError("not_empty", "%s exists and is not empty" % home)
+    employee = manifest["employee_id"]
+    label = launchd_label(employee)
+    if _label_loaded(label):
+        raise SatchelError("live_here", "the worker LaunchAgent %s for %s is loaded on this machine" % (label, employee))
+    maps = [tuple(m) for m in maps]
+    # #111 r1 F1: build in a 0700 staging sibling on the same filesystem and rename it into place only when the
+    # store is restored, unfinished messages are held (same transaction) and REPROVISION.md is written. On any
+    # error the staging directory is removed, so NEW is never left half-built and a retry works.
+    home.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(prefix=".%s.partial-" % home.name, dir=str(home.parent)))
+    try:
+        os.chmod(str(staging), 0o700)
+        changes, notes = _build_home(staging, data, manifest, employee, kind, attest, archive.name, report)
+        lines = _reprovision(manifest, maps, changes, notes, home)
+        (staging / REPROVISION).write_text(lines, encoding="utf-8")
+        if home.exists():
+            home.rmdir()  # empty (checked above); os.rename onto a directory needs it gone on some systems
+        os.rename(str(staging), str(home))
+    except BaseException:
+        shutil.rmtree(str(staging), ignore_errors=True)
+        raise
+    return dict(home=str(home), employee_id=employee, kind=kind, reprovision=str(home / REPROVISION), **changes)
+
+
+def _build_home(home, data, manifest, employee, kind, attest, archive_name, report):
+    from .store import Store
+    (home / "state.sqlite3").write_bytes(data["state.sqlite3"])
+    restored = home / RESTORED_DIR
+    restored.mkdir(mode=0o700)
+    (restored / "manifest.json").write_bytes(data["manifest.json"])
+    (restored / "runs.jsonl").write_bytes(data.get("runs.jsonl", b""))
+    notes = []
+    for name, blob in data.items():
+        if name.startswith("config/"):
+            target = home / name[len("config/"):]
+            if target.name == "runtime.json":
+                blob, note = _runtime_json(blob)
+                if note:
+                    notes.append(note)
+            target.write_bytes(blob)
+        elif name.startswith("meetings/"):
+            target = home / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(blob)
+    created = manifest.get("created_at")
+    with Store(home) as store:
+        if store.identity()["id"] != employee:
+            raise SatchelError("identity_mismatch", "the archived database is not employee %s" % employee)
+        changes = _restore_store(store, kind, created, attest, archive_name, report)
+    return changes, notes
+
+
+def _runtime_json(blob):
+    try:
+        settings = json.loads(blob.decode("utf-8"))
+    except ValueError:
+        return blob, None
+    claude = settings.get("claude") if isinstance(settings, dict) else None
+    if isinstance(claude, str) and not os.access(claude, os.X_OK):
+        settings.pop("claude")
+        return ((json.dumps(settings, indent=2, sort_keys=True) + "\n").encode("utf-8"),
+                "runtime.json: `claude` path %s is not executable here; removed (the default applies)" % claude)
+    return blob, None
+
+
+def _restore_store(store, kind, created, attest, archive_name, report):
+    from .store import timestamp
+    now = timestamp()
+    out = {"interrupted_runs": [], "revoked_grants": [], "held_messages": [], "held_captures": 0}
+    with store._tx():
+        for run in store._all("runs"):
+            if run.get("status") == "running":
+                run.update(status="interrupted", finished_at=now,
+                           error="restored: interrupted at extract (%s); inspect existing effects before retrying."
+                                 % created)
+                store._save("runs", run, "run.interrupted")
+                out["interrupted_runs"].append(run["id"])
+        for grant in store._all("access_grants"):
+            if grant.get("revoked_at") is None:
+                grant.update(revoked_at=now, revoked_by="satchel-restore", updated_at=now)
+                store._save("access_grants", grant, "access.revoked")
+                out["revoked_grants"].append(grant["id"])
+        if kind == "backup":
+            cur = store.db.execute("UPDATE capture_outbox SET status='held' WHERE status='pending'")
+            out["held_captures"] = cur.rowcount
+        if kind == "backup":
+            # #111 r1 (Rowan P1b): inside the same transaction, so a failed hold commits nothing.
+            out["held_messages"] = store.outbox_hold_unfinished("restored from backup %s" % created, in_tx=True)
+        store._audit("satchel.restored", store.identity()["id"], {"kind": kind, "archive": archive_name, "created_at": created,
+                                                "attest": attest, "runs": report.get("runs"),
+                                                "journals": report.get("journals")})
+    return out
+
+
+def _reprovision(manifest, maps, changes, notes, home):
+    rp = manifest.get("reprovision") or {}
+    employee = manifest["employee_id"]
+    lines = ["# Re-provision %s (%s)" % (manifest.get("employee_name") or employee, employee), "",
+             "Recreated by Satchel from a %s archive created %s. Nothing below has been done; each step is the "
+             "operator's." % (manifest.get("kind"), manifest.get("created_at")), "",
+             "## Access grants (all restored revoked)", ""]
+    for grant in rp.get("grants") or []:
+        if grant.get("revoked_at"):
+            continue
+        lines.append("- `synthetics --home %s access grant %s --mode %s --purpose %s`"
+                     % (home, _map_path(grant.get("path") or "", maps), grant.get("mode"),
+                        json.dumps(grant.get("purpose") or "")))
+    lines += ["", "## Channels (none were carried; old keys cannot authenticate here)", ""]
+    for channel in rp.get("channels") or []:
+        lines.append("- provision `%s`: prefixes %s, routes %s" % (channel.get("name"), channel.get("source_prefixes"),
+                                                                   channel.get("routes")))
+    lines += ["", "## Adapters and worker", "",
+              "- Telegram: re-run `synthetics telegram install` for this home if it had one. If the old machine "
+              "might come back, revoke the bot token (BotFather /revoke) so a second poller cannot run.",
+              "- Worker LaunchAgent: `synthetics install` (label %s)." % launchd_label(employee), ""]
+    if changes["held_messages"] or changes["held_captures"]:
+        lines += ["## Held after a backup restore", "",
+                  "- %d outbox messages are held: they may already have been delivered by the lost home. Review "
+                  "with `synthetics --home %s home held`, then `home release ID` or `home drop ID --reason`."
+                  % (len(changes["held_messages"]), home),
+                  "- %d project captures are held (capture_outbox status held); release them once the project "
+                  "stores are confirmed (`home release-captures`)." % changes["held_captures"],
+                  "- Answers that reached the lost home after the snapshot are lost; ask colleagues to resend.", ""]
+    counts = manifest.get("mask_counts") or {}
+    if counts:
+        lines += ["## Masked values", "", "The archive replaced secrets with «masked:…» markers; nothing un-masks "
+                  "them. Re-provision real credentials. Counts per kind: %s." % ", ".join(
+                      "%s %d" % (k, counts[k]) for k in sorted(counts)), ""]
+    if notes:
+        lines += ["## Notes", ""] + ["- " + n for n in notes] + [""]
+    return "\n".join(lines)

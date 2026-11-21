@@ -12,11 +12,17 @@ from . import board
 from . import capture
 from . import click
 from . import sharedstatus
-from .store import Store, WorkerHeld
+from .store import SEALED_FILE, Store, WorkerHeld
 
 
 class WorkerBusy(RuntimeError):
     pass
+
+
+class HomeSealed(WorkerBusy):
+    """Satchel P2: `home extract --move` sealed this home; it was moved and must not run here again."""
+
+
 
 
 class WorkerStopped(RuntimeError):
@@ -123,6 +129,9 @@ class WorkerLock:
 
     def __enter__(self):
         self.home.mkdir(parents=True, exist_ok=True)
+        if (self.home / SEALED_FILE).exists():
+            raise HomeSealed("This home was sealed by `synthetics home extract --move` (%s); recreate it from the "
+                             "archive instead of starting it here." % (self.home / SEALED_FILE))
         self.handle = (self.home / "worker.lock").open("a+")
         try:
             fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
