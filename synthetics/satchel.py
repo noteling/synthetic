@@ -43,8 +43,10 @@ OTHER_TABLES = ("events", "idempotency", "audit", "roster_log", "project_binding
                 "coverage_marks", "capture_meta", "sqlite_sequence")
 KNOWN_TABLES = frozenset(DATA_TABLES + OTHER_TABLES)
 
+# #114: name-choice.json is the employee's own record of how it chose its name (name, reason, cost); it is archived
+# masked like the other config files so a recreated employee keeps it.
 CONFIG_JSON = ("profile.json", "attribution.json", "humans.json", "floor.json", "click.json", "glance.json",
-               "runtime.json")
+               "runtime.json", "name-choice.json")
 CONFIG_TEXT = ("prompt.local.md",)
 EXCLUDED_FILES = {
     "state.sqlite3": "archived as a masked snapshot",
@@ -55,6 +57,7 @@ EXCLUDED_FILES = {
     "worker.lock": "per-process lock", "telegram.lock": "per-process lock", "usage_limit.json": "per-process state",
     "telegram.json": "adapter config naming a token file; re-installed by the operator",
     "telegram_state.json": "adapter state; re-installed by the operator",
+    "telegram_state.json.guard": "adapter state guard marker; re-installed by the operator",
     "SEALED.json": "seal of a moved home", ".DS_Store": "Finder metadata",
 }
 EXCLUDED_PATTERNS = ((re.compile(r"source_manifest_[0-9a-f]+\.json\Z"), "regenerated source manifest"),)
@@ -64,6 +67,11 @@ EXCLUDED_DIRS = {
     "shared": "regenerated status", "services": "logs", "roster": "regenerated renders",
     "meetings": "journals archived separately",
 }
+# #114: `handoff-codex --snapshot` exports of a saved chat kept in the home. They are the employee's own record (a
+# memory cites the snapshot path as its source), so each one is archived masked as JSON under transcripts/; any other
+# entry in the directory refuses (fail-closed).
+TRANSCRIPTS_DIR = "transcripts"
+_TRANSCRIPT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,200}\.json\Z")
 
 
 class SatchelError(ValueError):
@@ -329,14 +337,49 @@ def _sha256_file(path):
 # ---------------------------------------------------------------------------------------------------------
 # Extract
 
+def _telegram_files(home):
+    """#114: {name: reason} for the Telegram adapter files at the home root that telegram.json names: its state_file
+    (with the state's .guard marker, telegram.py) and lock_file. Relative paths are taken from the home, as for
+    --move's lock check. A file configured outside the home root is not in the inventory anyway. A telegram.json that
+    does not parse refuses (fail-closed): its state file could not be told apart from an unknown file."""
+    home = Path(home)
+    config = home / "telegram.json"
+    if not config.exists():
+        return {}
+    try:
+        data = json.loads(config.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        raise SatchelError("telegram_config", "cannot read %s to find its state_file: %s" % (config, error))
+    if not isinstance(data, dict):
+        raise SatchelError("telegram_config", "%s is not a JSON object" % config)
+    out, root = {}, home.resolve()
+    for field, reason in (("state_file", "adapter state (telegram.json state_file); re-installed by the operator"),
+                          ("lock_file", "per-process lock (telegram.json lock_file)")):
+        value = data.get(field)
+        if not isinstance(value, str) or not value:
+            continue
+        path = Path(value).expanduser()
+        path = path if path.is_absolute() else home / path
+        if path.parent.resolve() != root:
+            continue
+        out[path.name] = reason
+        if field == "state_file":
+            out[path.name + ".guard"] = "adapter state guard marker (telegram.json state_file); re-installed by the " \
+                                        "operator"
+    return out
+
+
 def inventory(home):
     """(included config names, excluded {name: reason}); refuses an unknown file or directory at the home root."""
     included, excluded, unknown = [], {}, []
+    configured = _telegram_files(home)
     for entry in sorted(Path(home).iterdir(), key=lambda p: p.name):
         name = entry.name
         if entry.is_dir() and not entry.is_symlink():
             if name in EXCLUDED_DIRS:
                 excluded[name + "/"] = EXCLUDED_DIRS[name]
+            elif name == TRANSCRIPTS_DIR:
+                pass  # archived member by member (_transcripts)
             else:
                 unknown.append(name + "/")
             continue
@@ -346,6 +389,8 @@ def inventory(home):
             included.append(name)
         elif name in EXCLUDED_FILES:
             excluded[name] = EXCLUDED_FILES[name]
+        elif name in configured and not entry.is_dir():
+            excluded[name] = configured[name]
         elif any(p.match(name) for p, _ in EXCLUDED_PATTERNS):
             excluded[name] = next(r for p, r in EXCLUDED_PATTERNS if p.match(name))
         else:
@@ -519,6 +564,23 @@ def _meetings(home):
     return out
 
 
+def _transcripts(home):
+    """#114: [(name, path)] of the handoff snapshots in <home>/transcripts; anything else there refuses."""
+    base = Path(home) / TRANSCRIPTS_DIR
+    if not base.is_dir() or base.is_symlink():
+        return []
+    out = []
+    for entry in sorted(base.iterdir(), key=lambda p: p.name):
+        if entry.name == ".DS_Store":
+            continue
+        if _TRANSCRIPT_NAME.match(entry.name) and entry.is_file() and not entry.is_symlink():
+            out.append((entry.name, entry))
+        else:
+            raise SatchelError("unknown_home_file", "%s/%s is not a transcript snapshot (a regular *.json file)"
+                               % (TRANSCRIPTS_DIR, entry.name))
+    return out
+
+
 def _git_commit():
     head = Path(__file__).resolve().parent.parent / ".git"
     try:
@@ -582,6 +644,12 @@ def extract(home, out, timeout=DEFAULT_TIMEOUT, temp_base=None, now=None, kind="
             member = "meetings/%s/journal.jsonl" % meeting
             data = _mask_journal(journal, masker, member)
             (member_dir / "meetings" / meeting).mkdir(parents=True, mode=0o700)
+            (member_dir / member).write_bytes(data)
+            members.append(member)
+        for transcript, path in _transcripts(home):
+            member = "%s/%s" % (TRANSCRIPTS_DIR, transcript)
+            data = _mask_json_file(path, masker, member)
+            (member_dir / TRANSCRIPTS_DIR).mkdir(mode=0o700, exist_ok=True)
             (member_dir / member).write_bytes(data)
             members.append(member)
         (member_dir / "runs.jsonl").write_bytes(_export_runs(home, masker))
@@ -1009,6 +1077,10 @@ def _build_home(home, data, manifest, employee, kind, attest, archive_name, repo
         elif name.startswith("meetings/"):
             target = home / name
             target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(blob)
+        elif name.startswith(TRANSCRIPTS_DIR + "/") and _TRANSCRIPT_NAME.match(name[len(TRANSCRIPTS_DIR) + 1:]):
+            target = home / name
+            target.parent.mkdir(mode=0o700, exist_ok=True)
             target.write_bytes(blob)
     created = manifest.get("created_at")
     with Store(home) as store:
