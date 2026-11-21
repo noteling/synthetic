@@ -921,6 +921,12 @@ class HomesAdapter:
     def _gen(self) -> int:
         return int(self.d.get("chooser_gen") or 0)
 
+    def _redelivered(self, home: Dict[str, Any], update_id: int) -> bool:
+        """Rowan #106 n2: this same update already saved this selection (its release hit a store error and
+        Telegram redelivered it), so its ``Talking to:`` notice was already sent once."""
+        current = self.d.get("selection") or {}
+        return current.get("key") == home["key"] and current.get("by_update") == update_id
+
     def _save_selection(self, home: Dict[str, Any], via: str, update_id: int) -> bool:
         """§3.8: saved before any reply or feed. Returns True when the selection changed."""
         current = self.selected()
@@ -932,13 +938,16 @@ class HomesAdapter:
     def _select(self, home: Dict[str, Any], via: str, update_id: int, message: Optional[Dict[str, Any]]
                 ) -> Dict[str, Any]:
         """A keyboard tap, a standalone directive or ``/to <name>``: saved, journaled without body, never fed;
-        one Router notice with the refreshed keyboard; held messages are released to that home."""
+        one Router notice with the refreshed keyboard (not again on a redelivery of the same update); held
+        messages are released to that home."""
+        repeat = self._redelivered(home, update_id)
         self._save_selection(home, via, update_id)
         if message is not None and message.get("message_id") is not None:
             self.route_map[str(message["message_id"])] = dict(kind="select", key=home["key"], update_id=update_id,
                                                               at=_now())
             self.state.save()
-        self.notice(TALKING_TO % home["button"])
+        if not repeat:
+            self.notice(TALKING_TO % home["button"])
         result = self._release(home)
         if result.get("reason") == "store_error":
             return result
@@ -1040,9 +1049,11 @@ class HomesAdapter:
             if reason != "unrecognized_sender":
                 self._answer(qid, "Out of date. Use the buttons below the message box.")
             return {"processed": False, "reason": reason, "event_id": None}
+        repeat = self._redelivered(home, update_id)
         self._save_selection(home, "inline", update_id)
         self._answer(qid, None)
-        self.notice(TALKING_TO % home["button"])
+        if not repeat:
+            self.notice(TALKING_TO % home["button"])
         result = self._release(home)
         if result.get("reason") == "store_error":
             # Rowan #105 L1: the id is not recorded, so Telegram's redelivery of this update finishes the release.
