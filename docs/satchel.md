@@ -100,6 +100,8 @@ Limits, stated plainly:
 - The archive holds markers, not secrets; nothing un-masks them. After a restore the operator re-provisions real
   credentials.
 - A secret with no recognisable shape ("my wifi code is hunter2") is not masked.
+- A URL scheme is read as at most 64 characters before `://` (so long unbroken runs stay linear to scan, #110);
+  a URL password is missed only if no letter appears in those 64 characters to start a scheme.
 - Over-masking is the chosen failure: "the token is expired" becomes "the token is «masked:assign:7»".
 - Everything else — memories, messages, people's words — is plaintext and readable wherever the file is kept.
 - Click and worker-hold records name their one-shot tokens `token`/`page_token`/`hit_token`; those values are masked

@@ -100,7 +100,9 @@ PATTERNS = (
     ("bearer", re.compile(r"(?i)\bauthorization[\"']?\s*[:=]\s*[\"']?(?:(?:bearer|basic|token)\s+)?(?P<v>[^\s\"'«]{8,})"
                           r"|\bbearer\s+(?P<w>[A-Za-z0-9._~+/=-]{16,})")),
     ("jwt", re.compile(r"(?<![%s])eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}" % _EDGE)),
-    ("userinfo", re.compile(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s/:@«]+:(?P<v>[^\s/@«]+)@")),
+    # #110: the scheme is bounded (1-64 characters). Unbounded, every start position of a long run of letters or
+    # digits scanned to the end of the run before failing on "://", which is quadratic in the run length.
+    ("userinfo", re.compile(r"[A-Za-z][A-Za-z0-9+.-]{0,63}://[^\s/:@«]+:(?P<v>[^\s/@«]+)@")),
     # Only the value is masked; the word stays. Value: a quoted string or the next run of >= 4 characters. A marker
     # never counts as a value, so a masked text scans clean.
     ("assign", re.compile(r"(?i)(?<![A-Za-z0-9])(?:password|passwd|pwd|secret(?:[_-]?key)?|token|api[_-]?key"
