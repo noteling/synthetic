@@ -63,8 +63,8 @@ F1 accepts only `begin` and `end`; other lines get `unsupported`. F2 adds `heard
    stop was already sent but the CLI still returns a successful result (the turn completed as the stop landed),
    the run is recorded finished and the audit outcome is `stopped_completed`.
 4. A yielded run is **not a verdict**: `failure_streak` skips it (it neither fails nor resets the streak),
-   it decides no runtime probation, the worker's serve loop does not count it, and it quarantines no
-   routine. Its inputs stay pending and go to the first session after the meeting.
+   it decides no runtime probation, the worker's serve loop neither counts it nor resets its failure
+   counter (#101: real failure, yield, failure, failure stops the worker), and it quarantines no routine. Its inputs stay pending and go to the first session after the meeting.
 5. **Attach.** As soon as no run is running, `floor attach` takes the idle hold as its own holder kind
    (`kind: floor`, audited `floor.attached`) and prints `ready`. It renews the hold every 60 s. The hold
    expires 5 min after the last renewal, so a killed attach frees the worker by itself.

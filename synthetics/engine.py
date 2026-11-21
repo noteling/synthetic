@@ -47,6 +47,11 @@ class _ProviderIdle:
 PROVIDER_IDLE = _ProviderIdle()
 
 
+class YieldStep(dict):
+    """#101: the run record of a session stopped for a meeting (C3). Like ProviderStep, serve neither counts it as a
+    failure nor resets its failure counter: a yield is no verdict either way (failure_streak skips it too)."""
+
+
 def _provider_refused(error):
     """#98: is this the provider refusing the session? brain is imported lazily, as in apply_runtime: minimal copies of
     the engine (the experiment fixture) ship without brain.py."""
@@ -569,7 +574,7 @@ class Engine:
             except Exception:  # noqa: BLE001
                 pass
         self.on_update({"type": "yielded", "run_id": run_id, "meeting": yielded["meeting"]})
-        return failed
+        return YieldStep(failed)
 
     def run(self, max_turns=1):
         if max_turns < 1:
@@ -652,8 +657,8 @@ class Engine:
                         continue
                 try:
                     result = self._step()
-                    if not isinstance(result, ProviderStep) and result is not PROVIDER_IDLE:
-                        failures = 0  # #98 P1: a provider-refused run or pause neither counts nor resets
+                    if not isinstance(result, (ProviderStep, YieldStep)) and result is not PROVIDER_IDLE:
+                        failures = 0  # #98 P1, #101: a provider-refused or yielded run, or a pause, neither counts nor resets
                 except Exception as error:
                     failures += 1
                     if failures >= 3:
