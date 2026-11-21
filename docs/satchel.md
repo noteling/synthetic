@@ -25,16 +25,21 @@ the number of masks per kind (never the values). It is read-only on the home and
 | `manifest.json` | format 1, employee id and name, store `user_version`, hashed host label, code commit, row counts, member sums, excluded list with reasons, re-provision list (channel names, prefixes and routes; grants; worker launchd label), `masks[]`, pre-mask journal heads |
 | `state.sqlite3` | snapshot of the home database, `channels` rows deleted, content masked, compacted |
 | `runs.jsonl` | Ledgerline export of every run (docs/ledgerline.md), raw values scanned |
-| `config/…` | `profile.json`, `attribution.json`, `humans.json`, `floor.json`, `click.json`, `glance.json`, `runtime.json`, `prompt.local.md` when present, masked |
+| `config/…` | `profile.json`, `attribution.json`, `humans.json`, `floor.json`, `click.json`, `glance.json`, `runtime.json`, `name-choice.json` (how the employee chose its name), `prompt.local.md` when present, masked |
 | `meetings/<id>/journal.jsonl` | meeting journals, masked line by line |
+| `transcripts/<name>.json` | `handoff-codex --snapshot` exports kept in the home (the employee's own record; a memory cites the path), masked as JSON; restored to the same place |
 | `SHA256SUMS` | sha256 of every member above |
 
-Never archived: channel key files, the Telegram token file and `telegram.json` / `telegram_state.json`, CLI login
+Never archived: channel key files, the Telegram token file and `telegram.json` / `telegram_state.json` (or the
+`state_file` that `telegram.json` names, with the state's `.guard` marker, and its `lock_file`), CLI login
 state (`~/.claude`, `~/.codex`), answer-desk pairing, raw `runs/` side files, `workspace/`, per-process state and
 locks, other homes, the company and project stores. Satchel does not open the key or token files at all.
 
 A file or directory at the home root that Satchel does not know, or a database table it does not know, makes the
 extract **refuse** (`unknown_home_file`, `unknown_table`); move the file out of the home or extend Satchel.
+The same holds inside `transcripts/`: only regular `*.json` files are archived. A `telegram.json` that does not
+parse refuses with `telegram_config`, because its `state_file` could not be told apart from an unknown file;
+relative `state_file` / `lock_file` paths are taken from the home.
 
 ## How the snapshot is taken
 
