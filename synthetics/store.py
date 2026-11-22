@@ -1,6 +1,7 @@
 """Durable employee state. Model sessions are consumers of this state, never its owners."""
 
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -812,6 +813,14 @@ class Store:
         return {token[:5] for token in re.findall(r"[a-z0-9]+", str(text).casefold())
                 if len(token) >= 3 and token not in cls.MEMORY_STOPWORDS}
 
+    def _ranked_match_exists(self, query, candidates, out):
+        """#118: would match=any's ranked fill add a memory to out? Its score is positive exactly when a query term
+        is in a field, so one shared term answers it."""
+        terms = self._memory_terms(query)
+        seen = {memory["id"] for memory in out}
+        return bool(terms) and any(terms & self._memory_terms(memory.get(field, "")) for memory in candidates
+                                   if memory["id"] not in seen for field, _ in self.MEMORY_FIELDS)
+
     def memory_search(self, query="", subject=None, limit=30, include_superseded=False, match="any", since=None,
                       cursor=None, max_bytes=None):
         if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 500:
@@ -849,6 +858,7 @@ class Store:
         if len(probe) >= 15 and self.MEMORY_ID.fullmatch(probe):
             hits = [memory for memory in out if memory["id"].startswith(probe)]
             out = hits + [memory for memory in out if not memory["id"].startswith(probe)]
+        unranked = match == "any" and len(out) >= limit  # every-word matches fill the page: no ranked fill below
         if match == "any" and len(out) < limit:
             terms = self._memory_terms(query)
             seen = {memory["id"] for memory in out}
@@ -867,9 +877,12 @@ class Store:
                         scored.append((-score, rank, memory))
                 out += [memory for _, _, memory in sorted(scored, key=lambda item: item[:2])]
         if budget is not None:
-            # F2 C1: query mode under max_bytes returns {memories, capped}; capped = the byte budget cut it.
+            # F2 C1: query mode under max_bytes returns {memories, capped}. #118: capped = a match exists that the
+            # page leaves out, whichever of limit and max_bytes cut it. When exactly limit every-word matches
+            # skipped the ranked fill, whether a ranked match exists is looked up (no scoring, stops at the first).
             page = self._fit(out[:limit], *budget)
-            return {"memories": page, "capped": len(page) < len(out[:limit])}
+            capped = len(page) < len(out) or (unranked and self._ranked_match_exists(query, candidates, out))
+            return {"memories": page, "capped": capped}
         return out[:limit]
 
     MEMORY_INDEX_LIMIT = 300
@@ -2618,21 +2631,17 @@ class Store:
             page = self._since_page(found, since, limit, "events", "e", lambda e: e["_seq"])
             page["events"] = [self._with_auth({k: v for k, v in e.items() if k != "_seq"}) for e in page["events"]]
             return page
-        found = []
-        for row in self.db.execute("SELECT data FROM events ORDER BY seq DESC"):
-            event = json.loads(row["data"])
-            if thread is not None and event.get("thread") != thread:
-                continue
-            if all(word in _search_text(event).casefold() for word in words):
-                found.append(self._with_auth(event))
-                if len(found) >= limit:
-                    break
+        rows = (json.loads(row["data"]) for row in self.db.execute("SELECT data FROM events ORDER BY seq DESC"))
+        matches = (event for event in rows if (thread is None or event.get("thread") == thread)
+                   and all(word in _search_text(event).casefold() for word in words))
+        found = [self._with_auth(event) for event in itertools.islice(matches, limit)]
         if compact:
-            # F2 C1: query/thread mode under compact options returns {events, capped, truncated_from};
-            # capped = max_bytes cut the result (narrow the query, or page with since=).
+            # F2 C1: query/thread mode under compact options returns {events, capped, truncated_from}. #118: capped
+            # = a match exists that the page leaves out, whichever of limit and max_bytes cut it (narrow the query,
+            # or page with since=). An uncut page reads on to the next match only.
             found = [self._preview(event, body_chars) for event in found]
             page = self._fit(found, *budget) if budget else found
-            return {"events": page, "capped": len(page) < len(found),
+            return {"events": page, "capped": len(page) < len(found) or next(matches, None) is not None,
                     "truncated_from": next((e.get("created_at") for e in page if e.get("body_truncated")), None)}
         return found
 
