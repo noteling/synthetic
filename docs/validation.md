@@ -8,13 +8,25 @@ Sections from "First increment" down are a dated record of 2026-11-15. Their tes
 Don't copy a count into this file; it drifts with every merge. Count it from the checkout:
 
 ```sh
-env -u SYNTHETICS_SESSION_RUN -u SYNTHETICS_HOME python3 -m unittest discover 2>&1 | tail -3
+python3 -m unittest discover 2>&1 | tail -3
 ls tests/test_*.py | wc -l
 ```
 
-Run it outside an employee session (or with those two variables cleared, as above), from the
-checkout root, on both supported interpreters. For orientation only: main `858fb04`
+Run it from the checkout root, on both supported interpreters. For orientation only: main `858fb04`
 (2026-11-19) ran 926 tests in 94 `test_*.py` modules on Python 3.9 and 3.14.
+
+An employee session can run it as written. Importing the `tests` package clears
+`SYNTHETICS_SESSION_RUN`, `SYNTHETICS_HOME` and `XPC_SERVICE_NAME` for the test process
+(`tests/__init__.py`), so leave them set in the shell. Use plain `discover` from the root, or
+`discover -s tests -t .`. Without `-t .`, `discover -s tests` loads the modules outside the package, and
+the variables are cleared only once some loaded module imports `tests`. A full run does that, though
+modules loaded earlier still see them at import; a partial run (`-p test_access.py`, say) may not.
+
+No session removes or overrides `SYNTHETICS_SESSION_RUN` or `SYNTHETICS_HOME` for a command on a live
+home, not even to test that a guard refuses: those variables are what the guards read. Passing
+`--home <target>` to a delegated command is not an override: the session's own `SYNTHETICS_HOME` stays
+set. The one exception to keeping them, a reviewed kit on a scratch company it creates, is in
+`authority.md` ("Kits").
 
 To check for test launchd labels after a run, use `python3 -m tests.test_service_recovery labels`, not a bare
 `launchctl list | grep`. It prints each loaded `com.synthetics.test.*` label with its owner: `live pid N` (a
