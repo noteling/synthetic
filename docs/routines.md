@@ -246,8 +246,11 @@ The `## dream` section of `synthetics/prompts/routines.md` is the guidance; the 
 - **Results fit tool output (F2).** Tool output has a size ceiling (not measured: 25 KB showed in full and
   80 KB spilled), and event bodies range up to ~90 KB, so no fixed `limit` fits. Through MCP every
   `event_search` and `memory_search` result stops before `max_bytes` (default 32 000 bytes of serialized
-  JSON) and returns at least one item; `capped` says it stopped. Query/thread mode then returns
-  `{events|memories, capped, ...}` instead of a bare list. On since= pages bodies stay whole: the page holds
+  JSON) and returns at least one item. Query/thread mode then returns `{events|memories, capped, ...}` instead of
+  a bare list. There too `capped: true` means a matching item exists that the result leaves out, whether `limit` or
+  `max_bytes` cut it, and false means none does (#118). With `match: "any"` a ranked match counts: when every-word
+  matches alone reach `limit`, the ranked fill is not run, and if there are exactly `limit` of them a lookup for one
+  shared term decides the flag. On since= pages bodies stay whole: the page holds
   as many complete records as fit, and only a first item too large alone is cut to fit. Without since,
   event bodies are cut to `body_chars` (default 500): search finds events, `event_get` reads them. Every
   event carries `body_len` and `body_truncated`, and `truncated_from` is the `created_at` of the first cut
