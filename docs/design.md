@@ -173,6 +173,18 @@ fairness guarantee yet.
   inside the target transaction and leaves a receipt. Credential items stay refused.
 - The employee can work on another ready assignment while one is waiting. Follow-ups
   can have explicit reminders. There is no ambient model loop when there is no work.
+- Reminders (#124): `reminder_list` pages this home's pending reminders, due but unfired ones included, soonest
+  first; the snapshot's `reminders` line ({pending, next_at}, left out at zero) counts the same set.
+  `reminder_cancel(reminder_id, reason)` keeps the record and adds `cancelled_at`, `cancel_reason` and
+  `cancelled_by_run`. It never changes linked work; `work_without_wake` in its result (computed, not stored) names
+  a waiting work left with no wake_at, linked open question or other pending reminder. That is a fact, not a fault:
+  an authenticated work reference can still wake it. A repeat returns the stored record with `already: true`; a fired
+  reminder is refused; `reminder_set` refuses a cancelled reminder's key. Cancelling and firing are both
+  `BEGIN IMMEDIATE` transactions, so a reminder is fired or cancelled, never both. A cancelled record also has
+  `fired_at: "cancelled"`, which is deliberately not a time: an older `due_events` knows no `cancelled_at` and fires
+  every due record whose `fired_at` is null. It meets such records after a rollback, and between a merge and a
+  worker's restart, because each session starts the MCP server from the code on disk. Read `cancelled_at`, not
+  `fired_at`, to tell a cancelled reminder from a fired one.
 
 ## Interruption and recovery
 
@@ -241,7 +253,7 @@ changes an implementation decision.
 
 ## Budgeted MCP context and outbox reads
 
-The MCP-only `employee_context` and `outbox_list` results are JSON envelopes,
+The MCP-only `employee_context`, `outbox_list` and `reminder_list` results are JSON envelopes,
 not the raw Store/CLI return values. `max_bytes` is 1024–32000 UTF-8 bytes
 (default 32000), including continuation and yield metadata. `entries` batches
 complete `{key, value}` records. When one record cannot fit, `key`, `encoding:
@@ -257,8 +269,10 @@ advertises the selectable top-level keys; for example,
 `employee_context {"section":"work"}` reads just work. For outbox,
 `outbox_list {"id":"message-..."}` selects an own message even outside the
 newest window; `older_before` can be passed as `before` to retrieve an older
-window. A window is anchored against new arrivals, while changes or removal of
-selected records invalidate its continuation. Results never alter the raw state.
+window. An outbox window is anchored against new arrivals, while changes or
+removal of selected records invalidate its continuation. `reminder_list` has
+neither selectors nor a window: `total` is every pending reminder, and any change
+to that set refuses its cursor. Results never alter the raw state.
 
 ## Bounded board reads
 
