@@ -5,6 +5,13 @@ import json
 from datetime import datetime, timezone
 
 
+NAMES = ('employee_context', 'outbox_list', 'reminder_list')
+# reminder_list has no selectors and no window: its cursor carries only the position and the source hash.
+STATE = {'employee_context': {'v', 'name', 'selector', 'status', 'limit', 'anchor', 'hash', 'index', 'offset', 'before', 'as_of'},
+         'reminder_list': {'v', 'name', 'hash', 'index', 'offset'}}
+STATE['outbox_list'] = STATE['employee_context']
+
+
 def dump(value):
     return json.dumps(value, ensure_ascii=False)
 
@@ -32,10 +39,12 @@ def page(store, name, args, notice=None):
     if state is not None:
         if set(args) - {'cursor', 'max_bytes'}:
             raise ValueError('A cursor cannot be combined with selectors.')
-        if set(state) != {'v', 'name', 'selector', 'status', 'limit', 'anchor', 'hash', 'index', 'offset', 'before', 'as_of'} or state['v'] != 1 or state['name'] != name:
+        if set(state) != STATE[name] or state['v'] != 1 or state['name'] != name:
             raise ValueError('Invalid continuation cursor.')
         if type(state['index']) is not int or type(state['offset']) is not int or state['index'] < 0 or state['offset'] < 0:
             raise ValueError('Invalid continuation cursor.')
+    elif name == 'reminder_list':
+        state = {'v': 1, 'name': name, 'hash': None, 'index': 0, 'offset': 0}
     else:
         state = {'v': 1, 'name': name, 'selector': args.get('section') if name == 'employee_context' else args.get('id'),
                  'status': args.get('status'), 'limit': args.get('limit', 50), 'anchor': None,
@@ -60,6 +69,8 @@ def page(store, name, args, notice=None):
             data = {state['selector']: data[state['selector']]}
         sections = list(data)
         entries = list(data.items())
+    elif name == 'reminder_list':
+        entries = [(item['id'], item) for item in store.reminders_pending()]
     else:
         if state['status'] not in (None, 'pending', 'uncertain', 'failed', 'delivered') or type(state['limit']) is not int or not 1 <= state['limit'] <= 500:
             raise ValueError('Invalid continuation cursor.')

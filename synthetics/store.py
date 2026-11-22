@@ -1648,6 +1648,11 @@ class Store:
     def reminders_list(self, include_fired=False):
         return [r for r in self._all("reminders") if include_fired or r["fired_at"] is None]
 
+    def reminders_pending(self):
+        """#124: what reminder_list pages and the snapshot line counts: every reminder neither fired nor cancelled,
+        due ones included, soonest first."""
+        return sorted(self.reminders_list(), key=lambda r: (r["at"], r["created_at"], r["id"]))
+
     def audit_note(self, action, record_id, data):
         """Record an audited CLI action taken in this home (e.g. a session's company write)."""
         with self._tx():
@@ -2755,7 +2760,12 @@ class Store:
         with self._tx():
             previous = self._once("reminder", key, payload)
             if previous:
-                return self._get("reminders", previous)
+                record = self._get("reminders", previous)
+                if record.get("cancelled_at"):
+                    # #124: returning it would look like success for a reminder that will never fire.
+                    raise ValueError("This key's reminder %s was cancelled at %s (%s); use a new key." % (
+                        record["id"], record["cancelled_at"], record["cancel_reason"]))
+                return record
             if work_id:
                 linked = self.work_get(work_id)
                 if self._is_routine(linked):
@@ -2765,6 +2775,43 @@ class Store:
             self._save("reminders", record, "reminder.set")
             self._key("reminder", key, payload, record["id"])
             return record
+
+    # #124: a cancelled reminder carries this in fired_at, which is not a time. A due_events from before cancels
+    # existed (a rollback, or a worker not yet restarted while a session already has the new tools) knows no
+    # cancelled_at and fires every due record whose fired_at is null; any other value makes it skip the record.
+    # It never claims a fire: cancelled_at is the field to read.
+    REMINDER_CANCELLED = "cancelled"
+
+    def reminder_cancel(self, reminder_id, reason):
+        """#124: cancel one of this home's own pending reminders; the record stays. A repeat returns the stored
+        record with already=True and writes nothing; a fired reminder is refused. Linked work is never changed.
+        work_without_wake and already are view fields, never saved."""
+        reminder_id, reason = _text(reminder_id, "reminder_id"), _text(reason, "reason")
+        reminder_id = self._resolve(reminder_id, "reminders")
+        with self._tx():  # BEGIN IMMEDIATE, as in due_events: either this commits first or the fire does
+            record = self._get("reminders", reminder_id)
+            view = {}
+            if record.get("cancelled_at"):
+                view["already"] = True
+            elif record["fired_at"] is not None:
+                raise ValueError("Reminder %s already fired at %s (%s)." % (
+                    record["id"], record["fired_at"], record.get("event_id")))
+            else:
+                record.update(fired_at=self.REMINDER_CANCELLED, cancelled_at=timestamp(), cancel_reason=reason,
+                              cancelled_by_run=self.run_id)
+                self._save("reminders", record, "reminder.cancelled")
+            if self._without_wake(record["work_id"]):
+                view["work_without_wake"] = record["work_id"]
+            return dict(record, **view)
+
+    def _without_wake(self, work_id):
+        """#124: True for a waiting work (never a routine) with no wake_at, linked open question or pending reminder."""
+        work = self._find("works", work_id) if work_id else None
+        if not work or work["status"] != "waiting" or self._is_routine(work) or work.get("wake_at"):
+            return False
+        if any((self._find("questions", qid) or {}).get("status") == "open" for qid in self._linked_ids(work)):
+            return False
+        return not any(r["work_id"] == work_id for r in self.reminders_list())
 
     def due_events(self, now=None):
         now = timestamp(now)
@@ -3892,4 +3939,9 @@ class Store:
                     project_bindings=capture.binding_lines(self), project_capture=capture.capture_status(self), publish_failing=board.publish_failing(self),
                     project_uncovered=capture.uncovered_counts(self, capture.home_id(self)),
                     routines_due=self.routines_due(run, now=as_of),
-                    **self._board_section(run_id))
+                    **self._reminder_line(), **self._board_section(run_id))
+
+    def _reminder_line(self):
+        """#124: {pending, next_at} so a fresh session sees that reminders exist; left out when there are none."""
+        pending = self.reminders_pending()
+        return dict(reminders=dict(pending=len(pending), next_at=pending[0]["at"])) if pending else {}

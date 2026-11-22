@@ -175,6 +175,14 @@ TOOLS = [
     tool("reminder_set", "Arrange a future wake-up for something you owe. Time must have an explicit timezone. Reminders survive restarts.", {
         "at": text_property(), "reason": text_property(), "work_id": text_property(), "key": KEY,
     }, ["at", "reason", "key"]),
+    tool("reminder_list", "Your pending reminders, soonest first, due but unfired ones included, as budgeted entries or JSON chunks. Follow next_cursor until null.", {
+        "cursor": text_property("next_cursor of the previous page. Refused when the pending reminders changed: start again."),
+        "max_bytes": {"type": "integer", "minimum": 1024, "maximum": 32000},
+    }),
+    tool("reminder_cancel", "Cancel one of your pending reminders; its record stays and linked work is not changed. A fired one is refused. work_without_wake, when present, names linked work that waits with no wake_at, open question or other pending reminder: a fact, not an error (a message can still wake it).", {
+        "reminder_id": text_property("From reminder_list; a unique prefix of 8+ hex characters works."),
+        "reason": text_property("Why it is no longer needed."),
+    }, ["reminder_id", "reason"]),
 ]
 
 from . import projecttools  # noqa: E402  (M21 project memory tools)
@@ -192,7 +200,7 @@ TOOLS.extend(click.TOOLS)
 from . import floortools  # noqa: E402  (MTG F2: meeting runs only)
 
 METHODS = {entry["name"]: entry for entry in TOOLS + floortools.TOOLS}
-MUTATIONS = {"entity_put", "memory_put", "work_put", "floor_accept", "question_ask", "question_resolve", "question_close", "question_relays", "message_send", "reminder_set", "routine_rearm",
+MUTATIONS = {"entity_put", "memory_put", "work_put", "floor_accept", "question_ask", "question_resolve", "question_close", "question_relays", "message_send", "reminder_set", "reminder_cancel", "routine_rearm",
              "runtime_restart"} | projecttools.MUTATIONS | rostertools.MUTATIONS | glance.MUTATIONS \
     | click.MUTATIONS | floortools.MUTATIONS
 
@@ -304,7 +312,7 @@ class Server:
                 value = click.call(self.store, name, arguments)
             elif name in floortools.NAMES:
                 value = floortools.call(self.store.home, self.meeting, name, arguments, text_mode=self.text_mode)
-            elif name in ("employee_context", "outbox_list"):
+            elif name in boundedreads.NAMES:
                 value = boundedreads.page(self.store, name, arguments, self._yield_notice())
             else:
                 method = getattr(self.store, name)
@@ -318,7 +326,7 @@ class Server:
         if self.store.resolved and isinstance(value, dict):
             # Backlog 24 (K6): show the full IDs short prefixes were expanded to.
             value = dict(value, resolved=dict(self.store.resolved))
-        if isinstance(value, dict) and name not in ("employee_context", "outbox_list"):
+        if isinstance(value, dict) and name not in boundedreads.NAMES:
             notice = self._yield_notice() if early is self._NO_VALUE else early
             if notice is not None:
                 value = dict(value, **{"yield": notice})  # MTG F1 (C2): before the receipt, so it records it
