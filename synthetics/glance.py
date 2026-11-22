@@ -16,7 +16,7 @@ Privacy (v1, intent pm-c12016e1 and Noteling's counts-only default for agents):
   D1 approved by Codex 2026-11-19, message-ed00558e).
 - Opt-in (C1): the tool is offered only in a home whose ``glance.json`` says {"enabled": true}. It reads the human's
   screen, so no employee gets it implicitly.
-- The tool RESULT (with hit labels and frames) persists only in the calling session's own transcript; the home's
+- The tool RESULT (with hit labels and frames) goes to the calling session only; the home's
   runs/*.mcp.jsonl receipt keeps the arguments (find, role, app), not the result. See docs/glance.md.
 
 The reader is a seam: ``glance.reader`` (default LaunchReader) is any callable(args: list[str]) -> dict that

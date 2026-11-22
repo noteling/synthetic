@@ -118,6 +118,10 @@ The saved-login connection checks the current login method before execution so e
 authentication cannot log out an incompatible saved account. Configured gateways instead use an
 isolated temporary CLI home and ephemeral credential storage; they never load the saved account.
 
+With Claude CLI, a tool result too large to show the model is saved by the CLI to a file outside the employee
+home, also with session persistence off: see "Execution and limits" in the [README](../README.md). Whether Codex
+CLI writes such files was not checked.
+
 Output is consumed as JSONL events. The adapter records filtered activity and token usage; raw thinking
 and tool results do not become display records. A successful process exit alone is not enough:
 the session must have a successful terminal turn and a final agent message. A quota error, malformed

@@ -33,7 +33,8 @@ the number of masks per kind (never the values). It is read-only on the home and
 Never archived: channel key files, the Telegram token file and `telegram.json` / `telegram_state.json` (or the
 `state_file` that `telegram.json` names, with the state's `.guard` marker, and its `lock_file`), CLI login
 state (`~/.claude`, `~/.codex`), answer-desk pairing, raw `runs/` side files, `workspace/`, per-process state and
-locks, other homes, the company and project stores. Satchel does not open the key or token files at all.
+locks, other homes, the company and project stores. Oversized tool results that Claude Code saved under `~/.claude`
+(README, "Execution and limits") are therefore neither archived nor moved: after `--move` they stay on the old host. Satchel does not open the key or token files at all.
 
 A file or directory at the home root that Satchel does not know, or a database table it does not know, makes the
 extract **refuse** (`unknown_home_file`, `unknown_table`); move the file out of the home or extend Satchel.

@@ -61,7 +61,7 @@ page-count fields are passed on; Noteling's page text (`text`, only with `--full
 | Store table `glances`, audit log (`glance.recorded`) | Whitelisted fields only: time, run, ok/exit/status, numeric counts and `kinds`, `site` as host only, the asked name and role, match kind, count, unique, visible/enabled per hit, browser bundle asked for | Shared: Lookout and status readers |
 | `<home>/shared/status.json` → `glances` | The newest 5 stored rows | Shared |
 | Lookout Team page, "Recent glances" | The same rows | Shared (localhost GET) |
-| The calling session's model transcript (Claude's session log, outside Synthetics) | The full tool result, **including hit labels and frames** | Private to the calling home |
+| The calling session's model context. Sessions run with `--no-session-persistence`, documented (read 2026-11-22, not tested here) as not saving the session to disk. A result too large to show would be saved to a file outside the home (README, "Execution and limits") | The full tool result, **including hit labels and frames** | The calling session; a saved file would be readable by the host account |
 | `<home>/runs/*.mcp.jsonl` | The receipt only: tool name, arguments (`find`, `role`, `app`) and success. No result. (`synthetics/mcp.py` `Server.receipt`) | Private to the calling home |
 
 **The asked name is stored as given.** `find` is the employee's own words, so the `glances` table, status.json and
