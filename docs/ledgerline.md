@@ -126,8 +126,11 @@ Proposal `reviews/E4/proposal.md` (Vesper's workspace), approved with Q1 E4-B (n
   as `stream_chain`, only when the file exists). One line per event, keys limited to `ledgerline.STREAM_ALLOWED`:
   `init {model, claude_code_version, tools, mcp_servers [{name, status}]}`; `tool_use {tool_use_id, name,
   input_bytes, input_sha256}`; `displayed {tool_use_id, shape, bytes, sha256, reported_chars?,
-  saved_outside_home?}` with shape `full`, `spilled` (the client's "exceeds maximum allowed tokens" form),
-  `preview` (`<persisted-output>`), `error`, or `unknown` (never guessed); `turn {text_blocks, text_bytes}`;
+  reported_kb?, saved_outside_home?}` with shape `full`, `spilled` (the client's "exceeds maximum allowed tokens" form),
+  `preview` (`<persisted-output>`), `error`, or `unknown` (never guessed); `reported_kb` (#64) is the number in the client's own "Output too large
+  (58.6KB)" line, read only from shape `preview` and only directly after the marker (a probe's 60 000 characters
+  were printed as 58.6KB; another unit or wording gives no key; an output that itself begins with the client's two
+  lines would be read as one, as the shape already is); `turn {text_blocks, text_bytes}`;
   `result {subtype, is_error, num_turns, total_cost_usd, duration_ms}`; `stream_error {stage, type}`;
   `reader_detached {join_seconds}` (below). Never text,
   input, thinking, paths, cwd, session ID, socket path, credential expiry or memory paths (static test,
@@ -147,13 +150,13 @@ Proposal `reviews/E4/proposal.md` (Vesper's workspace), approved with Q1 E4-B (n
   self-service); it applies when the worker restarts or loads the config.
 - **E4c.** `routine verify` judges each joined page by what was displayed (step 2 above). The display threshold
   is host-specific: on Vesper's host Claude Code 2.1.326 showed 40 105-character MCP results whole and spilled
-  70 240 (token-based), so the predicted 32 000 over-flags; it stays for runs without a join (C5), since
+  70 240 (token-based; both were repeated padding, so neither is a safe size for real text), so the predicted 32 000 over-flags; it stays for runs without a join (C5), since
   over-flagging is the safe direction.
 - **Export.** `export runs` adds `kind: stream` lines: `{run_id, seq, stream_kind, line_sha256, prev_sha256,
   facts}`; a field not allowed for its kind becomes `{bytes, sha256}`. Same fence as the rest of export.
 - **What the facts say about other people.** Only sha256 of displayed text that may contain their words (the
-  same exposure as E1's `result.sha256`). Claude Code's own spill files outside the home are issue #64, out of
-  scope here.
+  same exposure as E1's `result.sha256`). Claude Code's own spill files outside the home are not covered by
+  the retention below or by export: see "Execution and limits" in the README (#64).
 
 **runs/ retention (Codex Q2, C3).** `Store.runs_prune`: keep 30 days and at most 200 MB per home's `runs/`
 (`runtime.json` `runs_keep_days`, `runs_max_mb`, both optional). Only regular files named `<run-id>.<suffix>`

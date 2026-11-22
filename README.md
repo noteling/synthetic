@@ -214,6 +214,34 @@ the original Noteling and Stand checkouts unchanged. No separate OS, repository,
 email, or directory-service account is provisioned yet. Assign a separate working
 copy before actual maintenance. See [platform assumptions](docs/platform-assumptions.md).
 
+**Output too large to show is saved outside the employee home.** Claude Code saves such a tool result to a
+file in its own storage, under `~/.claude` by default. One probe (2.1.326, 2026-11-19) saw this with session
+persistence off, as Synthetics runs it. The file holds whatever the command or tool returned, which can include
+messages, memories and private views. The home's `runs/` retention, `export` and Satchel do not cover it.
+
+What follows is Claude Code's documentation as read on 2026-11-22, not tested here:
+
+- A successful command's output over roughly 30,000 characters goes to a file in "the session directory". A
+  successful MCP result over 25,000 tokens or 50,000 characters is saved too; for the token limit the docs name a
+  `tool-results` folder under `~/.claude/projects/`.
+- Claude Code removes old files after `cleanupPeriodDays` (30 by default), but pauses that sweep when user
+  settings are excluded and no enabled source provides `cleanupPeriodDays`. Synthetics excludes user settings, so
+  its sessions may not sweep. Managed settings could provide the value, and the owner's own Claude Code sessions
+  on the same host may sweep the same files.
+
+What Synthetics does: a model's call to either search tool can't ask for more than 32,000 bytes (a margin we
+chose, not a measured limit; one memory larger than that is still returned whole). Other tool results are not all
+bounded. Employees are told to send large command output to a workspace file. That is advice, not enforcement, and
+`runs/` retention does not prune workspace files and Satchel does not archive them.
+
+What the owner can do: treat `~/.claude` as holding employee data when you back up, share or retire the host.
+Shortening `cleanupPeriodDays` or deleting folders under `~/.claude` also reaches the owner's own transcripts, so
+neither removes only employee files.
+
+Sources: Claude Code's [tools reference](https://code.claude.com/docs/en/tools-reference),
+[MCP output limits](https://code.claude.com/docs/en/mcp), [application data](https://code.claude.com/docs/en/claude-directory)
+and [retention sweep event](https://code.claude.com/docs/en/monitoring-usage).
+
 Inputs received during reasoning are retained for the next session. This increment
 does not interrupt a model turn to deliver them immediately. Questions and answers
 are therefore asynchronous. The service must be running for timers to execute; due

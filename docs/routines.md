@@ -244,9 +244,9 @@ The `## dream` section of `synthetics/prompts/routines.md` is the guidance; the 
   `next_cursor` continues strictly after the last item returned (`cursor=`), so items sharing a timestamp are
   never repeated or skipped (H2). Without `since` or `cursor` both tools behave and return exactly as before.
 - **Results fit tool output (F2).** Tool output has a size ceiling (not measured: 25 KB showed in full and
-  80 KB spilled), and event bodies range up to ~90 KB, so no fixed `limit` fits. Through MCP every
-  `event_search` and `memory_search` result stops before `max_bytes` (default 32 000 bytes of serialized
-  JSON) and returns at least one item. Query/thread mode then returns `{events|memories, capped, ...}` instead of
+  80 KB spilled; the client documents 25,000 tokens or 50,000 characters), and event bodies range up to ~90 KB, so no fixed `limit` fits. Through MCP every
+  `event_search` and `memory_search` result stops before `max_bytes` (default, and since #64 also maximum, 32 000 bytes of
+  serialized JSON, a margin we chose; a larger value is refused) and returns at least one item. Query/thread mode then returns `{events|memories, capped, ...}` instead of
   a bare list. There too `capped: true` means a matching item exists that the result leaves out, whether `limit` or
   `max_bytes` cut it, and false means none does (#118). With `match: "any"` a ranked match counts: when every-word
   matches alone reach `limit`, the ranked fill is not run, and if there are exactly `limit` of them a lookup for one

@@ -32,7 +32,9 @@ def tool(name, description, properties=None, required=None):
 
 
 # F2: compact retrieval defaults for the model. The store returns full records unless asked (CLI, internal
-# callers and tests are unchanged); the tool-output ceiling is not measured, so max_bytes is a margin under it.
+# callers and tests are unchanged); the client's display limit is not measured, so 32000 is a margin we chose.
+# Through MCP it is also the most a caller may ask for (#64): the client saves a result too large to show to a
+# file outside the home.
 SEARCH_BODY_CHARS = 500
 SEARCH_MAX_BYTES = 32000
 EVENT_CHUNK_CHARS = 30000
@@ -53,7 +55,7 @@ TOOLS = [
         "query": text_property(), "thread": text_property(),
         "limit": {"type": "integer", "minimum": 1, "maximum": 200},
         "body_chars": {"type": "integer", "minimum": 0, "description": "Cut each body to this many characters (default %d without since; full bodies with since unless given)." % SEARCH_BODY_CHARS},
-        "max_bytes": {"type": "integer", "minimum": 1024, "description": "Byte budget of the serialized result (default %d). The result stops before the item that would exceed it and returns at least one item; a single item too large alone is cut and marked body_truncated." % SEARCH_MAX_BYTES},
+        "max_bytes": {"type": "integer", "minimum": 1024, "maximum": SEARCH_MAX_BYTES, "description": "Byte budget of the serialized result (default and maximum %d). The result stops before the item that would exceed it and returns at least one item; a single item too large alone is cut and marked body_truncated." % SEARCH_MAX_BYTES},
         "since": text_property("ISO timestamp with timezone. Only items created at or after it, oldest first, every query word required; the result is {events, since, capped, unread_from, next_cursor, truncated_from}. capped=true means the limit or max_bytes cut the page: unread_from is the created_at of the first item not returned (an omission's from); pass next_cursor as cursor to read the next page. truncated_from is the created_at of the first body_truncated item (null if none): unless you fetch that item with event_get, it bounds your coverage too."),
         "cursor": text_property("next_cursor of the previous since= page: continues strictly after its last item, so items with the same created_at are neither repeated nor skipped."),
     }),
@@ -77,7 +79,7 @@ TOOLS = [
     tool("memory_search", "Search your memory across projects. Active memories by default; inspect superseded history explicitly when needed. A full memory ID (or a 15+ character prefix) returns that memory first. With since, read in time order with a capped flag (the dream's retrieval). The result is {memories, capped, ...}; it stops at limit and before max_bytes (default %d) with at least one memory. capped=true means matching memories exist that this result leaves out, whichever of the two cut it (narrow the query, or page with since=); capped=false means none does. With match=any, ranked matches count too. Memories are never cut." % SEARCH_MAX_BYTES, {
         "query": text_property(), "subject": text_property(),
         "limit": {"type": "integer", "minimum": 1, "maximum": 200},
-        "max_bytes": {"type": "integer", "minimum": 1024, "description": "Byte budget of the serialized result (default %d)." % SEARCH_MAX_BYTES},
+        "max_bytes": {"type": "integer", "minimum": 1024, "maximum": SEARCH_MAX_BYTES, "description": "Byte budget of the serialized result (default and maximum %d)." % SEARCH_MAX_BYTES},
         "include_superseded": {"type": "boolean"},
         "match": {"type": "string", "enum": ["any", "all"],
                   "description": "any (default): every-word matches first, then ranked matches on any distinctive word. all: every word must appear."},

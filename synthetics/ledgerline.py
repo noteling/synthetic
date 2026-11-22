@@ -634,7 +634,8 @@ STREAM_COMMON = frozenset({"kind", "seq", "prev_sha256", "provider"})
 STREAM_ALLOWED = {
     "init": frozenset({"model", "claude_code_version", "tools", "mcp_servers"}),
     "tool_use": frozenset({"tool_use_id", "name", "input_bytes", "input_sha256"}),
-    "displayed": frozenset({"tool_use_id", "bytes", "sha256", "shape", "reported_chars", "saved_outside_home"}),
+    "displayed": frozenset({"tool_use_id", "bytes", "sha256", "shape", "reported_chars", "reported_kb",
+                            "saved_outside_home"}),
     "turn": frozenset({"text_blocks", "text_bytes"}),
     # #98 D2: the api error fields (short names/ints) and, only for terminal_reason api_error, the provider's own
     # message bounded to 300 UTF-8 bytes. No other result text enters the stream.
@@ -654,6 +655,9 @@ TOOL_USE_ID = re.compile(r"[A-Za-z0-9_-]{1,128}")
 NAME = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 SPILL_TEXT = re.compile(r"Error: result \(([0-9][0-9,]*) characters\b.*exceeds maximum allowed tokens", re.S)
 PREVIEW_TEXT = "<persisted-output>"
+# #64: the client's own line right after the marker, nothing later in the text (a preview repeats the command's
+# output). A whole number of KB or one decimal, at most 4 digits before it; any other form gives no figure.
+PREVIEW_KB = re.compile(r"<persisted-output>\nOutput too large \(([0-9]{1,4}(?:\.[0-9])?)KB\)\. Full output saved to: ")
 
 
 def _name(value):
@@ -766,6 +770,9 @@ class StreamReducer:
                         fact["saved_outside_home"] = "saved to" in text[:4096].lower()
                 if reported is not None:
                     fact["reported_chars"] = reported
+                size = PREVIEW_KB.match(text) if shape == "preview" else None
+                if size:
+                    fact["reported_kb"] = float(size.group(1))
                 yield fact
         elif kind == "result":
             fact = {"kind": "result"}
