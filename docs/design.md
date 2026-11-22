@@ -259,3 +259,23 @@ advertises the selectable top-level keys; for example,
 newest window; `older_before` can be passed as `before` to retrieve an older
 window. A window is anchored against new arrivals, while changes or removal of
 selected records invalidate its continuation. Results never alter the raw state.
+
+## Bounded board reads
+
+`board_read` without `thread` or `since` returns posts (~8 KB, as before) and the
+project's published backlog, at most 32000 serialized UTF-8 bytes in all, the
+meeting notice included (#64; a margin, as for the search tools). **It returns
+open rows only** (ready, waiting), in the order priority, owner, work ID. Before
+#64 it returned every row ever published, closed ones too. `backlog_total` and
+`backlog_left_out` (rows in neither this page nor an earlier one) each count
+`open` and `closed`. `backlog_next` is null exactly when nothing is left out;
+otherwise pass it as `backlog_cursor`, without `thread` or `since`, for the next
+rows without posts: the rest of the open ones, then the closed ones (done,
+cancelled), newest change first. A page never mixes the two, and a plain call on
+a board with no open rows has an empty `backlog`: empty with a `backlog_next` that
+is not null means closed rows only. Rows are whole. Only a row over
+16384 bytes, which no projected work reaches, has its long values cut at 200
+bytes (a long number becomes null) and lists their names in `cut`. The cursor is
+a position and a hash of the project and its rows; any change to a row refuses
+it: start again. A read grant is checked before the cursor. `thread` and `since`
+reads, Lookout and the snapshot are unchanged.

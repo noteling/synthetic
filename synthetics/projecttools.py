@@ -7,16 +7,26 @@ Source entries enter a project only by binding capture or by ``project_promote``
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 
 from . import capture, projectview, roster
-from .projects import ProjectError, ProjectStore
+from .projects import POST_LIST_MAX, ProjectError, ProjectStore, utf8_cut
 
 PROJECT_NAME = re.compile(r"[a-z0-9][a-z0-9_-]*")
 APPEND_KINDS = ("intent", "lesson", "relate", "status", "retract", "confirm", "considered", "post")
 # M27 (iv): "backlog" is never appendable by a model; only the work_put projection (board.publish_drain) writes it.
 BOARD_READ_BYTES = 8192
+# #64 S1e: the serialized plain board_read (and each backlog_cursor page) stays under the search tools' maximum. Same
+# margin, not a measured line (docs/ledgerline.md). A row over BACKLOG_ROW_BYTES, which no projected work reaches, is
+# cut and marked, so the posts, the meeting notice and one row always fit.
+BOARD_RESULT_BYTES = 32000
+BACKLOG_ROW_BYTES = 16384
+BACKLOG_FIELD_BYTES = 200  # never shorter than the projection's own caps (BACKLOG_TITLE_MAX, BACKLOG_WAITING_MAX)
+BACKLOG_FIELDS = ("owner", "work_id", "title", "origin", "status", "waiting_for", "priority", "blocked_by")
+BACKLOG_CLOSED = ("done", "cancelled")
+BACKLOG_CURSOR = re.compile(r"(0|[1-9][0-9]{0,6})-([0-9a-f]{64})")
 
 
 def _text(description=""):
@@ -105,8 +115,14 @@ TOOLS = [
           ["project", "topic", "body", "key"]),
     _tool("board_read",
           "Read Board posts of one thread (thread = any post ID in it) or since a log seq, oldest first, bounded "
-          "to ~8 KB; plus the project's published backlog when neither is given.",
-          {"project": PROJECT, "thread": _text("A post ID; returns its whole thread."), "since": _int(0)}),
+          "to ~8 KB. With neither, also the project's published backlog: open rows (ready, waiting) only, whole rows "
+          "until the result would pass 32000 bytes. backlog_total and backlog_left_out count open and closed rows; "
+          "while backlog_next is not null, pass it as backlog_cursor for the next rows, without posts: the rest of "
+          "the open ones first, then the closed ones (done, cancelled), newest change first. An empty backlog with a "
+          "backlog_next that is not null means closed rows only.",
+          {"project": PROJECT, "thread": _text("A post ID; returns its whole thread."), "since": _int(0),
+           "backlog_cursor": _text("backlog_next of the previous page; not together with thread or since. Refused "
+                                   "once any backlog row has changed: then start again without it.")}),
 ]
 NAMES = {t["name"] for t in TOOLS}
 MUTATIONS = {"project_memory_append", "project_skip", "project_promote", "board_post"}
@@ -132,9 +148,79 @@ def _resolve_mentions(store, batch):
     return batch
 
 
-def _board_read(ps, thread=None, since=None):
+def _dump(value):
+    """The text tools/call sends for this value (mcp.Server.respond)."""
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _size(value):
+    return len(_dump(value).encode("utf-8"))
+
+
+def _cut_field(value):
+    """A value of an oversized row, cut; the same value when nothing had to go."""
+    if isinstance(value, str):
+        data = value.encode("utf-8")
+        return value if len(data) <= BACKLOG_FIELD_BYTES else data[:utf8_cut(data, BACKLOG_FIELD_BYTES)].decode("utf-8")
+    if isinstance(value, list):
+        return [_cut_field(v) for v in value[:POST_LIST_MAX]]
+    return value if _size(value) <= BACKLOG_FIELD_BYTES else None
+
+
+def _backlog_row(r):
+    row = {k: r.get(k) for k in BACKLOG_FIELDS if k != "blocked_by" or r.get("blocked_by")}
+    if _size(row) <= BACKLOG_ROW_BYTES:
+        return row
+    short = {k: _cut_field(v) for k, v in row.items()}
+    return dict(short, cut=[k for k in row if short[k] != row[k]])
+
+
+def _backlog_page(ps, rows, cursor, result, notice):
+    """Add backlog rows to `result` without passing BOARD_RESULT_BYTES. A page holds open rows or closed rows, never
+    both; the cursor is a position and a hash of the project and its rows, so any change of the backlog refuses it."""
+    opened = sorted((r for r in rows if r.get("status") not in BACKLOG_CLOSED),
+                    key=lambda r: (projectview.priority_rank(r.get("priority")), r["owner"], r["work_id"]))
+    closed = sorted((r for r in rows if r.get("status") in BACKLOG_CLOSED), key=lambda r: -r["seq"])
+    rows = opened + closed
+    digest = hashlib.sha256(_dump([ps.project, rows]).encode("utf-8")).hexdigest()
+    start, stop = 0, len(opened)
+    if cursor is not None:
+        match = BACKLOG_CURSOR.fullmatch(cursor)
+        if not match:
+            raise ProjectError("bad_cursor", "backlog_cursor is not a backlog_next value")
+        if match.group(2) != digest:
+            raise ProjectError("stale_cursor", "backlog_cursor is not for the current backlog of project %s (it "
+                               "changed, or the cursor is another project's): start again without it" % ps.project)
+        start = int(match.group(1))
+        if start >= len(rows):
+            raise ProjectError("bad_cursor", "backlog_cursor is not a backlog_next value")
+        stop = len(opened) if start < len(opened) else len(rows)
+
+    def page(end, taken):
+        value = dict(result, backlog=taken,
+                     backlog_total={"open": len(opened), "closed": len(closed)},
+                     backlog_left_out={"open": max(0, len(opened) - end), "closed": len(rows) - max(end, len(opened))},
+                     backlog_next="%d-%s" % (end, digest) if end < len(rows) else None)
+        return value, _size(value if notice is None else dict(value, **{"yield": notice}))
+
+    taken = []
+    value, _ = page(start, taken)
+    for end in range(start + 1, stop + 1):
+        more = taken + [_backlog_row(rows[end - 1])]
+        trial, size = page(end, more)
+        if size > BOARD_RESULT_BYTES:
+            break
+        value, taken = trial, more
+    return value
+
+
+def _board_read(ps, thread=None, since=None, cursor=None, notice=None):
+    """`notice` is the meeting notice the server adds to the result: counted here, never added here."""
     st = ps.state()
     posts = st.get("posts") or {}
+    rows = list((st.get("backlog") or {}).values())
+    if cursor is not None:
+        return _backlog_page(ps, rows, cursor, {"project": ps.project, "as_of_seq": ps.head_seq()}, notice)
     if thread is not None:
         if thread not in posts:
             raise ProjectError("unknown_target", "%s is not a live post" % thread)
@@ -158,11 +244,7 @@ def _board_read(ps, thread=None, since=None):
         out.append(item)
     result = {"project": ps.project, "posts": out, "more": more, "as_of_seq": ps.head_seq()}
     if thread is None and since is None:
-        result["backlog"] = sorted(
-            ({k: r.get(k) for k in ("owner", "work_id", "title", "origin", "status", "waiting_for", "priority",
-                                    "blocked_by") if k != "blocked_by" or r.get("blocked_by")}
-             for r in (st.get("backlog") or {}).values()),
-            key=lambda r: (projectview.priority_rank(r.get("priority")), r["owner"], r["work_id"]))
+        return _backlog_page(ps, rows, None, result, notice)
     return result
 
 
@@ -203,7 +285,8 @@ def _entries(entries):
     return out
 
 
-def call(store, name, arguments):
+def call(store, name, arguments, notice=None):
+    """`notice`: the meeting notice the server will add to this result, so board_read can count its bytes."""
     me = _me(store)
     run = store.run_id
     if name == "project_memory_append":
@@ -253,7 +336,10 @@ def call(store, name, arguments):
     if name == "board_read":
         if arguments.get("thread") and arguments.get("since") is not None:
             raise ProjectError("bad_args", "name thread or since, not both")
+        cursor = arguments.get("backlog_cursor")
+        if cursor is not None and (arguments.get("thread") is not None or arguments.get("since") is not None):
+            raise ProjectError("bad_args", "backlog_cursor cannot be combined with thread or since")
         with _open(store, arguments["project"]) as ps:
             _readable(ps, me)
-            return _board_read(ps, arguments.get("thread"), arguments.get("since"))
+            return _board_read(ps, arguments.get("thread"), arguments.get("since"), cursor, notice)
     raise ValueError("Unknown tool: %s" % name)

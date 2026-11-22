@@ -280,6 +280,8 @@ class Server:
         return offered(self.store.home)
 
     def call(self, name, arguments):
+        # #64 S1e: a board_read result counts the notice in its byte bound, so it gets the one read here and no later one.
+        early = self._yield_notice() if name == "board_read" else self._NO_VALUE
         try:
             if (name not in METHODS or (name in glance.NAMES and not glance.enabled(self.store.home))
                     or (name in click.NAMES and not click.enabled(self.store.home))):
@@ -292,7 +294,8 @@ class Server:
             # Store(home, run_id=...) validates run ownership within the same write
             # transaction. A separate read here would race recovery of an orphan run.
             if name in projecttools.NAMES:
-                value = projecttools.call(self.store, name, arguments)
+                value = projecttools.call(self.store, name, arguments,
+                                          notice=early if name == "board_read" else None)
             elif name in rostertools.NAMES:
                 value = rostertools.call(self.store, name, arguments)
             elif name in glance.NAMES:
@@ -316,7 +319,7 @@ class Server:
             # Backlog 24 (K6): show the full IDs short prefixes were expanded to.
             value = dict(value, resolved=dict(self.store.resolved))
         if isinstance(value, dict) and name not in ("employee_context", "outbox_list"):
-            notice = self._yield_notice()
+            notice = self._yield_notice() if early is self._NO_VALUE else early
             if notice is not None:
                 value = dict(value, **{"yield": notice})  # MTG F1 (C2): before the receipt, so it records it
         self.receipt(name, arguments, success=True, value=value)  # i17 E1: after the value is final
