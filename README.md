@@ -230,9 +230,10 @@ What follows is Claude Code's documentation as read on 2026-11-22, not tested he
   on the same host may sweep the same files.
 
 What Synthetics does: a model's call to either search tool can't ask for more than 32,000 bytes (a margin we
-chose, not a measured limit; one memory larger than that is still returned whole). Other tool results are not all
-bounded. Employees are told to send large command output to a workspace file. That is advice, not enforcement, and
-`runs/` retention does not prune workspace files and Satchel does not archive them.
+chose, not a measured limit; one memory larger than that is still returned whole). `board_read` without `thread` or
+`since` stops at the same number and returns the rest by cursor. Other tool results are not all bounded. Employees
+are told to send large command output to a workspace file. That is advice, not enforcement, and `runs/` retention
+does not prune workspace files and Satchel does not archive them.
 
 What the owner can do: treat `~/.claude` as holding employee data when you back up, share or retire the host.
 Shortening `cleanupPeriodDays` or deleting folders under `~/.claude` also reaches the owner's own transcripts, so
