@@ -5,6 +5,8 @@ What a voice in a room of non-employees may repeat aloud (P0 §1, Rowan's consum
 - the human's `goal` (≤ GOAL_MAX bytes, the human's own brief);
 - ONLY the works the goal names by ID (full ID or a unique 8+ hex prefix): title, status, waiting_for.
 The meeting session's own brief (never sent to Stand) adds those named works' notes: the human chose to bring them.
+floorsession adds one line after that brief, in the session's own prompt only: how many active memories the home holds
+(#97). The count is never in the persona or `ready`, and this module doesn't read it.
 Never: other works, private views, self notes, memories, messages or their bodies, outbox, host rules, credentials.
 During the meeting the model reaches anything further only through the read-only tools.
 
