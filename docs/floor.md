@@ -114,6 +114,10 @@ A `begin` line with `goal` (the human's brief for this meeting) runs the meeting
   (`floorsession.MeetingSession`) with `--tools ""` (no built-in tools) and `--allowedTools` limited to
   `floortools.MEETING_TOOLS`; its MCP server offers only those tools for a meeting run, in code (C5). Asks are
   answered one at a time, in order. Cancelling the ask in flight restarts the process with the journal tail.
+- **Memory count (#97).** Each time the session process starts, including a cancel restart, `floorsession` counts
+  the home's active memories and appends one line to the session's own `--system-prompt`, after the brief: the count,
+  and that none of them is shown in the brief and `memory_search` reads them. It holds no memory text, ID or subject,
+  and it is never in the persona or `ready`, so Stand never receives it. `memory_search` results are unchanged.
 - **Journal.** `HOME/meetings/<id>/journal.jsonl`, hash-chained, speaker class fixed by the line type.
   `text_mode: hash` stores only the size and sha256 of room words: a `heard` line's text and an `ask` line's
   question (C8). Panel notes and the employee's own answers are kept. The session itself still sees the question in
@@ -122,7 +126,10 @@ A `begin` line with `goal` (the human's brief for this meeting) runs the meeting
   session writes never does: it answers asks in order, so the answer already accounts for its own correction, which
   the prompt asks it to say aloud (#76 r1 L4).
 - **Memory (E3).** `memory_search` is one of the read-only meeting tools, so anything in the employee's memory can
-  be spoken in the room. That is approved (E3); keep it in mind when a meeting has outside guests.
+  be spoken in the room. That is approved (E3); keep it in mind when a meeting has outside guests. The memory count
+  (#97) makes it more likely. In trials that were not the Floor path, an employee with the line spoke stored content in
+  60 of 60 introductions, against 40 of 60 without it (1 or 3 stored memories; wordings that had failed in a pilot),
+  and in 3 of 40 against 0 of 40 with two other wordings. No limit is built.
 - **End.** `end`, EOF, the 90 min cap, a lost hold or a dead session: stop emitting, stop the session, journal
   still-open asks as `late`, close the journal, finish the run (with its cost), feed one wrap event through the
   stand channel (source `stand:meeting`, sender `stand`, body = pointer facts and the chain head, no text, no

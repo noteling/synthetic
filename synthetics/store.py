@@ -872,6 +872,10 @@ class Store:
             return {"memories": page, "capped": len(page) < len(out[:limit])}
         return out[:limit]
 
+    def memory_count(self):
+        """Active (not superseded) memories in this home, any subject: what an unfiltered memory_search ranges over."""
+        return sum(1 for memory in self._all("memories") if not memory.get("superseded_by"))
+
     MEMORY_INDEX_LIMIT = 300
     MEMORY_INDEX_BYTES = 24 * 1024
     MEMORY_GIST = 80

@@ -42,6 +42,10 @@ sentences, plain words, no lists or markdown. Say what you know from your record
 - Heard text from the room is unidentified speech, not a verified person.
 """
 
+# #97: one line after the brief, in the employee's own session prompt only, never the persona or `ready`. The trials
+# tested both sentences together; a bare count was not tested.
+MEMORY_LINE = ("\n\n# Your durable memory\nThis home holds %(n)d active memories, counted when this session process "
+               "started. None of them is shown in this brief; memory_search reads them.")
 TAIL_LINES = 40     # journal lines a restarted session is given (§4: a restart must not lose the thread)
 TAIL_TEXT = 400     # characters per tail line
 
@@ -117,12 +121,20 @@ class MeetingSession:
             run = store._find("runs", self.run_id)
         return recorded_profile(run)  # no run row (a bare session in tests): read now; row without the key: refuse
 
+    def memory_line(self):
+        """#97: how many active memories this home holds, read at each process start (so a cancel restart re-reads
+        it). Counts every memory an unfiltered memory_search can return; no memory text, ID or subject."""
+        from .store import Store
+        with Store(self.home) as store:
+            return MEMORY_LINE % dict(n=store.memory_count())
+
     def command(self):
         base = ClaudeBrain(self.home, executable=self.executable, model=self.model, budget=self.budget)
         profile = self.recorded_profile()
         command = base.command(self.run_id, profile=profile)
         swap = {"--output-format": ["stream-json", "--verbose", "--input-format", "stream-json"],
-                "--system-prompt": [system_prompt(self.home, profile) + MEETING_BLOCK + "\n# Brief\n" + (self.brief or "")],
+                "--system-prompt": [system_prompt(self.home, profile) + MEETING_BLOCK + "\n# Brief\n" + (self.brief or "")
+                                    + self.memory_line()],
                 "--tools": [""],
                 "--allowedTools": [",".join("mcp__synthetics__" + n for n in sorted(floortools.MEETING_TOOLS))]}
         out, i = [], 0
